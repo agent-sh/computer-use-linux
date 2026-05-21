@@ -134,6 +134,23 @@ jobs:
           "$prefix/bin/computer-use-linux" --help
       - run: npm pack --dry-run
 
+  zod-schema:
+    name: zod MCP schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - run: cargo build --locked
+      - name: Install MCP SDK for the zod check
+        run: npm install --prefix scripts/zod-check --no-audit --no-fund
+      - name: Validate tools/list against the MCP SDK zod schema
+        run: node scripts/zod-check/check.mjs --command target/debug/computer-use-linux
+
   release-binary:
     name: release artifact (${{ matrix.target }})
     needs:
@@ -146,6 +163,7 @@ jobs:
       - mcp-safety
       - agent-config
       - npm-wrapper
+      - zod-schema
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -266,3 +284,56 @@ jobs:
           else
             npm publish --access public
           fi
+
+  validate-published:
+    name: zod schema (published npm)
+    needs: [publish-npm]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Install the published package
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          test "v$version" = "$GITHUB_REF_NAME"
+          npm install --prefix "$RUNNER_TEMP/published" -g "${name}@${version}"
+      - name: Install MCP SDK for the zod check
+        run: npm install --prefix scripts/zod-check --no-audit --no-fund
+      - name: Validate the published tools/list against the MCP SDK zod schema
+        run: node scripts/zod-check/check.mjs --command "$RUNNER_TEMP/published/bin/computer-use-linux"
+
+  notify-codex-desktop:
+    name: open codex-desktop update reminder
+    needs: [publish-crate, publish-npm]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Open reminder issue to sync codex-desktop-linux
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          title="Sync codex-desktop-linux with ${VERSION} release content"
+          existing="$(gh issue list --state all --search "in:title $title" --json title,number \
+            --jq ".[] | select(.title == \"$title\") | .number" | head -n1)"
+          if [ -n "$existing" ]; then
+            echo "reminder issue #$existing already exists; skipping"
+            exit 0
+          fi
+          notes="$(awk -v ver="${VERSION#v}" '
+            $0 ~ "^## \\[" ver "\\]" { capture = 1; next }
+            capture && /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md)"
+          [ -z "$notes" ] && notes="(no CHANGELOG section found for ${VERSION})"
+          body="$(printf '%s released. Update [codex-desktop-linux](https://github.com/avifenesh/codex-desktop-linux) to pin/ship this version and mirror the relevant changes.\n\n## %s changelog\n%s\n\n---\n_Opened automatically by the release workflow._' "${VERSION}" "${VERSION}" "${notes}")"
+          gh issue create --title "$title" --body "$body"

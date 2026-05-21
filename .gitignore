@@ -23,6 +23,9 @@ Cargo.lock.bak
 /tmp-screenshots/
 dist/
 
+# node deps (zod schema check is CI-only, deps installed on demand)
+node_modules/
+
 # npm wrapper postinstall artifacts from local smoke tests
 /npm/bin/computer-use-linux-linux-*
 /npm/bin/computer-use-linux-darwin-*

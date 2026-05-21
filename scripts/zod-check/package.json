@@ -1,0 +1,10 @@
+{
+  "name": "computer-use-linux-zod-check",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "CI-only regression guard for issue #1: parse the MCP tools/list response with @modelcontextprotocol/sdk's zod schemas, the exact validation that rejects boolean outputSchema nodes in strict clients.",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1"
+  }
+}
