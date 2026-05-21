@@ -18,7 +18,7 @@ import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js';
 function parseArgs(argv) {
   const args = { command: 'target/debug/computer-use-linux' };
   for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === '--command') {
+    if (argv[i] === '--command' && argv[i + 1]) {
       args.command = argv[i + 1];
       i += 1;
     }
@@ -29,6 +29,7 @@ function parseArgs(argv) {
 const { command } = parseArgs(process.argv.slice(2));
 
 const child = spawn(command, ['mcp'], { stdio: ['pipe', 'pipe', 'inherit'] });
+child.stdout.setEncoding('utf8');
 
 function done(code, message) {
   if (message) {
@@ -46,7 +47,7 @@ const pending = new Map();
 let buffer = '';
 
 child.stdout.on('data', (chunk) => {
-  buffer += chunk.toString('utf8');
+  buffer += chunk;
   let newline = buffer.indexOf('\n');
   while (newline >= 0) {
     const line = buffer.slice(0, newline).trim();
