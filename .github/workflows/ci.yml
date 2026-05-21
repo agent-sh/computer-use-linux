@@ -147,7 +147,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - run: cargo build --locked
       - name: Install MCP SDK for the zod check
-        run: npm install --prefix scripts/zod-check --no-audit --no-fund
+        run: npm ci --prefix scripts/zod-check --ignore-scripts --no-audit --no-fund
       - name: Validate tools/list against the MCP SDK zod schema
         run: node scripts/zod-check/check.mjs --command target/debug/computer-use-linux
 
@@ -303,7 +303,7 @@ jobs:
           test "v$version" = "$GITHUB_REF_NAME"
           npm install --prefix "$RUNNER_TEMP/published" -g "${name}@${version}"
       - name: Install MCP SDK for the zod check
-        run: npm install --prefix scripts/zod-check --no-audit --no-fund
+        run: npm ci --prefix scripts/zod-check --ignore-scripts --no-audit --no-fund
       - name: Validate the published tools/list against the MCP SDK zod schema
         run: node scripts/zod-check/check.mjs --command "$RUNNER_TEMP/published/bin/computer-use-linux"
 

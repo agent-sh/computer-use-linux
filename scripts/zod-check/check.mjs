@@ -107,6 +107,7 @@ try {
     console.error('[zod-schema] ZodError validating tools/list (strict MCP clients would reject this):');
     console.error(JSON.stringify(error.issues, null, 2));
     done(1);
+  } else {
+    done(1, `[zod-schema] ${error && error.message ? error.message : error}`);
   }
-  done(1, `[zod-schema] ${error && error.message ? error.message : error}`);
 }
