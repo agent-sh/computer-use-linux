@@ -10,10 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.3] - 2026-05-22
 
 ### Added
-- A `sync reminder` CI workflow that opens (or updates) an issue when a merge to
-  `main` touches the crate sources (`src/**`, `Cargo.toml`,
-  `gnome-shell-extension/**`), so the change can be propagated into the
-  `codex-desktop-linux` embedded copy with its codex naming re-applied.
+- A `sync reminder` CI workflow (`.github/workflows/sync-reminder.yml`) that
+  opens (or updates) a `codex-sync`-labeled issue when a merge to `main` touches
+  the crate sources (`src/**`, `Cargo.toml`, `gnome-shell-extension/**`), so the
+  change can be propagated into the `codex-desktop-linux` embedded copy with its
+  codex naming re-applied.
 
 ### Changed
 - Bumped to establish version-enumeration parity with the `codex-desktop-linux`
