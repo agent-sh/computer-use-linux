@@ -86,7 +86,6 @@ READ_ONLY_TOOLS = {
     "get_app_state",
     "list_windows",
     "focused_window",
-    "screenshot",
 }
 
 DESTRUCTIVE_MUTATING_TOOLS = {
@@ -110,7 +109,6 @@ OPEN_WORLD_TOOLS = EXPECTED_TOOLS - {
     "doctor",
     "setup_accessibility",
     "setup_window_targeting",
-    "screenshot",
 }
 
 
