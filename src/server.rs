@@ -314,10 +314,10 @@ impl ComputerUseLinux {
         name = "screenshot",
         description = "Capture the screen and return it as a viewable image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped to just that window, so you see the app on its own rather than the whole desktop. Returns the PNG image plus a short caption (dimensions, source, and crop bounds).",
         annotations(
-            read_only_hint = true,
+            read_only_hint = false,
             destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
+            idempotent_hint = false,
+            open_world_hint = true
         )
     )]
     async fn screenshot(
