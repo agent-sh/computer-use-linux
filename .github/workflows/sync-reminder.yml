@@ -1,0 +1,76 @@
+name: sync reminder
+
+# When a merge to main touches the Computer Use crate sources, open (or update)
+# an issue so the change can be propagated to the codex-desktop-linux embedded
+# copy (vendored under computer-use-linux/). Version-number parity between the
+# two crates is the coordination signal; this makes the reminder explicit so the
+# numbers do not silently drift apart.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'gnome-shell-extension/**'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  remind:
+    name: open sync reminder
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const label = 'codex-sync';
+            const otherRepo = 'codex-desktop-linux (computer-use-linux/)';
+            const compare = context.payload.compare || '';
+            const sha = context.sha.slice(0, 8);
+            const body = [
+              'A merge to `main` touched the Computer Use crate sources.',
+              '',
+              `Propagate the change into **${otherRepo}**, the vendored embedded copy.`,
+              'Re-apply the codex naming there — that copy keeps `codex-*` /',
+              '`CODEX_COMPUTER_USE_*` names, `com.openai.Codex.*` DBus interfaces,',
+              '`identity.rs`, and the chrome-extension host. Merge, do not overwrite.',
+              '',
+              `- Compare: ${compare || sha}`,
+              `- Triggering commit: ${context.sha}`,
+              '',
+              'Once synced, bump both crates to the same enumeration. A version mismatch',
+              'between this crate and the embedded one means a sync is still pending.',
+            ].join('\n');
+            try {
+              await github.rest.issues.getLabel({ ...context.repo, name: label });
+            } catch (e) {
+              await github.rest.issues.createLabel({
+                ...context.repo,
+                name: label,
+                color: 'fbca04',
+                description: 'Pending sync to the codex-desktop-linux embedded copy',
+              });
+            }
+            const existing = await github.rest.issues.listForRepo({
+              ...context.repo,
+              state: 'open',
+              labels: label,
+              per_page: 1,
+            });
+            if (existing.data.length > 0) {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: existing.data[0].number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                ...context.repo,
+                title: 'Sync Computer Use → codex-desktop-linux embedded copy',
+                labels: [label],
+                body,
+              });
+            }
