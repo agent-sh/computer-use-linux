@@ -444,25 +444,28 @@ run_doctor() {
 
     if command -v jq >/dev/null 2>&1 && printf '%s' "${out}" | jq -e . >/dev/null 2>&1; then
         local blockers
-        blockers="$(printf '%s' "${out}" | jq -r '.readiness.blockers | length')"
+        blockers="$(printf '%s' "${out}" | jq -r '.readiness.blockers | if type == "array" then length else -1 end')"
         printf '%s\n' "${out}" | jq -r '
             .readiness as $r |
-            "ready: \((($r.blockers | length) == 0) | tostring)\n" +
+            "ready: \($r.blockers | type == "array" and length == 0)\n" +
             ((($r.blockers // []) | map("  - \(.)") | join("\n")))
         '
         if [[ "${blockers}" -eq 0 ]]; then
             log_ok "doctor reports ready"
+        elif [[ "${blockers}" -eq -1 ]]; then
+            log_fail "doctor output missing blockers field — unexpected JSON structure"
+            return 1
         else
             log_fail "doctor reports NOT ready"
             while IFS= read -r line; do
                 FAILED_CHECKS+=("${line}")
-            done < <(printf '%s' "${out}" | jq -r '.readiness.blockers[]')
+            done < <(printf '%s' "${out}" | jq -r '.readiness.blockers[]?')
             return 1
         fi
     else
         # Raw fallback.
         printf '%s\n' "${out}"
-        if printf '%s' "${out}" | grep -qiE '"ready"[[:space:]]*:[[:space:]]*true|ready: true'; then
+        if printf '%s' "${out}" | grep -qiE '"blockers"[[:space:]]*:[[:space:]]*\[\]'; then
             log_ok "doctor reports ready (raw)"
         else
             log_fail "doctor did not report ready (install jq for a structured summary)"
