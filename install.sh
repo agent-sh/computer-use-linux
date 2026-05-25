@@ -443,20 +443,20 @@ run_doctor() {
     fi
 
     if command -v jq >/dev/null 2>&1 && printf '%s' "${out}" | jq -e . >/dev/null 2>&1; then
-        local ready
-        ready="$(printf '%s' "${out}" | jq -r '.readiness.ready // false')"
+        local blockers
+        blockers="$(printf '%s' "${out}" | jq -r '.readiness.blockers | length')"
         printf '%s\n' "${out}" | jq -r '
             .readiness as $r |
-            "ready: \($r.ready)\n" +
-            ((($r.checks // []) | map("  - \(.name): \(.status)\(if .detail then " (\(.detail))" else "" end)") | join("\n")))
+            "ready: \((($r.blockers | length) == 0) | tostring)\n" +
+            ((($r.blockers // []) | map("  - \(.)") | join("\n")))
         '
-        if [[ "${ready}" == "true" ]]; then
+        if [[ "${blockers}" -eq 0 ]]; then
             log_ok "doctor reports ready"
         else
             log_fail "doctor reports NOT ready"
             while IFS= read -r line; do
                 FAILED_CHECKS+=("${line}")
-            done < <(printf '%s' "${out}" | jq -r '.readiness.checks[]? | select(.status != "ok") | "\(.name): \(.detail // .status)"')
+            done < <(printf '%s' "${out}" | jq -r '.readiness.blockers[]')
             return 1
         fi
     else
