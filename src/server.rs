@@ -376,9 +376,13 @@ impl ComputerUseLinux {
 
     /// Lazily create the uinput absolute pointer, sizing its ABS range to the
     /// logical desktop (the portal screenshot dimensions). Returns `false` if it
-    /// can't be created or is disabled via `CU_DISABLE_ABS_POINTER`.
+    /// can't be created or is disabled via `CU_DISABLE_ABS_POINTER` (or the
+    /// Codex embedded-build alias).
     async fn ensure_abs_pointer(&self) -> bool {
-        if env_flag_enabled("CU_DISABLE_ABS_POINTER") {
+        if env_flag_enabled_any(&[
+            "CU_DISABLE_ABS_POINTER",
+            "CODEX_COMPUTER_USE_DISABLE_ABS_POINTER",
+        ]) {
             return false;
         }
         if self
@@ -1477,33 +1481,46 @@ impl ComputerUseLinux {
     // grants (`org.freedesktop.portal.Error: Remote desktop sessions cannot
     // persist`), so the portal would otherwise re-prompt on every new session.
     // `COMPUTER_USE_LINUX_FORCE_YDOTOOL_*=1` always uses ydotool;
-    // `COMPUTER_USE_LINUX_FORCE_PORTAL_*=1` always uses the portal.
+    // `COMPUTER_USE_LINUX_FORCE_PORTAL_*=1` always uses the portal. The
+    // `CODEX_COMPUTER_USE_*` names are accepted for the embedded Codex app
+    // bundle so downstream can share this source without local string patches.
     fn should_prefer_portal_pointer_backend(&self) -> bool {
-        if env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER") {
+        if env_flag_enabled_any(&[
+            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER",
+            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_POINTER",
+        ]) {
             return false;
         }
-        if env_flag_enabled("COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER") {
+        if env_flag_enabled_any(&[
+            "COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER",
+            "CODEX_COMPUTER_USE_FORCE_PORTAL_POINTER",
+        ]) {
             return self.is_wayland_session();
         }
         self.is_wayland_session() && ydotool_socket().is_none()
     }
 
     fn should_prefer_portal_keyboard_backend(&self) -> bool {
-        if env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD") {
+        if env_flag_enabled_any(&[
+            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
+            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
+        ]) {
             return false;
         }
-        if env_flag_enabled("COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD") {
+        if env_flag_enabled_any(&[
+            "COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD",
+            "CODEX_COMPUTER_USE_FORCE_PORTAL_KEYBOARD",
+        ]) {
             return self.is_wayland_session() && !self.is_kde_wayland_session();
         }
         self.is_wayland_session() && !self.is_kde_wayland_session() && ydotool_socket().is_none()
     }
 
     fn should_prefer_kde_clipboard_text_backend(&self) -> bool {
-        env::var("COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD")
-            .ok()
-            .as_deref()
-            != Some("1")
-            && self.is_kde_wayland_session()
+        !env_flag_enabled_any(&[
+            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
+            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
+        ]) && self.is_kde_wayland_session()
     }
 
     fn is_kde_wayland_session(&self) -> bool {
@@ -1554,11 +1571,10 @@ impl ComputerUseLinux {
     }
 
     async fn ensure_portal_keyboard_session(&self) -> Result<Option<PortalKeyboardSession>> {
-        if env::var("COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD")
-            .ok()
-            .as_deref()
-            == Some("1")
-            || !self.is_wayland_session()
+        if env_flag_enabled_any(&[
+            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
+            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
+        ]) || !self.is_wayland_session()
         {
             return Ok(None);
         }
@@ -2240,6 +2256,10 @@ fn env_contains(key: &str, needle: &str) -> bool {
 /// True when an environment variable is set to `"1"` (an explicit on switch).
 fn env_flag_enabled(key: &str) -> bool {
     env::var(key).ok().as_deref() == Some("1")
+}
+
+fn env_flag_enabled_any(keys: &[&str]) -> bool {
+    keys.iter().any(|key| env_flag_enabled(key))
 }
 
 /// Decode the base64 payload of a `data:` URL (or a bare base64 string) to bytes.

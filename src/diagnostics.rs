@@ -8,7 +8,10 @@ use std::{
     collections::{BTreeMap, HashMap},
     env, fs,
     fs::OpenOptions,
-    os::unix::net::{UnixDatagram, UnixStream},
+    os::unix::{
+        fs::MetadataExt,
+        net::{UnixDatagram, UnixStream},
+    },
     path::{Path, PathBuf},
     process::Command,
 };
@@ -18,6 +21,7 @@ const DESKTOP_ENV_KEYS: &[&str] = &[
     "DESKTOP_SESSION",
     "DISPLAY",
     "HYPRLAND_INSTANCE_SIGNATURE",
+    "XAUTHORITY",
     "YDOTOOL_SOCKET",
     "XDG_SESSION_DESKTOP",
     "WAYLAND_DISPLAY",
@@ -72,6 +76,7 @@ pub struct PlatformReport {
     pub xdg_current_desktop: Option<String>,
     pub wayland_display: Option<String>,
     pub display: Option<String>,
+    pub xauthority: Option<String>,
     pub dbus_session_bus_address: Option<String>,
     pub xdg_runtime_dir: Option<String>,
     pub gnome_shell_version: Check,
@@ -170,7 +175,7 @@ pub fn doctor_report() -> DoctorReport {
     let accessibility = accessibility_report();
     let windowing = windowing_report(&platform);
     let input = input_report();
-    let readiness = readiness_report(&platform, &accessibility, &windowing, &input);
+    let readiness = readiness_report(&platform, &portals, &accessibility, &windowing, &input);
 
     let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
 
@@ -346,6 +351,7 @@ fn hydrate_desktop_env_from_map(process_env: &HashMap<String, String>) {
 
 fn desktop_process_environments() -> Vec<HashMap<String, String>> {
     let mut environments = Vec::new();
+    let mut visited_pids = Vec::new();
     let mut pid = parent_pid("self");
 
     for _ in 0..8 {
@@ -356,10 +362,18 @@ fn desktop_process_environments() -> Vec<HashMap<String, String>> {
             break;
         }
 
+        visited_pids.push(current_pid);
         if let Some(process_env) = read_process_environ(current_pid) {
             environments.push(process_env);
         }
         pid = parent_pid(&current_pid.to_string());
+    }
+
+    if !visited_pids.contains(&1) && process_owner_matches_current_user(1) {
+        if let Some(process_env) = read_process_environ(1).filter(process_env_has_graphical_display)
+        {
+            environments.push(process_env);
+        }
     }
 
     environments
@@ -380,6 +394,22 @@ fn parse_parent_pid(status: &str) -> Option<u32> {
 fn read_process_environ(pid: u32) -> Option<HashMap<String, String>> {
     let bytes = fs::read(format!("/proc/{pid}/environ")).ok()?;
     Some(parse_environ(&bytes))
+}
+
+fn process_owner_matches_current_user(pid: u32) -> bool {
+    let Some(current_uid) = user_id().and_then(|uid| uid.parse::<u32>().ok()) else {
+        return false;
+    };
+    fs::metadata(format!("/proc/{pid}"))
+        .ok()
+        .is_some_and(|metadata| metadata.uid() == current_uid)
+}
+
+fn process_env_has_graphical_display(process_env: &HashMap<String, String>) -> bool {
+    process_env
+        .get("DISPLAY")
+        .or_else(|| process_env.get("WAYLAND_DISPLAY"))
+        .is_some_and(|value| !value.trim().is_empty())
 }
 
 fn parse_environ(bytes: &[u8]) -> HashMap<String, String> {
@@ -485,6 +515,7 @@ fn platform_report() -> PlatformReport {
         xdg_current_desktop: env_var("XDG_CURRENT_DESKTOP"),
         wayland_display: env_var("WAYLAND_DISPLAY"),
         display: env_var("DISPLAY"),
+        xauthority: env_var("XAUTHORITY"),
         dbus_session_bus_address: dbus_session_address(),
         xdg_runtime_dir: xdg_runtime_dir().map(|path| path.display().to_string()),
         gnome_shell_version: command_check("gnome-shell", &["--version"]),
@@ -588,6 +619,7 @@ fn input_report() -> InputReport {
 
 fn readiness_report(
     platform: &PlatformReport,
+    portals: &PortalReport,
     accessibility: &AccessibilityReport,
     windowing: &WindowingReport,
     input: &InputReport,
@@ -597,8 +629,7 @@ fn readiness_report(
     let can_query_windows = windowing.can_list_windows;
     let can_focus_apps = windowing.can_focus_apps;
     let can_focus_windows = windowing.can_focus_windows;
-    let can_send_development_input =
-        input.ydotool.ok && input.ydotoold.ok && input.ydotool_socket.ok;
+    let can_send_development_input = can_send_development_input(portals, input);
 
     if !can_build_accessibility_tree {
         blockers.push(
@@ -625,7 +656,7 @@ fn readiness_report(
 
     if !can_send_development_input {
         blockers.push(
-            "Development input fallback is unavailable; ydotool needs a running ydotoold daemon with a connectable ydotoold socket."
+            "Development input is unavailable; enable read/write /dev/uinput, XDG RemoteDesktop portal input, or ydotool with a connectable ydotoold socket."
                 .to_string(),
         );
     }
@@ -645,10 +676,10 @@ fn readiness_report(
     } else if !can_focus_windows {
         "Enable an exact-focus window backend before using window_id, title, or terminal-targeted input.".to_string()
     } else if !can_send_development_input {
-        "Fix ydotool input access: start ydotoold with a socket accessible to this desktop user."
+        "Enable a supported input backend: grant read/write /dev/uinput, enable the XDG RemoteDesktop portal, or start ydotoold with a socket accessible to this desktop user."
             .to_string()
     } else {
-        "Computer Use is ready: AT-SPI tree support, window targeting, and ydotool input fallback are available."
+        "Computer Use is ready: AT-SPI tree support, window targeting, and a Linux input backend are available."
             .to_string()
     };
 
@@ -662,6 +693,12 @@ fn readiness_report(
         recommended_next_step,
         blockers,
     }
+}
+
+fn can_send_development_input(portals: &PortalReport, input: &InputReport) -> bool {
+    input.uinput.ok
+        || portals.remote_desktop.ok
+        || input.ydotool.ok && input.ydotoold.ok && input.ydotool_socket.ok
 }
 
 fn is_cosmic_wayland_platform(platform: &PlatformReport) -> bool {
@@ -928,9 +965,22 @@ mod tests {
             xdg_current_desktop: Some("GNOME".to_string()),
             wayland_display: Some("wayland-0".to_string()),
             display: Some(":0".to_string()),
+            xauthority: Some("/run/user/1000/Xauthority".to_string()),
             dbus_session_bus_address: Some("unix:path=/run/user/1000/bus".to_string()),
             xdg_runtime_dir: Some("/run/user/1000".to_string()),
             gnome_shell_version: Check::ok("GNOME Shell 46.0"),
+        }
+    }
+
+    fn portal_report(remote_desktop: Check) -> PortalReport {
+        PortalReport {
+            desktop_portal: Check::ok("ok"),
+            remote_desktop,
+            screencast: Check::fail("missing"),
+            screenshot: Check::fail("missing"),
+            input_capture: Check::fail("missing"),
+            mutter_remote_desktop: Check::fail("missing"),
+            mutter_screencast: Check::fail("missing"),
         }
     }
 
@@ -1032,6 +1082,23 @@ mod tests {
     }
 
     #[test]
+    fn desktop_env_hydration_includes_xauthority() {
+        assert!(DESKTOP_ENV_KEYS.contains(&"XAUTHORITY"));
+    }
+
+    #[test]
+    fn graphical_process_env_requires_display() {
+        let with_display = HashMap::from([("DISPLAY".to_string(), ":0".to_string())]);
+        let with_wayland =
+            HashMap::from([("WAYLAND_DISPLAY".to_string(), "wayland-0".to_string())]);
+        let without_display = HashMap::from([("XAUTHORITY".to_string(), "/tmp/xauth".to_string())]);
+
+        assert!(process_env_has_graphical_display(&with_display));
+        assert!(process_env_has_graphical_display(&with_wayland));
+        assert!(!process_env_has_graphical_display(&without_display));
+    }
+
+    #[test]
     fn parses_systemd_show_environment_output() {
         let environment = parse_line_environment(
             b"DISPLAY=:0\nHYPRLAND_INSTANCE_SIGNATURE=abc\nNO_EQUALS\nYDOTOOL_SOCKET=/run/ydotoold/socket\n",
@@ -1058,7 +1125,13 @@ mod tests {
         let windowing = windowing_report(true, false);
         let input = input_report(true);
 
-        let readiness = readiness_report(&platform, &accessibility, &windowing, &input);
+        let readiness = readiness_report(
+            &platform,
+            &portal_report(Check::fail("missing")),
+            &accessibility,
+            &windowing,
+            &input,
+        );
 
         assert!(readiness.can_query_windows);
         assert!(!readiness.can_focus_windows);
@@ -1082,7 +1155,13 @@ mod tests {
         windowing.can_focus_windows = true;
         let input = input_report(true);
 
-        let readiness = readiness_report(&platform, &accessibility, &windowing, &input);
+        let readiness = readiness_report(
+            &platform,
+            &portal_report(Check::fail("missing")),
+            &accessibility,
+            &windowing,
+            &input,
+        );
 
         assert!(readiness.can_query_windows);
         assert!(readiness.can_focus_apps);
@@ -1097,7 +1176,13 @@ mod tests {
         let windowing = windowing_report(true, true);
         let input = input_report(true);
 
-        let readiness = readiness_report(&platform, &accessibility, &windowing, &input);
+        let readiness = readiness_report(
+            &platform,
+            &portal_report(Check::fail("missing")),
+            &accessibility,
+            &windowing,
+            &input,
+        );
 
         assert!(readiness.blockers.is_empty());
         assert!(readiness
@@ -1121,14 +1206,20 @@ mod tests {
             Check::fail("/dev/uinput: Permission denied"),
         );
 
-        let readiness = readiness_report(&platform, &accessibility, &windowing, &input);
+        let readiness = readiness_report(
+            &platform,
+            &portal_report(Check::fail("missing")),
+            &accessibility,
+            &windowing,
+            &input,
+        );
 
         assert!(readiness.can_send_development_input);
         assert!(readiness.blockers.is_empty());
     }
 
     #[test]
-    fn readiness_rejects_direct_uinput_without_connectable_ydotool_socket() {
+    fn readiness_accepts_direct_uinput_without_connectable_ydotool_socket() {
         let platform = platform_report();
         let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
         let windowing = windowing_report(true, true);
@@ -1139,13 +1230,40 @@ mod tests {
             Check::ok("read/write: /dev/uinput"),
         );
 
-        let readiness = readiness_report(&platform, &accessibility, &windowing, &input);
+        let readiness = readiness_report(
+            &platform,
+            &portal_report(Check::fail("missing")),
+            &accessibility,
+            &windowing,
+            &input,
+        );
 
-        assert!(!readiness.can_send_development_input);
-        assert!(readiness
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("connectable ydotoold socket")));
+        assert!(readiness.can_send_development_input);
+        assert!(readiness.blockers.is_empty());
+    }
+
+    #[test]
+    fn readiness_accepts_remote_desktop_portal_without_local_input_backend() {
+        let platform = platform_report();
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let input = input_report_parts(
+            Check::fail("missing ydotool"),
+            Check::fail("ydotoold not running"),
+            Check::fail("no connectable ydotool socket"),
+            Check::fail("/dev/uinput: Permission denied"),
+        );
+
+        let readiness = readiness_report(
+            &platform,
+            &portal_report(Check::ok("org.freedesktop.portal.RemoteDesktop")),
+            &accessibility,
+            &windowing,
+            &input,
+        );
+
+        assert!(readiness.can_send_development_input);
+        assert!(readiness.blockers.is_empty());
     }
 
     #[test]
@@ -1160,16 +1278,22 @@ mod tests {
             Check::fail("/dev/uinput: Permission denied"),
         );
 
-        let readiness = readiness_report(&platform, &accessibility, &windowing, &input);
+        let readiness = readiness_report(
+            &platform,
+            &portal_report(Check::fail("missing")),
+            &accessibility,
+            &windowing,
+            &input,
+        );
 
         assert!(!readiness.can_send_development_input);
         assert!(readiness
             .recommended_next_step
-            .contains("Fix ydotool input access"));
+            .contains("Enable a supported input backend"));
         assert!(readiness
             .blockers
             .iter()
-            .any(|blocker| blocker.contains("connectable ydotoold socket")));
+            .any(|blocker| blocker.contains("Development input is unavailable")));
     }
 
     #[test]
@@ -1218,7 +1342,13 @@ mod tests {
         let windowing = windowing_report(false, false);
         let input = input_report(true);
 
-        let readiness = readiness_report(&platform, &accessibility, &windowing, &input);
+        let readiness = readiness_report(
+            &platform,
+            &portal_report(Check::fail("missing")),
+            &accessibility,
+            &windowing,
+            &input,
+        );
 
         assert!(readiness
             .blockers

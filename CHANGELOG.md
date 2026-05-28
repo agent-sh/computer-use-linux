@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added build-time GNOME extension / DBus identity overrides (`CUL_*`) so the
+  `codex-desktop-linux` embedded copy can share this source while keeping its
+  Codex extension identity, plus runtime `CODEX_COMPUTER_USE_*` aliases for the
+  embedded input/backend knobs.
+
+### Fixed
+- Ported downstream Linux readiness fixes: `doctor` now treats direct
+  `/dev/uinput` and the XDG RemoteDesktop portal as valid development-input
+  backends instead of requiring `ydotoold` in every ready setup.
+- Ported downstream session hydration fixes for X11 launches by carrying
+  `XAUTHORITY` through environment hydration and checking the same-user namespace
+  init process when it owns the graphical session environment.
+
 ## [0.2.4] - 2026-05-25
 
 Primarily a documentation release that refreshes the crates.io and npm README

@@ -1,4 +1,5 @@
 use crate::diagnostics::hydrate_session_bus_env;
+use crate::identity;
 use crate::terminal::enrich_terminal_windows;
 use crate::windowing::registry::BackendProbe;
 use crate::windowing::types::{WindowBounds, WindowInfo};
@@ -9,14 +10,15 @@ use zbus::{zvariant::OwnedValue, Proxy};
 
 pub const GNOME_SHELL_INTROSPECT_BACKEND: &str = "gnome-shell-introspect";
 pub const GNOME_SHELL_EXTENSION_BACKEND: &str = "gnome-shell-extension";
-pub const GNOME_SHELL_EXTENSION_SERVICE: &str = "dev.avifenesh.ComputerUseLinux.WindowControl";
-pub const GNOME_SHELL_EXTENSION_OBJECT_PATH: &str = "/dev/avifenesh/ComputerUseLinux/WindowControl";
+pub const GNOME_SHELL_EXTENSION_SERVICE: &str = identity::DBUS_SERVICE;
+pub const GNOME_SHELL_EXTENSION_OBJECT_PATH: &str = identity::DBUS_OBJECT_PATH;
 
 pub fn probe_extension() -> BackendProbe {
+    let method = format!("{GNOME_SHELL_EXTENSION_SERVICE}.ListWindows");
     let check = gdbus_call_check(
-        "dev.avifenesh.ComputerUseLinux.WindowControl",
-        "/dev/avifenesh/ComputerUseLinux/WindowControl",
-        "dev.avifenesh.ComputerUseLinux.WindowControl.ListWindows",
+        GNOME_SHELL_EXTENSION_SERVICE,
+        GNOME_SHELL_EXTENSION_OBJECT_PATH,
+        &method,
         &[],
     );
     BackendProbe {
