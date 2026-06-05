@@ -11,7 +11,10 @@ use crate::remote_desktop::{
     type_text_with_keysyms, PointerButton, PortalKeyboardSession, PortalPointerSession,
     ScrollDirection,
 };
-use crate::screenshot::{capture_screenshot, ScreenshotCapture};
+use crate::screenshot::{
+    capture_screenshot_raw, prepare_screenshot_payload, RawScreenshotCapture, ScreenshotCapture,
+    ScreenshotOutputFormat, ScreenshotPayloadOptions,
+};
 use crate::windowing::registry;
 use crate::windows::{
     focus_window_target, focused_window, list_windows, resolve_window_target,
@@ -211,7 +214,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "get_app_state",
-        description = "Start an app use session if needed, then get screenshot and accessibility state for a Linux app.",
+        description = "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -229,11 +232,15 @@ impl ComputerUseLinux {
         let max_nodes = params.max_nodes.unwrap_or(120).clamp(1, 500);
         let max_depth = params.max_depth.unwrap_or(12).min(12);
         let include_screenshot = params.include_screenshot.unwrap_or(true);
+        let screenshot_options = params.screenshot_options();
         let app_filter = self
             .resolve_accessibility_app_filter(&params, window_context.as_ref())
             .await;
         let (screenshot, screenshot_error) = if include_screenshot {
-            match capture_screenshot().await {
+            match capture_screenshot_raw()
+                .await
+                .and_then(|raw| prepare_screenshot_payload(raw, screenshot_options))
+            {
                 Ok(capture) => (Some(capture), None),
                 Err(error) => (None, Some(error.to_string())),
             }
@@ -312,7 +319,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "screenshot",
-        description = "Capture the screen and return it as a viewable image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped to just that window, so you see the app on its own rather than the whole desktop. Returns the PNG image plus a short caption (dimensions, source, and crop bounds).",
+        description = "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize. Returns the image plus a short caption with returned dimensions, coordinate dimensions, scale, format, quality, source, and crop bounds; callers can request jpeg/quality for compression before resizing.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -345,31 +352,50 @@ impl ComputerUseLinux {
             }
         }
 
-        let capture = capture_screenshot()
+        let raw_capture = capture_screenshot_raw()
             .await
             .map_err(|e| ErrorData::internal_error(format!("screenshot failed: {e}"), None))?;
-        let raw =
-            decode_data_url(&capture.data_url).map_err(|e| ErrorData::internal_error(e, None))?;
 
-        let (png, width, height, cropped) = match crop.as_ref().and_then(window_crop_rect) {
-            Some((x, y, w, h)) => match crop_png(&raw, x, y, w, h) {
-                Ok((bytes, cw, ch)) => (bytes, cw, ch, true),
+        let (capture, cropped) = match crop.as_ref().and_then(window_crop_rect) {
+            Some((x, y, w, h)) => match crop_png(&raw_capture.bytes, x, y, w, h) {
+                Ok((bytes, cw, ch)) => (
+                    RawScreenshotCapture {
+                        mime_type: raw_capture.mime_type.clone(),
+                        bytes,
+                        source: raw_capture.source.clone(),
+                        width: cw,
+                        height: ch,
+                    },
+                    true,
+                ),
                 // If cropping fails, fall back to the full frame rather than erroring.
-                Err(_) => (raw, capture.width, capture.height, false),
+                Err(_) => (raw_capture, false),
             },
-            None => (raw, capture.width, capture.height, false),
+            None => (raw_capture, false),
         };
+        let capture =
+            prepare_screenshot_payload(capture, params.screenshot_options()).map_err(|e| {
+                ErrorData::internal_error(format!("screenshot resize failed: {e}"), None)
+            })?;
 
-        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png);
         let caption = serde_json::json!({
-            "width": width,
-            "height": height,
+            "width": capture.width,
+            "height": capture.height,
+            "coordinate_width": capture.coordinate_width,
+            "coordinate_height": capture.coordinate_height,
+            "scale": capture.scale,
+            "resized": capture.resized,
+            "bytes": capture.bytes,
+            "original_bytes": capture.original_bytes,
+            "max_bytes": capture.max_bytes,
+            "format": capture.format,
+            "quality": capture.quality,
             "source": capture.source,
             "cropped_to_window": cropped,
             "window_title": window_label,
         });
         Ok(CallToolResult::success(vec![
-            Content::image(b64, "image/png".to_string()),
+            Content::image(data_url_payload(&capture.data_url), capture.mime_type),
             Content::text(caption.to_string()),
         ]))
     }
@@ -393,7 +419,7 @@ impl ComputerUseLinux {
         {
             return true;
         }
-        let Ok(cap) = crate::screenshot::capture_screenshot().await else {
+        let Ok(cap) = capture_screenshot_raw().await else {
             return false;
         };
         match crate::abs_pointer::AbsPointer::create(cap.width as i32, cap.height as i32) {
@@ -428,7 +454,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "click",
-        description = "Click an element by index, semantic selector, or pixel coordinates from screenshot.",
+        description = "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1017,7 +1043,7 @@ impl ComputerUseLinux {
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
     version = "0.2.4",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified."
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified."
 )]
 impl ServerHandler for ComputerUseLinux {}
 
@@ -1145,6 +1171,25 @@ struct GetAppStateParams {
     max_depth: Option<u32>,
     #[serde(default)]
     include_screenshot: Option<bool>,
+    /// Maximum returned screenshot width in pixels (default 1920, hard-capped).
+    #[serde(default)]
+    max_width: Option<u32>,
+    /// Maximum returned screenshot height in pixels (default 1920, hard-capped).
+    #[serde(default)]
+    max_height: Option<u32>,
+    /// Maximum returned screenshot image bytes before base64 (default 2 MiB, hard-capped).
+    #[serde(default)]
+    max_bytes: Option<usize>,
+    /// Additional downscale factor from 0.0 to 1.0, applied before max dimensions.
+    #[serde(default)]
+    scale: Option<f32>,
+    /// Output image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads.
+    #[serde(default)]
+    format: Option<ScreenshotOutputFormat>,
+    /// JPEG quality from 1 to 95 (default 80). Ignored for png.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 95))]
+    quality: Option<u8>,
 }
 
 impl GetAppStateParams {
@@ -1159,6 +1204,17 @@ impl GetAppStateParams {
             app_id: self.app_id.clone(),
             wm_class: self.wm_class.clone(),
             title: self.title.clone(),
+        }
+    }
+
+    fn screenshot_options(&self) -> ScreenshotPayloadOptions {
+        ScreenshotPayloadOptions {
+            max_width: self.max_width,
+            max_height: self.max_height,
+            max_bytes: self.max_bytes,
+            scale: self.scale,
+            format: self.format,
+            quality: self.quality,
         }
     }
 }
@@ -1182,6 +1238,25 @@ struct ScreenshotParams {
     /// Capture the whole desktop even when a window is targeted (default false).
     #[serde(default)]
     full_screen: Option<bool>,
+    /// Maximum returned screenshot width in pixels (default 1920, hard-capped).
+    #[serde(default)]
+    max_width: Option<u32>,
+    /// Maximum returned screenshot height in pixels (default 1920, hard-capped).
+    #[serde(default)]
+    max_height: Option<u32>,
+    /// Maximum returned screenshot image bytes before base64 (default 2 MiB, hard-capped).
+    #[serde(default)]
+    max_bytes: Option<usize>,
+    /// Additional downscale factor from 0.0 to 1.0, applied before max dimensions.
+    #[serde(default)]
+    scale: Option<f32>,
+    /// Output image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads.
+    #[serde(default)]
+    format: Option<ScreenshotOutputFormat>,
+    /// JPEG quality from 1 to 95 (default 80). Ignored for png.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 95))]
+    quality: Option<u8>,
 }
 
 impl ScreenshotParams {
@@ -1205,6 +1280,17 @@ impl ScreenshotParams {
             wm_class: self.wm_class.clone(),
             title: self.title.clone(),
         })
+    }
+
+    fn screenshot_options(&self) -> ScreenshotPayloadOptions {
+        ScreenshotPayloadOptions {
+            max_width: self.max_width,
+            max_height: self.max_height,
+            max_bytes: self.max_bytes,
+            scale: self.scale,
+            format: self.format,
+            quality: self.quality,
+        }
     }
 }
 
@@ -2262,13 +2348,13 @@ fn env_flag_enabled_any(keys: &[&str]) -> bool {
     keys.iter().any(|key| env_flag_enabled(key))
 }
 
-/// Decode the base64 payload of a `data:` URL (or a bare base64 string) to bytes.
-fn decode_data_url(data_url: &str) -> std::result::Result<Vec<u8>, String> {
-    use base64::Engine;
-    let b64 = data_url.split_once(',').map(|(_, b)| b).unwrap_or(data_url);
-    base64::engine::general_purpose::STANDARD
-        .decode(b64)
-        .map_err(|e| format!("invalid screenshot base64: {e}"))
+/// Return the base64 payload of a `data:` URL (or the original string if bare).
+fn data_url_payload(data_url: &str) -> String {
+    data_url
+        .split_once(',')
+        .map(|(_, payload)| payload)
+        .unwrap_or(data_url)
+        .to_string()
 }
 
 /// Convert a window's bounds into a crop rectangle, if it has a usable origin
@@ -2852,6 +2938,43 @@ mod tests {
             description: "Clicks the element".to_string(),
             keybinding: String::new(),
         }
+    }
+
+    fn solid_png(width: u32, height: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(width, height, image::Rgba([32, 128, 192, 255]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn window_crop_happens_before_screenshot_payload_resize() {
+        let (cropped, width, height) = crop_png(&solid_png(400, 200), 50, 20, 200, 100).unwrap();
+        let capture = prepare_screenshot_payload(
+            RawScreenshotCapture {
+                mime_type: "image/png".to_string(),
+                bytes: cropped,
+                source: "test".to_string(),
+                width,
+                height,
+            },
+            ScreenshotPayloadOptions {
+                max_width: Some(100),
+                max_height: Some(100),
+                max_bytes: Some(1024 * 1024),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            (capture.coordinate_width, capture.coordinate_height),
+            (200, 100)
+        );
+        assert_eq!((capture.width, capture.height), (100, 50));
+        assert!(capture.resized);
     }
 
     fn window_info(

@@ -70,7 +70,7 @@ async fn main() -> Result<()> {
                 .nth(3)
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
-            let cap = screenshot::capture_screenshot().await?;
+            let cap = screenshot::capture_screenshot_raw().await?;
             eprintln!("desktop logical size: {}x{}", cap.width, cap.height);
             let mut p = abs_pointer::AbsPointer::create(cap.width as i32, cap.height as i32)?;
             p.click(x, y, abs_pointer::PointerButton::Left, 1)?;
@@ -87,6 +87,17 @@ async fn main() -> Result<()> {
                 serde_json::to_string_pretty(&serde_json::json!({
                     "mime_type": capture.mime_type,
                     "source": capture.source,
+                    "width": capture.width,
+                    "height": capture.height,
+                    "coordinate_width": capture.coordinate_width,
+                    "coordinate_height": capture.coordinate_height,
+                    "scale": capture.scale,
+                    "resized": capture.resized,
+                    "bytes": capture.bytes,
+                    "original_bytes": capture.original_bytes,
+                    "max_bytes": capture.max_bytes,
+                    "format": capture.format,
+                    "quality": capture.quality,
                     "data_url_length": capture.data_url.len()
                 }))
                 .context("failed to serialize screenshot report")?

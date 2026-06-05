@@ -45,11 +45,13 @@ MCP tools exposed by the server:
 - `list_windows` — compositor windows with title, app id, wm_class, focus state, client type (Wayland/X11), and bounds
 - `focused_window` — the window currently holding keyboard focus
 - `get_app_state` — combined screenshot + accessibility tree for a chosen app, with element indices that the input tools accept
-- `screenshot` — capture the screen as a PNG; can target a window, which is raised to the front and cropped to just that window
+- `screenshot` — capture the screen as a bounded PNG or JPEG image; can target a window, which is raised to the front and cropped to just that window
+
+Screenshot payloads are size-bounded by default before they are returned to the MCP host: max 1920 px width/height and 2 MiB image bytes, with hard caps even when callers request more. Agents that need more detail can pass `max_width`, `max_height`, `max_bytes`, `scale`, `format: "jpeg"`, or `quality`, preferably with a window target or crop. PNG remains the default; JPEG lets callers trade lossless pixels for a smaller payload before the byte cap forces further resizing. Returned screenshot metadata includes `coordinate_width`, `coordinate_height`, `scale`, `format`, and `quality` so callers can convert from a downscaled preview to desktop coordinate pixels.
 
 **Input**
-- `click` — by element index, semantic selector, or pixel coordinates
-- `drag` — pixel-coordinate drag (start / end)
+- `click` — by element index, semantic selector, or desktop coordinate pixels
+- `drag` — desktop coordinate drag (start / end)
 - `scroll` — page-based scroll on an element or at a pixel location
 - `press_key` — keys / chords; can focus a window or terminal first
 - `type_text` — literal text input, optionally targeted at a window or terminal

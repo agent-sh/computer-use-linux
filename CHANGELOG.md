@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   embedded input/backend knobs.
 
 ### Fixed
+- Bounded screenshot payloads by default before returning them to MCP hosts,
+  while exposing opt-in screenshot sizing controls and coordinate metadata for
+  downscaled captures.
+- Added opt-in JPEG screenshot output with a caller-selected quality so agents
+  can choose compression before the byte cap forces additional resizing.
 - Ported downstream Linux readiness fixes: `doctor` now treats direct
   `/dev/uinput` and the XDG RemoteDesktop portal as valid development-input
   backends instead of requiring `ydotoold` in every ready setup.
