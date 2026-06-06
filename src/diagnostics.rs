@@ -80,6 +80,7 @@ pub struct PlatformReport {
     pub dbus_session_bus_address: Option<String>,
     pub xdg_runtime_dir: Option<String>,
     pub gnome_shell_version: Check,
+    pub gnome_screenshot: Check,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -217,6 +218,10 @@ fn capability_map(
     }
     if portals.screenshot.ok {
         screenshot_backends.push("portal".to_string());
+    }
+    // Subprocess fallback for background/systemd contexts the DBus paths reject.
+    if platform.gnome_screenshot.ok {
+        screenshot_backends.push("gnome_screenshot".to_string());
     }
 
     let mut window_backends = Vec::new();
@@ -519,6 +524,7 @@ fn platform_report() -> PlatformReport {
         dbus_session_bus_address: dbus_session_address(),
         xdg_runtime_dir: xdg_runtime_dir().map(|path| path.display().to_string()),
         gnome_shell_version: command_check("gnome-shell", &["--version"]),
+        gnome_screenshot: command_check("gnome-screenshot", &["--version"]),
     }
 }
 
@@ -969,6 +975,7 @@ mod tests {
             dbus_session_bus_address: Some("unix:path=/run/user/1000/bus".to_string()),
             xdg_runtime_dir: Some("/run/user/1000".to_string()),
             gnome_shell_version: Check::ok("GNOME Shell 46.0"),
+            gnome_screenshot: Check::ok("gnome-screenshot 41.0"),
         }
     }
 
