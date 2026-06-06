@@ -11,9 +11,10 @@ use std::{
     fs,
     io::Cursor,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::process::Command;
 use zbus::{
     message::{Message, Type as MessageType},
     zvariant::{OwnedObjectPath, OwnedValue, Value},
@@ -374,15 +375,15 @@ async fn capture_with_portal() -> Result<RawScreenshotCapture> {
 const GNOME_SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(20);
 
 async fn capture_with_gnome_screenshot() -> Result<RawScreenshotCapture> {
-    let binary = gnome_screenshot_binary().context("gnome-screenshot was not found on PATH")?;
     let path = temp_png_path("gnome-screenshot");
     let filename = path
         .to_str()
         .context("temporary screenshot path is not valid UTF-8")?;
 
     // `-f <file>` writes a full-screen PNG without prompting; no portal, no
-    // foreground window required.
-    let mut child = match Command::new(&binary)
+    // foreground window required. `tokio::process::Command` searches PATH and
+    // provides an async, non-polling wait.
+    let mut child = match Command::new("gnome-screenshot")
         .args(["-f", filename])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -392,17 +393,22 @@ async fn capture_with_gnome_screenshot() -> Result<RawScreenshotCapture> {
         Ok(child) => child,
         Err(error) => {
             cleanup_gnome_requested_path(&path);
-            return Err(error).with_context(|| format!("failed to spawn {}", binary.display()));
+            return Err(error).context("failed to spawn gnome-screenshot");
         }
     };
 
-    let status = match wait_with_timeout(&mut child, GNOME_SCREENSHOT_TIMEOUT).await {
-        Ok(status) => status,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
+    // A hung capture must not block the tool forever, so bound the wait and
+    // kill the child if it outlives the deadline.
+    let status = match tokio::time::timeout(GNOME_SCREENSHOT_TIMEOUT, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => {
             cleanup_gnome_requested_path(&path);
-            return Err(error);
+            return Err(error).context("failed to wait for gnome-screenshot");
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            cleanup_gnome_requested_path(&path);
+            bail!("gnome-screenshot timed out");
         }
     };
 
@@ -417,33 +423,6 @@ async fn capture_with_gnome_screenshot() -> Result<RawScreenshotCapture> {
         ScreenshotCleanup::DeletePath(path),
     )
     .await
-}
-
-/// Poll a spawned child to completion, bailing if it outlives `timeout`.
-/// `std::process` has no async wait, so this polls `try_wait` on a short
-/// interval; the caller kills the child when this returns an error.
-async fn wait_with_timeout(
-    child: &mut std::process::Child,
-    timeout: Duration,
-) -> Result<std::process::ExitStatus> {
-    tokio::time::timeout(timeout, async {
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => return Ok(status),
-                Ok(None) => tokio::time::sleep(Duration::from_millis(50)).await,
-                Err(error) => return Err(error).context("failed to wait for gnome-screenshot"),
-            }
-        }
-    })
-    .await
-    .context("gnome-screenshot timed out")?
-}
-
-fn gnome_screenshot_binary() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|entry| entry.join("gnome-screenshot"))
-        .find(|candidate| candidate.is_file())
 }
 
 async fn portal_response_stream(connection: &zbus::Connection) -> Result<MessageStream> {
