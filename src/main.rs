@@ -7,14 +7,19 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 mod abs_pointer;
 mod atspi_tree;
+mod clipboard;
 mod cosmic_helper;
 mod diagnostics;
+mod element_finder;
 mod gnome_extension;
+mod hybrid;
 mod identity;
+mod macro_recording;
 mod remote_desktop;
 mod screenshot;
 mod server;
 mod terminal;
+mod visual_debug;
 mod windowing;
 mod windows;
 

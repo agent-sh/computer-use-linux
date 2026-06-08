@@ -47,6 +47,12 @@ computer-use-linux doctor | jq .readiness
 
 On GNOME Wayland, log out and back in after `setup-window-targeting` if the GNOME Shell extension was newly installed.
 
+Enable hybrid mode for Electron/Qt apps with broken trees:
+
+```bash
+export COMPUTER_USE_LINUX_HYBRID=1
+```
+
 ## Configure Hermes
 
 Add the server with the Hermes MCP CLI:
@@ -68,6 +74,8 @@ mcp_servers:
     args: ["mcp"]
     timeout: 120
     connect_timeout: 30
+    env:
+      COMPUTER_USE_LINUX_HYBRID: "1"
 ```
 
 If the binary is not on `PATH`, pass the absolute path to `--command`.
@@ -78,11 +86,40 @@ Hermes registers tools using the `mcp_<server>_<tool>` pattern. With this config
 | --- | --- |
 | `doctor` | `mcp_computer_use_linux_doctor` |
 | `get_app_state` | `mcp_computer_use_linux_get_app_state` |
+| `find_element` | `mcp_computer_use_linux_find_element` |
+| `hybrid_strategy` | `mcp_computer_use_linux_hybrid_strategy` |
 | `list_windows` | `mcp_computer_use_linux_list_windows` |
 | `click` | `mcp_computer_use_linux_click` |
 | `type_text` | `mcp_computer_use_linux_type_text` |
+| `screenshot_debug` | `mcp_computer_use_linux_screenshot_debug` |
+| `get_clipboard` | `mcp_computer_use_linux_get_clipboard` |
+| `set_clipboard` | `mcp_computer_use_linux_set_clipboard` |
+| `start_recording` | `mcp_computer_use_linux_start_recording` |
+| `stop_recording` | `mcp_computer_use_linux_stop_recording` |
 
 Restart Hermes after changing MCP config.
+
+## Accessibility-First + Hybrid Decision Tree
+
+Follow this order on every desktop-control turn:
+
+1. **`doctor`** — confirm `can_build_accessibility_tree`, `can_query_windows`, and `can_send_development_input`.
+2. **`get_app_state`** — bounded screenshot + compacted AT-SPI tree. Cache `@eN` refs from `element_index`.
+3. **`hybrid_strategy`** or check `find_element` output — when actionable nodes are sparse, enable hybrid fallback.
+4. **Target windows** — `list_windows` / `focused_window` / `activate_window` before keyboard input.
+5. **Prefer semantic refs** — `find_element "save button"` → `click` with `element_index`, or role/name/text selectors.
+6. **Hybrid fallback** — when AT-SPI is empty or stale (`STALE_REF`), use `screenshot` or `screenshot_debug` with `highlight_refs`, then coordinate `click` using `coordinate_width` / `coordinate_height` / `scale`.
+7. **Verify** — re-call `get_app_state` after mutating actions.
+
+### Input fallback chain (automatic)
+
+1. AT-SPI `element_index` or semantic selector
+2. AT-SPI primary action (`perform_action`)
+3. uinput absolute pointer (exact screenshot pixels)
+4. Wayland remote desktop portal
+5. ydotool relative input
+
+Explain which strategy succeeded in your reply so the user can debug permission or compositor issues.
 
 ## Procedure
 
@@ -90,10 +127,12 @@ Restart Hermes after changing MCP config.
 2. If `can_build_accessibility_tree` is false, run `setup` and restart the target app.
 3. If `can_query_windows` is false on GNOME Wayland, run `setup-window-targeting` and ask the user to log out and back in if setup says the shell extension needs a reload.
 4. Before targeted input, call `list_windows` or `focused_window` and verify the intended window by title, app id, pid, or wm class.
-5. Prefer semantic targeting from `get_app_state`: use element indices or role/name/text/states selectors.
-6. Use coordinates only when the UI surface has no useful accessibility tree.
-7. For text input, prefer `type_text` with a target selector (`window_id`, `pid`, `app_id`, `wm_class`, `title`, `tty`, `terminal_pid`, `terminal_command`, or `terminal_cwd`) rather than relying on current focus.
-8. After mutating actions, re-check state with `get_app_state`, `focused_window`, or an app-specific readback.
+5. Prefer semantic targeting: `find_element` for natural language, then `element_index` or role/name/text/states selectors.
+6. Use coordinates only when the UI surface has no useful accessibility tree (hybrid mode).
+7. For text input, prefer `type_text` with a target selector rather than relying on current focus.
+8. Use `get_clipboard` / `set_clipboard` for paste-heavy workflows on Wayland.
+9. Use `start_recording` / `stop_recording` to capture repeatable workflows; export the skill skeleton for Hermes.
+10. After mutating actions, re-check state with `get_app_state`, `focused_window`, or an app-specific readback.
 
 ## Pitfalls
 
@@ -103,6 +142,8 @@ Restart Hermes after changing MCP config.
 - `click`, `drag`, `press_key`, `type_text`, `perform_action`, and `set_value` can change real application state.
 - `ydotoold` should run as a per-user service with its socket under `/run/user/$UID`, not as a system-wide service.
 - On COSMIC, the standard npm, Cargo, and install-script paths install the `computer-use-linux-cosmic` helper automatically. Manual binary installs must copy both binaries.
+- Sway/wlroots users need `swaymsg` on PATH; `doctor` reports the active window backend.
+- OCR (`screenshot_debug` with `ocr=true`) requires `tesseract-ocr` installed.
 
 ## Verification
 

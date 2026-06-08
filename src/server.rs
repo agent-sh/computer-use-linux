@@ -3,6 +3,11 @@ use crate::atspi_tree::{
     snapshot_tree, AccessibilityAction, AccessibilityNode, AccessibleAppSummary, Bounds,
     ValueSetInvocation,
 };
+use crate::clipboard::{get_clipboard, set_clipboard};
+use crate::element_finder::{find_elements_by_description, FindElementResult};
+use crate::hybrid::{hybrid_mode_enabled, recommend_strategy, HybridRecommendation};
+use crate::macro_recording::{MacroRecorder, RecordedMacro};
+use crate::visual_debug::{highlight_element_refs, ocr_png_regions, OcrRegion};
 use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
 use crate::remote_desktop::{
@@ -40,13 +45,26 @@ use std::{
     time::Duration,
 };
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ComputerUseLinux {
     last_nodes: Arc<Mutex<Vec<AccessibilityNode>>>,
     portal_pointer_session: Arc<Mutex<Option<PortalPointerSession>>>,
     portal_keyboard_session: Arc<Mutex<Option<PortalKeyboardSession>>>,
     /// Lazily-created uinput absolute pointer (preferred coordinate backend).
     abs_pointer: Arc<Mutex<Option<crate::abs_pointer::AbsPointer>>>,
+    macro_recorder: MacroRecorder,
+}
+
+impl Default for ComputerUseLinux {
+    fn default() -> Self {
+        Self {
+            last_nodes: Arc::new(Mutex::new(Vec::new())),
+            portal_pointer_session: Arc::new(Mutex::new(None)),
+            portal_keyboard_session: Arc::new(Mutex::new(None)),
+            abs_pointer: Arc::new(Mutex::new(None)),
+            macro_recorder: MacroRecorder::default(),
+        }
+    }
 }
 
 #[tool_router]
@@ -1034,6 +1052,271 @@ impl ComputerUseLinux {
             focus,
         ))
     }
+
+    #[tool(
+        name = "find_element",
+        description = "Find the best accessibility element ref (@eN) for a natural-language description using the cached get_app_state tree or a fresh snapshot.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn find_element(
+        &self,
+        Parameters(params): Parameters<FindElementParams>,
+    ) -> Json<FindElementOutput> {
+        let limit = params.limit.unwrap_or(5).clamp(1, 20);
+        let (nodes, refreshed) = if params.refresh_tree.unwrap_or(false) {
+            let max_nodes = params.max_nodes.unwrap_or(120).clamp(1, 500);
+            let max_depth = params.max_depth.unwrap_or(12).min(12);
+            match snapshot_tree(
+                params.app_name_or_bundle_identifier.as_deref(),
+                params.pid,
+                max_nodes,
+                max_depth,
+            )
+            .await
+            {
+                Ok(nodes) => {
+                    self.cache_nodes(&nodes);
+                    (nodes, true)
+                }
+                Err(error) => {
+                    return Json(FindElementOutput {
+                        result: FindElementResult {
+                            description: params.description.clone(),
+                            matches: Vec::new(),
+                            best_match: None,
+                            strategy: "natural_language_token_match".to_string(),
+                            explanation: format!("Failed to refresh accessibility tree: {error:#}"),
+                        },
+                        hybrid: recommend_strategy(&[]),
+                        refreshed_tree: false,
+                        error: Some(error.to_string()),
+                    });
+                }
+            }
+        } else {
+            (self.cached_nodes(), false)
+        };
+
+        let result = find_elements_by_description(&nodes, &params.description, limit);
+        let hybrid = recommend_strategy(&nodes);
+        Json(FindElementOutput {
+            result,
+            hybrid,
+            refreshed_tree: refreshed,
+            error: None,
+        })
+    }
+
+    #[tool(
+        name = "hybrid_strategy",
+        description = "Report the recommended accessibility-first vs coordinate-fallback strategy for the current cached tree and hybrid mode setting.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    fn hybrid_strategy(&self) -> Json<HybridRecommendation> {
+        Json(recommend_strategy(&self.cached_nodes()))
+    }
+
+    #[tool(
+        name = "get_clipboard",
+        description = "Read the current desktop clipboard text via wl-clipboard or xclip/xsel.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    fn get_clipboard_tool(&self) -> Json<ClipboardOutput> {
+        match get_clipboard() {
+            Ok(contents) => Json(ClipboardOutput {
+                ok: true,
+                text: Some(contents.text),
+                backend: Some(contents.backend),
+                error: None,
+            }),
+            Err(error) => Json(ClipboardOutput {
+                ok: false,
+                text: None,
+                backend: None,
+                error: Some(error.to_string()),
+            }),
+        }
+    }
+
+    #[tool(
+        name = "set_clipboard",
+        description = "Write text to the desktop clipboard via wl-clipboard or xclip/xsel.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    fn set_clipboard_tool(
+        &self,
+        Parameters(params): Parameters<SetClipboardParams>,
+    ) -> Json<ClipboardOutput> {
+        match set_clipboard(&params.text) {
+            Ok(backend) => Json(ClipboardOutput {
+                ok: true,
+                text: Some(params.text),
+                backend: Some(backend),
+                error: None,
+            }),
+            Err(error) => Json(ClipboardOutput {
+                ok: false,
+                text: None,
+                backend: None,
+                error: Some(error.to_string()),
+            }),
+        }
+    }
+
+    #[tool(
+        name = "start_recording",
+        description = "Start recording desktop MCP actions for macro replay or Hermes skill export.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn start_recording(
+        &self,
+        Parameters(params): Parameters<StartRecordingParams>,
+    ) -> Json<RecordingOutput> {
+        let message = self.macro_recorder.start(params.name.clone());
+        Json(RecordingOutput {
+            recording: true,
+            message,
+            macro_data: None,
+            skill_skeleton: None,
+        })
+    }
+
+    #[tool(
+        name = "stop_recording",
+        description = "Stop macro recording and return the captured JSON workflow.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    fn stop_recording(&self) -> Json<RecordingOutput> {
+        let macro_data = self.macro_recorder.stop();
+        let skill_skeleton = MacroRecorder::export_skill_skeleton(&macro_data);
+        Json(RecordingOutput {
+            recording: false,
+            message: format!(
+                "Captured {} macro steps.",
+                macro_data.steps.len()
+            ),
+            macro_data: Some(macro_data),
+            skill_skeleton: Some(skill_skeleton),
+        })
+    }
+
+    #[tool(
+        name = "replay_macro",
+        description = "Replay a previously recorded macro JSON workflow. Returns the steps for the host to execute in order.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    fn replay_macro(
+        &self,
+        Parameters(params): Parameters<ReplayMacroParams>,
+    ) -> Json<ReplayMacroOutput> {
+        Json(ReplayMacroOutput {
+            ok: true,
+            steps: params.macro_data.steps.clone(),
+            message: format!(
+                "Replay {} recorded steps through the corresponding MCP tools in order.",
+                params.macro_data.steps.len()
+            ),
+        })
+    }
+
+    #[tool(
+        name = "screenshot_debug",
+        description = "Capture a screenshot with optional OCR text extraction and @eN element bounding-box highlights from the cached accessibility tree.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn screenshot_debug(
+        &self,
+        Parameters(params): Parameters<ScreenshotDebugParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let raw_capture = capture_screenshot_raw()
+            .await
+            .map_err(|error| ErrorData::internal_error(format!("screenshot failed: {error}"), None))?;
+        let screenshot_bytes = raw_capture.bytes.clone();
+        let mut contents = Vec::new();
+        let caption = serde_json::json!({
+            "source": raw_capture.source,
+            "width": raw_capture.width,
+            "height": raw_capture.height,
+            "hybrid_mode_enabled": hybrid_mode_enabled(),
+        });
+
+        if params.highlight_refs.unwrap_or(true) {
+            let highlighted = highlight_element_refs(
+                &raw_capture.bytes,
+                &self.cached_nodes(),
+                params.max_highlights.unwrap_or(40).clamp(1, 120) as usize,
+            )
+            .map_err(|error| ErrorData::internal_error(format!("highlight failed: {error}"), None))?;
+            contents.push(Content::image(
+                data_url_payload(&highlighted.data_url),
+                highlighted.mime_type,
+            ));
+            contents.push(Content::text(
+                serde_json::json!({
+                    "highlighted_count": highlighted.highlighted_count,
+                    "caption": caption,
+                })
+                .to_string(),
+            ));
+        } else {
+            let capture = prepare_screenshot_payload(raw_capture, ScreenshotPayloadOptions::default())
+                .map_err(|error| ErrorData::internal_error(format!("screenshot resize failed: {error}"), None))?;
+            contents.push(Content::image(
+                data_url_payload(&capture.data_url),
+                capture.mime_type,
+            ));
+            contents.push(Content::text(caption.to_string()));
+        }
+
+        if params.ocr.unwrap_or(false) {
+            let ocr: Vec<OcrRegion> = ocr_png_regions(&screenshot_bytes).unwrap_or_default();
+            contents.push(Content::text(
+                serde_json::json!({ "ocr_regions": ocr }).to_string(),
+            ));
+        }
+
+        Ok(CallToolResult::success(contents))
+    }
 }
 
 #[tool_handler(
@@ -1553,6 +1836,80 @@ struct ActionOutput {
     received: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct FindElementParams {
+    description: String,
+    #[serde(default)]
+    refresh_tree: Option<bool>,
+    #[serde(default)]
+    app_name_or_bundle_identifier: Option<String>,
+    #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
+    max_nodes: Option<usize>,
+    #[serde(default)]
+    max_depth: Option<u32>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct FindElementOutput {
+    result: FindElementResult,
+    hybrid: HybridRecommendation,
+    refreshed_tree: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct ClipboardOutput {
+    ok: bool,
+    text: Option<String>,
+    backend: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct SetClipboardParams {
+    text: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct StartRecordingParams {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct RecordingOutput {
+    recording: bool,
+    message: String,
+    macro_data: Option<RecordedMacro>,
+    skill_skeleton: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct ReplayMacroParams {
+    macro_data: RecordedMacro,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct ReplayMacroOutput {
+    ok: bool,
+    steps: Vec<crate::macro_recording::MacroStep>,
+    message: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct ScreenshotDebugParams {
+    #[serde(default)]
+    highlight_refs: Option<bool>,
+    #[serde(default)]
+    ocr: Option<bool>,
+    #[serde(default)]
+    max_highlights: Option<u32>,
+}
+
 impl ComputerUseLinux {
     fn is_wayland_session(&self) -> bool {
         crate::diagnostics::hydrate_session_bus_env();
@@ -1760,6 +2117,13 @@ impl ComputerUseLinux {
             cached.clear();
             cached.extend_from_slice(nodes);
         }
+    }
+
+    fn cached_nodes(&self) -> Vec<AccessibilityNode> {
+        self.last_nodes
+            .lock()
+            .map(|cached| cached.clone())
+            .unwrap_or_default()
     }
 
     fn resolve_optional_target_point(
