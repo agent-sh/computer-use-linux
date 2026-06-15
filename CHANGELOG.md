@@ -11,10 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Window-relative clicks now require a verified target window and resolved
   bounds before coordinates are translated, preventing clicks from silently
   landing against stale or originless window data.
-- Long `ydotool type --file -` input now gets a bounded timeout scaled by text
-  length while stdout/stderr are drained asynchronously.
+- Long `ydotool type --file -` input now gets a bounded timeout with both a
+  fixed process budget and a text-length budget while stdout/stderr are drained
+  asynchronously.
 - KDE clipboard text input now uses the session DBus API directly and waits
-  long enough for large paste payloads before restoring the previous clipboard.
+  long enough for large paste payloads before restoring the previous clipboard;
+  Klipper proxy creation and method calls share the same bounded DBus timeout.
 - Failed accessibility tree extraction clears cached nodes so later
   element-targeted actions cannot use stale coordinates.
 
