@@ -306,10 +306,10 @@ Most setups need none of these — `doctor` and the installers pick sensible def
 
 | Variable | Effect |
 | --- | --- |
-| `COMPUTER_USE_LINUX_COSMIC_HELPER` | Path to the `computer-use-linux-cosmic` helper when it isn't next to the binary or on `PATH` (`CODEX_COMPUTER_USE_COSMIC_HELPER` is also accepted by embedded Codex builds). |
-| `CU_DISABLE_ABS_POINTER` | Disable the uinput absolute pointer and click through `ydotool` instead (for setups where the abs-pointer device misbehaves); embedded Codex builds may use `CODEX_COMPUTER_USE_DISABLE_ABS_POINTER`. |
-| `COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER` / `…_KEYBOARD` | Always route pointer / keyboard through the RemoteDesktop portal on Wayland, skipping auto-detection; embedded Codex builds may use `CODEX_COMPUTER_USE_FORCE_PORTAL_POINTER` / `…_KEYBOARD`. |
-| `COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER` / `…_KEYBOARD` | Always route pointer / keyboard through `ydotool`, skipping the portal and KDE clipboard paths; embedded Codex builds may use `CODEX_COMPUTER_USE_FORCE_YDOTOOL_POINTER` / `…_KEYBOARD`. |
+| `COMPUTER_USE_LINUX_COSMIC_HELPER` | Path to the `computer-use-linux-cosmic` helper when it isn't next to the binary or on `PATH`. |
+| `CU_DISABLE_ABS_POINTER` | Disable the uinput absolute pointer and click through `ydotool` instead for setups where the abs-pointer device misbehaves. |
+| `COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER` / `…_KEYBOARD` | Always route pointer / keyboard through the RemoteDesktop portal on Wayland, skipping auto-detection. |
+| `COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER` / `…_KEYBOARD` | Always route pointer / keyboard through `ydotool`, skipping the portal and KDE clipboard paths. |
 | `COMPUTER_USE_LINUX_SCREENSHOT_BACKEND` | Force a single screenshot backend, skipping the fallback chain. Accepts `gnome-shell`, `portal`, or `gnome-screenshot`. Pin `gnome-screenshot` for background/systemd contexts where the GNOME Shell and portal DBus paths are denied. |
 
 **Build-time identity overrides** (set while compiling a downstream embedded

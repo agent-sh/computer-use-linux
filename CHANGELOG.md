@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Window-relative clicks now require a verified target window and resolved
+  bounds before coordinates are translated, preventing clicks from silently
+  landing against stale or originless window data.
+- Long `ydotool type --file -` input now gets a bounded timeout scaled by text
+  length while stdout/stderr are drained asynchronously.
+- KDE clipboard text input now uses the session DBus API directly and waits
+  long enough for large paste payloads before restoring the previous clipboard.
+- Failed accessibility tree extraction clears cached nodes so later
+  element-targeted actions cannot use stale coordinates.
+
+### Changed
+- The COSMIC helper source path and runtime override surface now use standalone
+  `computer-use-linux` naming only.
+
 ## [0.2.6] - 2026-06-06
 
 ### Fixed
@@ -242,7 +257,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/agent-sh/computer-use-linux/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/agent-sh/computer-use-linux/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/agent-sh/computer-use-linux/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/agent-sh/computer-use-linux/compare/v0.2.2...v0.2.3

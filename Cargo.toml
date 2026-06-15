@@ -18,7 +18,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "computer-use-linux-cosmic"
-path = "src/bin/codex-computer-use-cosmic.rs"
+path = "src/bin/computer-use-linux-cosmic.rs"
 
 [dependencies]
 mimalloc = { version = "0.1", default-features = false }
