@@ -2441,9 +2441,14 @@ fn apply_window_relative_click_coordinates(
         .x
         .zip(params.y)
         .ok_or_else(|| "Relative coordinate clicks require both x and y.".to_string())?;
-    let bounds = focus.requested_window.bounds.as_ref().ok_or_else(|| {
-        "Relative coordinate clicks require resolved target-window bounds.".to_string()
-    })?;
+    let bounds = focus
+        .focused_window
+        .as_ref()
+        .and_then(|window| window.bounds.as_ref())
+        .or(focus.requested_window.bounds.as_ref())
+        .ok_or_else(|| {
+            "Relative coordinate clicks require resolved target-window bounds.".to_string()
+        })?;
     if bounds.width == 0 || bounds.height == 0 {
         return Err(
             "Relative coordinate clicks require non-empty target-window bounds.".to_string(),
@@ -3233,14 +3238,18 @@ mod tests {
         }
     }
 
+    fn window_bounds(x: Option<i32>, y: Option<i32>, width: u32, height: u32) -> WindowBounds {
+        WindowBounds {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
     #[test]
     fn relative_click_coordinates_use_verified_window_bounds() {
-        let focus = focus_result_with_bounds(Some(WindowBounds {
-            x: Some(100),
-            y: Some(200),
-            width: 800,
-            height: 600,
-        }));
+        let focus = focus_result_with_bounds(Some(window_bounds(Some(100), Some(200), 800, 600)));
         let mut params = ClickParams {
             x: Some(7),
             y: Some(9),
@@ -3254,13 +3263,29 @@ mod tests {
     }
 
     #[test]
+    fn relative_click_coordinates_prefer_focused_window_bounds() {
+        let mut focus =
+            focus_result_with_bounds(Some(window_bounds(Some(100), Some(200), 800, 600)));
+        let focused_window = focus
+            .focused_window
+            .as_mut()
+            .expect("test focus should include focused window");
+        focused_window.bounds = Some(window_bounds(Some(300), Some(400), 800, 600));
+        let mut params = ClickParams {
+            x: Some(7),
+            y: Some(9),
+            relative: Some(true),
+            ..Default::default()
+        };
+
+        apply_window_relative_click_coordinates(&mut params, &focus).unwrap();
+
+        assert_eq!((params.x, params.y), (Some(307), Some(409)));
+    }
+
+    #[test]
     fn relative_click_coordinates_require_window_bounds_origin() {
-        let focus = focus_result_with_bounds(Some(WindowBounds {
-            x: None,
-            y: Some(200),
-            width: 800,
-            height: 600,
-        }));
+        let focus = focus_result_with_bounds(Some(window_bounds(None, Some(200), 800, 600)));
         let mut params = ClickParams {
             x: Some(7),
             y: Some(9),
@@ -3276,12 +3301,7 @@ mod tests {
 
     #[test]
     fn relative_click_coordinates_require_xy() {
-        let focus = focus_result_with_bounds(Some(WindowBounds {
-            x: Some(100),
-            y: Some(200),
-            width: 800,
-            height: 600,
-        }));
+        let focus = focus_result_with_bounds(Some(window_bounds(Some(100), Some(200), 800, 600)));
         let mut params = ClickParams {
             x: Some(7),
             relative: Some(true),
@@ -3296,12 +3316,7 @@ mod tests {
 
     #[test]
     fn relative_click_coordinates_must_stay_inside_bounds() {
-        let focus = focus_result_with_bounds(Some(WindowBounds {
-            x: Some(100),
-            y: Some(200),
-            width: 800,
-            height: 600,
-        }));
+        let focus = focus_result_with_bounds(Some(window_bounds(Some(100), Some(200), 800, 600)));
 
         for (x, y) in [(-1, 9), (7, -1), (800, 9), (7, 600)] {
             let mut params = ClickParams {
