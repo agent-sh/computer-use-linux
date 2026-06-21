@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- GTK4 applications (Nautilus, Text Editor, baobab, and others) now return their
+  full accessibility tree instead of a single `role: "unknown"` root with
+  `child_count: 0`. Reads were routed through the `atspi` `P2P` trait's
+  `object_as_accessible`, whose no-peer fallback builds a proxy with a path but
+  no destination; on the shared a11y bus that fails with `ServiceUnknown` for
+  any app that does not advertise a peer-to-peer bus address. Modern GTK4 apps
+  do not implement the legacy `GetApplicationBusAddress`, so they hit the broken
+  fallback while GTK3/Chromium/Electron apps kept working. Reads now use
+  `ObjectRefExt::as_accessible_proxy`, which always pins the destination to the
+  object's bus name. (#31)
+
 ## [0.2.8] - 2026-06-17
 
 ### Changed
