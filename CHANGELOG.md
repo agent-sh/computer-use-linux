@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Exposed the crate modules through a `lib` target so downstream Rust crates can
+  depend on `computer-use-linux` directly while preserving the existing CLI
+  binaries and standalone naming.
+
 ## [0.2.9] - 2026-06-22
 
 ### Fixed
