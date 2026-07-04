@@ -187,9 +187,15 @@ install_system_deps() {
     case "${PKG_MANAGER}" in
         apt)
             local pkgs=(build-essential pkg-config libdbus-1-dev libssl-dev curl ydotool at-spi2-core)
-            if [[ "${desktop}" == *GNOME* ]]; then pkgs+=(gnome-shell-extension-tool); fi
-            log_info "sudo apt-get install -y ${pkgs[*]}"
             sudo apt-get update -qq
+            if [[ "${desktop}" == *GNOME* ]] && ! command -v gnome-extensions >/dev/null 2>&1; then
+                if apt-cache show gnome-shell >/dev/null 2>&1; then
+                    pkgs+=(gnome-shell)
+                else
+                    log_warn "gnome-extensions CLI missing, and no gnome-shell apt package was found"
+                fi
+            fi
+            log_info "sudo apt-get install -y ${pkgs[*]}"
             sudo apt-get install -y "${pkgs[@]}" || { log_fail "apt-get install failed"; return 1; }
             ;;
         dnf)
@@ -389,7 +395,7 @@ install_gnome_extension() {
         return 0
     fi
     if ! command -v gnome-extensions >/dev/null 2>&1; then
-        log_warn "gnome-extensions CLI missing — install gnome-shell-extension-tool"
+        log_warn "gnome-extensions CLI missing — install gnome-shell or your distro's package that provides it"
         return 0
     fi
     if [[ ! -d "${EXT_SRC_DIR}" ]]; then
