@@ -26,10 +26,16 @@ The `mcp()` proxy tool should now be available. Call it from any prompt:
 mcp({ search: "doctor" })
 ```
 
-Or start with the readiness check:
+Or start with the readiness check (note the server-prefixed tool name):
 
 ```bash
-mcp({ tool: "doctor" })
+mcp({ tool: "computer_use_linux_doctor" })
+```
+
+Search for available tools:
+
+```bash
+mcp({ server: "computer-use-linux" })
 ```
 
 ## If the binary is not found

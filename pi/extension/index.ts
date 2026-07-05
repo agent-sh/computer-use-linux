@@ -8,7 +8,14 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	accessSync,
+	constants,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { env } from "node:process";
@@ -80,13 +87,13 @@ function findBinary(): string | null {
 	for (const dir of pathDirs) {
 		const candidate = join(dir, "computer-use-linux");
 		try {
-			const stat = existsSync(candidate);
-			if (stat) {
+			if (existsSync(candidate)) {
+				accessSync(candidate, constants.X_OK);
 				_binaryPath = candidate;
 				return candidate;
 			}
 		} catch {
-			// Skip inaccessible directories
+			// Skip inaccessible or non-executable entries
 		}
 	}
 
@@ -112,32 +119,50 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function readMcpConfig(path: string): McpConfig {
+function readMcpConfig(path: string): McpConfig | null {
+	// Only return empty if the file genuinely doesn't exist.
+	// If the file exists but can't be read or parsed, return null
+	// so the caller knows not to overwrite it.
+	if (!existsSync(path)) return {};
+
 	try {
 		const raw = readFileSync(path, "utf-8");
 		const parsed = JSON.parse(raw);
-		if (!isRecord(parsed)) return {};
+		if (!isRecord(parsed)) {
+			console.error(
+				`${PACKAGE_NAME}: MCP config at ${path} contains a ${typeof parsed}` +
+					(Array.isArray(parsed) ? " (array)" : "") +
+					", expected a JSON object. Skipping.",
+			);
+			return null;
+		}
 		return parsed as McpConfig;
-	} catch {
-		return {};
+	} catch (error) {
+		console.error(
+			`${PACKAGE_NAME}: failed to read existing MCP config at ${path}:`,
+			error instanceof Error ? error.message : String(error),
+		);
+		return null;
 	}
 }
 
 function writeMcpConfig(path: string, config: McpConfig): void {
-	try {
-		mkdirSync(dirname(path), { recursive: true });
-		writeFileSync(path, JSON.stringify(config, null, 2) + "\n", "utf-8");
-	} catch (error) {
-		console.error(
-			`${PACKAGE_NAME}: failed to write MCP config to ${path}:`,
-			error instanceof Error ? error.message : String(error),
-		);
-	}
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, JSON.stringify(config, null, 2) + "\n", "utf-8");
 }
 
 function ensureServerEntry(configPath: string, binaryPath: string): boolean {
 	const config = readMcpConfig(configPath);
-	const servers = config.mcpServers ?? {};
+
+	// If config exists but can't be read, don't overwrite it
+	if (config === null) return false;
+
+	// Validate that mcpServers is a plain object before mutating
+	const servers =
+		config.mcpServers != null && isRecord(config.mcpServers)
+			? (config.mcpServers as Record<string, McpServerEntry>)
+			: {};
+
 	const existing = servers[MCP_SERVER_NAME];
 
 	// Check if entry already exists and matches
@@ -156,8 +181,16 @@ function ensureServerEntry(configPath: string, binaryPath: string): boolean {
 		args: ["mcp"],
 	};
 
-	writeMcpConfig(configPath, { ...config, mcpServers: servers });
-	return true; // Config was updated
+	try {
+		writeMcpConfig(configPath, { ...config, mcpServers: servers });
+		return true; // Config was updated
+	} catch (error) {
+		console.error(
+			`${PACKAGE_NAME}: failed to write MCP config to ${configPath}:`,
+			error instanceof Error ? error.message : String(error),
+		);
+		return false; // Write failed
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -169,34 +202,41 @@ export default function (pi: ExtensionAPI) {
 	const binaryPath = findBinary();
 
 	pi.on("session_start", async (_event, ctx) => {
-		if (!binaryPath) {
-			ctx.ui.notify?.(
-				`${PACKAGE_NAME}: computer-use-linux binary not found. ` +
-					"Install it with 'npm install -g @agent-sh/computer-use-linux' " +
-					"or set COMPUTER_USE_LINUX_BIN.",
-				"warning",
-			);
-			return;
-		}
+		try {
+			if (!binaryPath) {
+				ctx.ui.notify?.(
+					`${PACKAGE_NAME}: computer-use-linux binary not found. ` +
+						"Install it with 'npm install -g @agent-sh/computer-use-linux' " +
+						"or set COMPUTER_USE_LINUX_BIN.",
+					"warning",
+				);
+				return;
+			}
 
-		// Write/update the MCP config that pi-mcp-adapter reads
-		const configPath = getPiAgentMcpConfigPath();
-		const changed = ensureServerEntry(configPath, binaryPath);
+			// Write/update the MCP config that pi-mcp-adapter reads
+			const configPath = getPiAgentMcpConfigPath();
+			const changed = ensureServerEntry(configPath, binaryPath);
 
-		if (changed && ctx.hasUI) {
-			ctx.ui.notify?.(
-				`${PACKAGE_NAME}: MCP server configured at ${configPath}. ` +
-					"Run /reload if pi-mcp-adapter is already installed.",
-				"info",
-			);
-		}
+			if (changed && ctx.hasUI) {
+				ctx.ui.notify?.(
+					`${PACKAGE_NAME}: MCP server configured at ${configPath}. ` +
+						"Run /reload if pi-mcp-adapter is already installed.",
+					"info",
+				);
+			}
 
-		// Check that pi-mcp-adapter is available (its tools are registered)
-		if (!pi.getAllTools().some((t) => t.name === "mcp")) {
-			ctx.ui.notify?.(
-				`${PACKAGE_NAME}: pi-mcp-adapter not detected. ` +
-					"Install it with 'pi install npm:pi-mcp-adapter' then /reload.",
-				"warning",
+			// Check that pi-mcp-adapter is available (its tools are registered)
+			if (!pi.getAllTools().some((t) => t.name === "mcp")) {
+				ctx.ui.notify?.(
+					`${PACKAGE_NAME}: pi-mcp-adapter not detected. ` +
+						"Install it with 'pi install npm:pi-mcp-adapter' then /reload.",
+					"warning",
+				);
+			}
+		} catch (error) {
+			console.error(
+				`${PACKAGE_NAME}: unexpected error in session_start handler:`,
+				error instanceof Error ? error.message : String(error),
 			);
 		}
 	});

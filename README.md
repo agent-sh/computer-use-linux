@@ -238,9 +238,10 @@ pi install npm:@agent-sh/computer-use-linux
 Restart pi or run `/reload`. The MCP proxy tool `mcp()` will have the desktop tools available:
 
 ```
-mcp({ tool: "doctor" })
-mcp({ search: "windows" })
-mcp({ tool: "list_windows" })
+mcp({ server: "computer-use-linux" })             # list all tools
+mcp({ search: "windows" })                         # search for window tools
+mcp({ tool: "computer_use_linux_doctor" })         # run readiness check
+mcp({ tool: "computer_use_linux_list_windows" })   # list desktop windows
 ```
 
 The extension auto-registers the computer-use-linux MCP server into pi-mcp-adapter's config. If the binary is not found, check the [Pi setup guide](skills/computer-use-linux/references/pi-setup.md).
