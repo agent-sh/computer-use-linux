@@ -68,6 +68,12 @@ fn probe_fail(detail: &str) -> BackendProbe {
 }
 
 pub fn list_windows() -> Result<Vec<WindowInfo>> {
+    // Guard the session too, not just probe(): registry::list_windows() tries
+    // each backend directly, so without this a Wayland session with no native
+    // backend would fall through here and return XWayland-only windows.
+    if !is_x11_session() {
+        bail!("not an X11 session (needs DISPLAY on an X11, not Wayland, session)");
+    }
     let output = wmctrl()
         .args(["-l", "-p", "-G", "-x"])
         .output()
@@ -93,14 +99,27 @@ pub fn activate_window(window_id: u64) -> Result<()> {
 pub fn move_window(window_id: u64, x: i32, y: i32) -> Result<String> {
     unmaximize(window_id)?;
     let id = window_id_arg(window_id);
-    // wmctrl -e format is `gravity,x,y,width,height`; -1 keeps the current size.
-    let geometry = format!("0,{x},{y},-1,-1");
+    // wmctrl -e is `gravity,x,y,width,height`; the trailing -1,-1 keep the size.
+    // wmctrl also reads -1 in the x/y fields as "preserve current position", so a
+    // literal -1 target would be dropped — nudge it to -2 so the move still lands.
+    let geometry = format!("0,{},{},-1,-1", wmctrl_move_coord(x), wmctrl_move_coord(y));
     run_wmctrl(
         &["-i", "-r", id.as_str(), "-e", geometry.as_str()],
         "move window",
         window_id,
     )?;
     Ok(format!("Moved window to ({x}, {y}) via X11/EWMH (wmctrl)."))
+}
+
+/// `wmctrl -e` treats -1 in any field as "keep current value", so a literal -1
+/// coordinate is silently ignored. Map it to -2 so the window actually moves
+/// (a 1px difference at the screen edge is harmless).
+fn wmctrl_move_coord(value: i32) -> i32 {
+    if value == -1 {
+        -2
+    } else {
+        value
+    }
 }
 
 pub fn resize_window(window_id: u64, width: i32, height: i32) -> Result<String> {
@@ -259,7 +278,7 @@ fn next_field<'a>(rest: &mut &'a str) -> Option<&'a str> {
 
 fn clean(value: &str) -> Option<String> {
     let value = value.trim();
-    (!value.is_empty() && value != "N/A").then(|| value.to_string())
+    (!value.is_empty() && !value.eq_ignore_ascii_case("N/A")).then(|| value.to_string())
 }
 
 fn env_nonempty(name: &str) -> Option<String> {
@@ -325,6 +344,22 @@ mod tests {
         assert!(claude.focused);
         assert_eq!(claude.workspace, None);
         assert_eq!(claude.pid, None);
+    }
+
+    #[test]
+    fn move_coord_avoids_wmctrl_preserve_sentinel() {
+        assert_eq!(wmctrl_move_coord(-1), -2);
+        assert_eq!(wmctrl_move_coord(0), 0);
+        assert_eq!(wmctrl_move_coord(-40), -40);
+        assert_eq!(wmctrl_move_coord(1920), 1920);
+    }
+
+    #[test]
+    fn clean_drops_na_case_insensitively_and_blanks() {
+        assert_eq!(clean("N/A"), None);
+        assert_eq!(clean("n/a"), None);
+        assert_eq!(clean("   "), None);
+        assert_eq!(clean(" Firefox "), Some("Firefox".to_string()));
     }
 
     #[test]
