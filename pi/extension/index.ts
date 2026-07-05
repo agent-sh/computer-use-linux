@@ -108,18 +108,31 @@ interface McpConfig {
 	mcpServers?: Record<string, McpServerEntry>;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function readMcpConfig(path: string): McpConfig {
 	try {
 		const raw = readFileSync(path, "utf-8");
-		return JSON.parse(raw) as McpConfig;
+		const parsed = JSON.parse(raw);
+		if (!isRecord(parsed)) return {};
+		return parsed as McpConfig;
 	} catch {
 		return {};
 	}
 }
 
 function writeMcpConfig(path: string, config: McpConfig): void {
-	mkdirSync(dirname(path), { recursive: true });
-	writeFileSync(path, JSON.stringify(config, null, 2) + "\n", "utf-8");
+	try {
+		mkdirSync(dirname(path), { recursive: true });
+		writeFileSync(path, JSON.stringify(config, null, 2) + "\n", "utf-8");
+	} catch (error) {
+		console.error(
+			`${PACKAGE_NAME}: failed to write MCP config to ${path}:`,
+			error instanceof Error ? error.message : String(error),
+		);
+	}
 }
 
 function ensureServerEntry(configPath: string, binaryPath: string): boolean {
