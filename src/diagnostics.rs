@@ -243,10 +243,18 @@ fn capability_map(
     // i3 and the generic X11/EWMH backend have no dedicated WindowingReport
     // field; read them from the probe map (tried last) so the capability list
     // matches the backends the registry will actually use.
-    if windowing.backends.get(I3_BACKEND).is_some_and(|check| check.ok) {
+    if windowing
+        .backends
+        .get(I3_BACKEND)
+        .is_some_and(|check| check.ok)
+    {
         window_backends.push(I3_BACKEND.to_string());
     }
-    if windowing.backends.get(X11_BACKEND).is_some_and(|check| check.ok) {
+    if windowing
+        .backends
+        .get(X11_BACKEND)
+        .is_some_and(|check| check.ok)
+    {
         window_backends.push(X11_BACKEND.to_string());
     }
 

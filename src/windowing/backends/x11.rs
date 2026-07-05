@@ -309,9 +309,8 @@ fn env_nonempty(name: &str) -> Option<String> {
 /// capabilities on `xprop` without spawning it (xprop with no args would block
 /// reading a window interactively).
 fn command_on_path(cmd: &str) -> bool {
-    env::var_os("PATH").is_some_and(|paths| {
-        env::split_paths(&paths).any(|dir| dir.join(cmd).is_file())
-    })
+    env::var_os("PATH")
+        .is_some_and(|paths| env::split_paths(&paths).any(|dir| dir.join(cmd).is_file()))
 }
 
 #[cfg(test)]
@@ -354,10 +353,16 @@ mod tests {
         assert_eq!(firefox.app_id.as_deref(), Some("Navigator"));
         assert_eq!(firefox.wm_class.as_deref(), Some("firefox"));
         assert_eq!(firefox.pid, Some(4564));
-        assert_eq!(firefox.title.as_deref(), Some("Nouvel onglet — Mozilla Firefox"));
+        assert_eq!(
+            firefox.title.as_deref(),
+            Some("Nouvel onglet — Mozilla Firefox")
+        );
         assert_eq!(firefox.workspace, Some(2));
         let bounds = firefox.bounds.as_ref().unwrap();
-        assert_eq!((bounds.x, bounds.y, bounds.width, bounds.height), (Some(-40), Some(-40), 2600, 1440));
+        assert_eq!(
+            (bounds.x, bounds.y, bounds.width, bounds.height),
+            (Some(-40), Some(-40), 2600, 1440)
+        );
         assert_eq!(firefox.client_type.as_deref(), Some("x11"));
         assert_eq!(firefox.backend, X11_BACKEND);
         assert!(!firefox.focused);
