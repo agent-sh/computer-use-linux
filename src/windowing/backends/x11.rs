@@ -134,6 +134,12 @@ fn wmctrl_move_coord(value: i32) -> i32 {
 }
 
 pub fn resize_window(window_id: u64, width: i32, height: i32) -> Result<String> {
+    // wmctrl -e reads -1 (and rejects <= 0) as "preserve current value" per
+    // field, so a non-positive size would silently leave a dimension unchanged
+    // while reporting success. Reject it up front.
+    if width <= 0 || height <= 0 {
+        bail!("resize requires positive width and height (got {width}x{height})");
+    }
     unmaximize(window_id)?;
     let id = window_id_arg(window_id);
     let geometry = format!("0,-1,-1,{width},{height}");
