@@ -40,14 +40,25 @@ pub fn probe() -> BackendProbe {
         return probe_fail("no X11 session (needs DISPLAY on an X11, not Wayland, session)");
     }
     match wmctrl().args(["-l", "-p", "-G", "-x"]).output() {
-        Ok(output) if output.status.success() => BackendProbe {
-            id: X11_BACKEND,
-            ok: true,
-            can_list_windows: true,
-            can_focus_apps: true,
-            can_focus_windows: true,
-            detail: "wmctrl listed X11/EWMH windows".to_string(),
-        },
+        Ok(output) if output.status.success() => {
+            // Listing only needs wmctrl, but the `focused` flag (and therefore
+            // focused_window() and activate_window's focus verification) comes
+            // from `_NET_ACTIVE_WINDOW` read via xprop. Without xprop we can list
+            // but cannot verify focus, so don't advertise focus capabilities.
+            let can_focus = command_on_path("xprop");
+            BackendProbe {
+                id: X11_BACKEND,
+                ok: true,
+                can_list_windows: true,
+                can_focus_apps: can_focus,
+                can_focus_windows: can_focus,
+                detail: if can_focus {
+                    "wmctrl listed X11/EWMH windows".to_string()
+                } else {
+                    "wmctrl listed X11/EWMH windows; xprop missing, so focused-window verification is unavailable".to_string()
+                },
+            }
+        }
         Ok(output) => probe_fail(&format!(
             "wmctrl -l failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
@@ -286,6 +297,15 @@ fn env_nonempty(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// True if `cmd` is an executable found on `$PATH`. Used to gate focus
+/// capabilities on `xprop` without spawning it (xprop with no args would block
+/// reading a window interactively).
+fn command_on_path(cmd: &str) -> bool {
+    env::var_os("PATH").is_some_and(|paths| {
+        env::split_paths(&paths).any(|dir| dir.join(cmd).is_file())
+    })
 }
 
 #[cfg(test)]
