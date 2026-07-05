@@ -1243,7 +1243,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "move_window",
-        description = "Move a window to a new desktop position (frame top-left in desktop coordinates). Useful to recover windows that are partially off-screen. Requires the computer-use-linux GNOME Shell extension.",
+        description = "Move a window to a new desktop position (frame top-left in desktop coordinates). Useful to recover windows that are partially off-screen. Works through the computer-use-linux GNOME Shell extension or a generic X11/EWMH window manager (wmctrl).",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1257,16 +1257,15 @@ impl ComputerUseLinux {
     ) -> Json<WindowGeometryOutput> {
         let received = Some(serde_json::json!(params.clone()));
         let target = params.target.clone().into_target();
-        self.window_geometry_op(received, &target, |window_id| async move {
-            crate::windowing::backends::gnome::move_extension_window(window_id, params.x, params.y)
-                .await
+        self.window_geometry_op(received, &target, |window| async move {
+            registry::move_window(&window, params.x, params.y).await
         })
         .await
     }
 
     #[tool(
         name = "resize_window",
-        description = "Resize a window to a new frame width/height in desktop pixels, unmaximizing it first if needed. Useful to fit a window fully on-screen. Requires the computer-use-linux GNOME Shell extension.",
+        description = "Resize a window to a new frame width/height in desktop pixels, unmaximizing it first if needed. Useful to fit a window fully on-screen. Works through the computer-use-linux GNOME Shell extension or a generic X11/EWMH window manager (wmctrl).",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1280,13 +1279,8 @@ impl ComputerUseLinux {
     ) -> Json<WindowGeometryOutput> {
         let received = Some(serde_json::json!(params.clone()));
         let target = params.target.clone().into_target();
-        self.window_geometry_op(received, &target, |window_id| async move {
-            crate::windowing::backends::gnome::resize_extension_window(
-                window_id,
-                params.width,
-                params.height,
-            )
-            .await
+        self.window_geometry_op(received, &target, |window| async move {
+            registry::resize_window(&window, params.width, params.height).await
         })
         .await
     }
@@ -2219,7 +2213,7 @@ impl ComputerUseLinux {
         op: F,
     ) -> Json<WindowGeometryOutput>
     where
-        F: FnOnce(u64) -> Fut,
+        F: FnOnce(crate::windowing::WindowInfo) -> Fut,
         Fut: Future<Output = Result<String>>,
     {
         let windows = match list_windows().await {
@@ -2229,7 +2223,7 @@ impl ComputerUseLinux {
                 return Json(WindowGeometryOutput {
                     ok: false,
                     implemented: true,
-                    backend: crate::windowing::GNOME_SHELL_EXTENSION_BACKEND.to_string(),
+                    backend: "unknown".to_string(),
                     window: None,
                     message: format!("Window listing failed: {error}"),
                     permissions_hint: window_permission_hint(&error),
@@ -2237,13 +2231,13 @@ impl ComputerUseLinux {
                 });
             }
         };
-        let window_id = match resolve_window_target(&windows, target) {
-            Ok(window) => window.window_id,
+        let window = match resolve_window_target(&windows, target) {
+            Ok(window) => window.clone(),
             Err(error) => {
                 return Json(WindowGeometryOutput {
                     ok: false,
                     implemented: true,
-                    backend: crate::windowing::GNOME_SHELL_EXTENSION_BACKEND.to_string(),
+                    backend: "unknown".to_string(),
                     window: None,
                     message: format!("{error:#}"),
                     permissions_hint: None,
@@ -2251,7 +2245,9 @@ impl ComputerUseLinux {
                 });
             }
         };
-        match op(window_id).await {
+        let backend = window.backend.clone();
+        let window_id = window.window_id;
+        match op(window).await {
             Ok(message) => {
                 // Re-query so the caller sees the compositor-final geometry
                 // (tiling constraints, minimum sizes, etc. may adjust it).
@@ -2269,7 +2265,7 @@ impl ComputerUseLinux {
                 Json(WindowGeometryOutput {
                     ok: true,
                     implemented: true,
-                    backend: crate::windowing::GNOME_SHELL_EXTENSION_BACKEND.to_string(),
+                    backend,
                     window,
                     message,
                     permissions_hint: None,
@@ -2281,7 +2277,7 @@ impl ComputerUseLinux {
                 Json(WindowGeometryOutput {
                     ok: false,
                     implemented: true,
-                    backend: crate::windowing::GNOME_SHELL_EXTENSION_BACKEND.to_string(),
+                    backend,
                     window: None,
                     permissions_hint: window_permission_hint(&error),
                     message: error,

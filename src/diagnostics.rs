@@ -585,7 +585,7 @@ fn windowing_report(platform: &PlatformReport) -> WindowingReport {
         } else if hyprland.ok {
             "A Hyprland window backend is available for list_windows, focused_window, and targeted input verification."
         } else {
-            "A GNOME window listing backend is available for list_windows, focused_window, and targeted input verification."
+            "A window listing backend is available for list_windows, focused_window, and targeted input verification."
         }
     } else {
         "Window listing is unavailable or denied. Computer Use can still use screenshots, AT-SPI, and global ydotool input, but targeted window input cannot be verified. On GNOME, run setup_window_targeting to install the optional GNOME Shell extension backend. On COSMIC, ensure the bundled COSMIC helper is present and can connect to the session. On KDE/Plasma, ensure KWin exposes org.kde.KWin scripting on the session bus. On Hyprland, ensure hyprctl is available in the session."
