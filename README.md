@@ -36,11 +36,13 @@ The crate was extracted from [`codex-desktop-linux`](https://github.com/avifenes
 MCP tools exposed by the server:
 
 **Diagnostics**
+
 - `doctor` — single-shot JSON readiness report (platform, portals, accessibility, windowing, input, readiness summary, and a capability map of available backends)
 - `setup_accessibility` — enables GNOME's `org.gnome.desktop.interface toolkit-accessibility` setting so toolkit apps expose AT-SPI trees
 - `setup_window_targeting` — installs and enables the bundled GNOME Shell extension when `org.gnome.Shell.Introspect` is locked down
 
 **Discovery**
+
 - `list_apps` — running desktop apps visible to the AT-SPI registry
 - `list_windows` — compositor windows with title, app id, wm_class, focus state, client type (Wayland/X11), and bounds
 - `focused_window` — the window currently holding keyboard focus
@@ -50,6 +52,7 @@ MCP tools exposed by the server:
 Screenshot payloads are size-bounded by default before they are returned to the MCP host: max 1920 px width/height and 2 MiB image bytes, with hard caps even when callers request more. Agents that need more detail can pass `max_width`, `max_height`, `max_bytes`, `scale`, `format: "jpeg"`, or `quality`, preferably with a window target or crop. PNG remains the default; JPEG lets callers trade lossless pixels for a smaller payload before the byte cap forces further resizing. Returned screenshot metadata includes `coordinate_width`, `coordinate_height`, `scale`, `format`, and `quality` so callers can convert from a downscaled preview to desktop coordinate pixels.
 
 **Input**
+
 - `click` — by element index, semantic selector, or desktop coordinate pixels
 - `drag` — desktop coordinate drag (start / end)
 - `scroll` — page-based scroll on an element or at a pixel location
@@ -59,10 +62,12 @@ Screenshot payloads are size-bounded by default before they are returned to the 
 Targeted `press_key`/`type_text` results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus. Click/screenshot/input results warn when the target window or coordinate is partially or fully off-screen. `get_app_state` returns a compact readiness block by default; pass `verbose: true` for the full diagnostics report.
 
 **Semantic actions**
+
 - `perform_action` — invoke any AT-SPI action exposed by an element (`Press`, `Activate`, `Toggle`, …); defaults to the primary action
 - `set_value` — write to a settable accessibility element (text fields, sliders, spinners)
 
 **Navigation**
+
 - `activate_window` — focus a window by `window_id`, `pid`, `app_id`, `wm_class`, `title`, or terminal selectors
 - `move_window` / `resize_window` — reposition or resize a window in desktop coordinates (GNOME Shell extension backend); useful to recover windows that are partially off-screen
 
@@ -222,6 +227,23 @@ Edit `~/.config/Claude/claude_desktop_config.json`:
 ```
 
 Restart Claude Desktop. The tools should appear in the tools list.
+
+### Pi Coding Agent
+
+```bash
+pi install npm:pi-mcp-adapter
+pi install npm:@agent-sh/computer-use-linux
+```
+
+Restart pi or run `/reload`. The MCP proxy tool `mcp()` will have the desktop tools available:
+
+```
+mcp({ tool: "doctor" })
+mcp({ search: "windows" })
+mcp({ tool: "list_windows" })
+```
+
+The extension auto-registers the computer-use-linux MCP server into pi-mcp-adapter's config. If the binary is not found, check the [Pi setup guide](skills/computer-use-linux/references/pi-setup.md).
 
 ### Hermes Agent
 

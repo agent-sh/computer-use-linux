@@ -19,7 +19,8 @@
     "wayland",
     "accessibility",
     "hermes-agent",
-    "codex"
+    "codex",
+    "pi-package"
   ],
   "os": [
     "linux"
@@ -35,10 +36,16 @@
     "LICENSE",
     "README.md",
     "skills/computer-use-linux/SKILL.md",
+    "skills/computer-use-linux/references/",
     "npm/README.md",
     "npm/bin/computer-use-linux.js",
-    "npm/install.js"
+    "npm/install.js",
+    "pi/"
   ],
+  "pi": {
+    "extensions": ["./pi/extension/index.ts"],
+    "skills": ["./skills/computer-use-linux/SKILL.md"]
+  },
   "scripts": {
     "postinstall": "node npm/install.js",
     "pack:check": "npm pack --dry-run",

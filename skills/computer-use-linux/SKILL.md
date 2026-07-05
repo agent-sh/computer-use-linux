@@ -1,6 +1,6 @@
 ---
 name: computer-use-linux
-description: "Use when Hermes needs Linux desktop observation or control through the computer-use-linux MCP server."
+description: "Linux desktop observation and control via the computer-use-linux MCP server: accessibility trees, screenshots, window targeting, and input synthesis (click, type, scroll). Works with any MCP host."
 author: agent-sh
 license: MIT
 platforms: [linux]
@@ -8,28 +8,29 @@ platforms: [linux]
 
 # computer-use-linux
 
-Use `computer-use-linux` when Hermes needs to observe or operate a local Linux desktop through MCP: inspect the accessibility tree, list/focus windows, take screenshots, click, scroll, type, press keys, or invoke AT-SPI actions.
+Use `computer-use-linux` when an agent needs to observe or operate a local Linux desktop through MCP: inspect the accessibility tree, list/focus windows, take screenshots, click, scroll, type, press keys, or invoke AT-SPI actions.
 
 ## When to Use
 
 Use this skill when:
-- The user wants Hermes to control a Linux GUI app.
+
+- The user wants the agent to control a Linux GUI app.
 - You need desktop state from AT-SPI, screenshots, or compositor window metadata.
-- You are configuring the `computer-use-linux` MCP server for Hermes.
+- You are configuring the `computer-use-linux` MCP server for your agent.
 - A desktop action needs target-aware input instead of blind shell commands.
 
 Do not use this for remote browsers, websites, or headless automation when a browser-specific tool is available. Do not assume desktop actions are safe just because the MCP connection works.
 
 ## Install
 
-Preferred install for Hermes users:
+Preferred install:
 
 ```bash
 npm install -g @agent-sh/computer-use-linux
 computer-use-linux doctor | jq .readiness
 ```
 
-Rust users can install the same server from crates.io:
+Rust users can install from crates.io:
 
 ```bash
 cargo install computer-use-linux
@@ -47,42 +48,23 @@ computer-use-linux doctor | jq .readiness
 
 On GNOME Wayland, log out and back in after `setup-window-targeting` if the GNOME Shell extension was newly installed.
 
-## Configure Hermes
+## Configure Your Agent
 
-Add the server with the Hermes MCP CLI:
+The `computer-use-linux` binary is an MCP server. Configure it as a stdio MCP server in your agent of choice:
 
-```bash
-hermes mcp add computer-use-linux --command computer-use-linux --args mcp
-hermes mcp test computer-use-linux
-hermes mcp configure computer-use-linux
+```json
+{
+  "command": "computer-use-linux",
+  "args": ["mcp"]
+}
 ```
 
-`configure` opens Hermes' tool-selection UI for this MCP server.
+If the binary is not on `PATH`, use the absolute path (typically `~/.local/bin/computer-use-linux` or the npm global bin directory).
 
-The generated config should look like this:
+### Host-specific guides
 
-```yaml
-mcp_servers:
-  computer-use-linux:
-    command: computer-use-linux
-    args: ["mcp"]
-    timeout: 120
-    connect_timeout: 30
-```
-
-If the binary is not on `PATH`, pass the absolute path to `--command`.
-
-Hermes registers tools using the `mcp_<server>_<tool>` pattern. With this config, tool names are prefixed as `mcp_computer_use_linux_`, for example:
-
-| MCP tool | Hermes tool name |
-| --- | --- |
-| `doctor` | `mcp_computer_use_linux_doctor` |
-| `get_app_state` | `mcp_computer_use_linux_get_app_state` |
-| `list_windows` | `mcp_computer_use_linux_list_windows` |
-| `click` | `mcp_computer_use_linux_click` |
-| `type_text` | `mcp_computer_use_linux_type_text` |
-
-Restart Hermes after changing MCP config.
+- [Hermes setup](references/hermes-setup.md)
+- [Pi coding agent setup](references/pi-setup.md)
 
 ## Procedure
 
@@ -110,7 +92,6 @@ Run:
 
 ```bash
 computer-use-linux doctor | jq .readiness
-hermes chat --toolsets mcp-computer-use-linux -q "List the current desktop windows."
 ```
 
 Ready output should have:
@@ -121,4 +102,4 @@ Ready output should have:
 - `can_send_development_input: true`
 - `blockers: []`
 
-If Hermes does not expose the tools, check startup logs for MCP discovery errors and confirm the server name in `config.yaml` is exactly `computer-use-linux`.
+Then test with your agent by calling the `doctor` tool or asking the agent to list desktop windows.
