@@ -852,7 +852,9 @@ mod tests {
     }
 
     #[test]
-    fn windows_are_sorted_by_derived_id() {
+    fn windows_are_sorted_by_derived_id_ascending() {
+        // Input order (zzz, aaa) must be re-sorted to ascending derived id so the
+        // window list is stable across queries regardless of KWin's iteration order.
         let json = r#"{
             "windows": [
                 {"uuid": "zzz", "caption": "Z", "normalWindow": true},
@@ -861,7 +863,71 @@ mod tests {
         }"#;
         let windows = parse_kwin_windows(json).expect("parses");
         assert_eq!(windows.len(), 2);
-        assert!(windows[0].window_id <= windows[1].window_id);
+        let id_aaa = kwin_window_id_from_uuid("aaa");
+        let id_zzz = kwin_window_id_from_uuid("zzz");
+        let (min, max) = if id_aaa < id_zzz {
+            (id_aaa, id_zzz)
+        } else {
+            (id_zzz, id_aaa)
+        };
+        assert_eq!(windows[0].window_id, min, "smallest id must come first");
+        assert_eq!(windows[1].window_id, max);
+    }
+
+    #[test]
+    fn parses_numeric_fields_delivered_as_strings() {
+        // KWin's scripting bridge frequently serializes numbers as strings; the
+        // typed WindowInfo fields must still come through as real integers. This
+        // guards the string branch of the JSON coercions end-to-end, not just in
+        // isolation — dropping it would silently blank out pid/bounds on Plasma.
+        let json = r#"{
+            "windows": [{
+                "uuid": "a",
+                "caption": "Konsole",
+                "pid": "9182",
+                "x": "100",
+                "y": "-40",
+                "width": "1024",
+                "height": "768",
+                "workspace": "3",
+                "normalWindow": true
+            }]
+        }"#;
+        let windows = parse_kwin_windows(json).expect("parses");
+        let window = &windows[0];
+        assert_eq!(window.pid, Some(9182));
+        assert_eq!(window.workspace, Some(3));
+        let bounds = window.bounds.as_ref().expect("bounds present");
+        assert_eq!(
+            (bounds.x, bounds.y, bounds.width, bounds.height),
+            (Some(100), Some(-40), 1024, 768)
+        );
+    }
+
+    #[test]
+    fn minimized_window_maps_to_hidden() {
+        // `minimized` drives the `hidden` flag callers use to skip off-screen
+        // windows; a regression flipping this mapping is invisible to a raw
+        // coverage number but breaks window selection.
+        let json = r#"{"windows": [{"uuid": "a", "minimized": true, "active": false, "normalWindow": true}]}"#;
+        let windows = parse_kwin_windows(json).expect("parses");
+        assert!(windows[0].hidden);
+        assert!(!windows[0].focused);
+    }
+
+    #[test]
+    fn boolean_filter_fields_delivered_as_strings_still_filter() {
+        // The desktop/dock/skipTaskbar filters must honor the stringified bool
+        // form KWin can emit, otherwise panels leak into the window list.
+        let json = r#"{
+            "windows": [
+                {"uuid": "a", "skipTaskbar": "true"},
+                {"uuid": "b", "caption": "Real", "normalWindow": "true"}
+            ]
+        }"#;
+        let windows = parse_kwin_windows(json).expect("parses");
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].title.as_deref(), Some("Real"));
     }
 
     #[test]

@@ -606,6 +606,81 @@ mod tests {
     }
 
     #[test]
+    fn terminal_command_falls_back_to_root_process() {
+        // When the active process doesn't match (or there is none), the root
+        // process must still be consulted. A bare login shell has no distinct
+        // active process, so matching "bash" has to fall through to the root.
+        let mut w = window(10);
+        w.terminal = Some(terminal_context(
+            "/dev/pts/1",
+            terminal_process(500, "bash", Some("/home/user")),
+            Some(terminal_process(777, "vim", Some("/home/user"))),
+        ));
+        let windows = vec![w];
+        let target = WindowTarget {
+            terminal_command: Some("bash".to_string()),
+            ..Default::default()
+        };
+        let resolved =
+            resolve_window_target(&windows, &target).expect("root process command resolves");
+        assert_eq!(resolved.window_id, 10);
+    }
+
+    #[test]
+    fn terminal_pid_matches_root_or_active_but_not_others() {
+        let mut w = window(10);
+        w.terminal = Some(terminal_context(
+            "/dev/pts/1",
+            terminal_process(500, "bash", Some("/home/user")),
+            Some(terminal_process(777, "vim", Some("/home/user"))),
+        ));
+        let windows = vec![w];
+
+        for pid in [500, 777] {
+            let target = WindowTarget {
+                terminal_pid: Some(pid),
+                ..Default::default()
+            };
+            let resolved = resolve_window_target(&windows, &target)
+                .unwrap_or_else(|_| panic!("terminal_pid {pid} should resolve"));
+            assert_eq!(resolved.window_id, 10);
+        }
+
+        let unrelated = WindowTarget {
+            terminal_pid: Some(9999),
+            ..Default::default()
+        };
+        assert!(resolve_window_target(&windows, &unrelated).is_err());
+    }
+
+    #[test]
+    fn rounded_window_id_reports_when_disambiguator_matches_nothing() {
+        // A disambiguator that matches none of the rounding candidates yields a
+        // distinct, more specific error than "add a disambiguator" — the caller
+        // gave one, it just didn't match. Regressions that collapse these two
+        // branches would mislead the caller into thinking they omitted a hint.
+        let base = 1_u64 << 54;
+        let mut a = window(base);
+        a.pid = Some(100);
+        let mut b = window(base + 2);
+        b.pid = Some(200);
+        let windows = vec![a, b];
+
+        let target = WindowTarget {
+            window_id: Some(base + 1),
+            pid: Some(424242), // matches neither candidate
+            ..Default::default()
+        };
+        let error = resolve_window_target(&windows, &target)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("none matched the provided"),
+            "expected the disambiguator-mismatch branch, got: {error}"
+        );
+    }
+
+    #[test]
     fn terminal_target_non_terminal_window_is_skipped() {
         // A plain window (terminal: None) must never match a terminal target.
         let windows = vec![window(10)];
