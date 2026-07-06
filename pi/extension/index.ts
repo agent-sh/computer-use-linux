@@ -151,11 +151,22 @@ function writeMcpConfig(path: string, config: McpConfig): void {
 	writeFileSync(path, JSON.stringify(config, null, 2) + "\n", "utf-8");
 }
 
-function ensureServerEntry(configPath: string, binaryPath: string): boolean {
+/**
+ * Result of ensuring the computer-use-linux entry in the MCP config.
+ * - "updated":   entry was written or updated successfully
+ * - "unchanged": entry already matches, no write needed
+ * - "failed":    config could not be read or written
+ */
+type EnsureResult = "updated" | "unchanged" | "failed";
+
+function ensureServerEntry(
+	configPath: string,
+	binaryPath: string,
+): EnsureResult {
 	const config = readMcpConfig(configPath);
 
 	// If config exists but can't be read, don't overwrite it
-	if (config === null) return false;
+	if (config === null) return "failed";
 
 	// Validate that mcpServers is a plain object before mutating
 	const servers =
@@ -172,7 +183,7 @@ function ensureServerEntry(configPath: string, binaryPath: string): boolean {
 		existing.args?.length === 1 &&
 		existing.args[0] === "mcp"
 	) {
-		return false; // No change needed
+		return "unchanged"; // No change needed
 	}
 
 	// Add or update the entry
@@ -183,13 +194,13 @@ function ensureServerEntry(configPath: string, binaryPath: string): boolean {
 
 	try {
 		writeMcpConfig(configPath, { ...config, mcpServers: servers });
-		return true; // Config was updated
+		return "updated"; // Config was updated
 	} catch (error) {
 		console.error(
 			`${PACKAGE_NAME}: failed to write MCP config to ${configPath}:`,
 			error instanceof Error ? error.message : String(error),
 		);
-		return false; // Write failed
+		return "failed"; // Write failed
 	}
 }
 
@@ -215,13 +226,21 @@ export default function (pi: ExtensionAPI) {
 
 			// Write/update the MCP config that pi-mcp-adapter reads
 			const configPath = getPiAgentMcpConfigPath();
-			const changed = ensureServerEntry(configPath, binaryPath);
+			const result = ensureServerEntry(configPath, binaryPath);
 
-			if (changed && ctx.hasUI) {
+			if (result === "updated" && ctx.hasUI) {
 				ctx.ui.notify?.(
 					`${PACKAGE_NAME}: MCP server configured at ${configPath}. ` +
 						"Run /reload if pi-mcp-adapter is already installed.",
 					"info",
+				);
+			}
+
+			if (result === "failed" && ctx.hasUI) {
+				ctx.ui.notify?.(
+					`${PACKAGE_NAME}: failed to configure MCP server at ${configPath}. ` +
+						"Check the console logs and ensure the file is writable.",
+					"error",
 				);
 			}
 
