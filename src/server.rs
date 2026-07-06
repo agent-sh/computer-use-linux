@@ -4944,4 +4944,184 @@ mod tests {
             terminal: None,
         }
     }
+
+    #[test]
+    fn ascii_keycodes_match_the_linux_evdev_layout() {
+        // The keyboard is not laid out in alphabetical order — KEY_A=30, KEY_B=48,
+        // KEY_C=46. The expected values below are the fixed Linux input-event codes
+        // (input-event-codes.h). Pinning the whole table catches the class of bug
+        // where two entries are swapped: every 'c' would type a 'v' and no
+        // higher-level test would necessarily notice.
+        let letters = [
+            ('a', 30),
+            ('b', 48),
+            ('c', 46),
+            ('d', 32),
+            ('e', 18),
+            ('f', 33),
+            ('g', 34),
+            ('h', 35),
+            ('i', 23),
+            ('j', 36),
+            ('k', 37),
+            ('l', 38),
+            ('m', 50),
+            ('n', 49),
+            ('o', 24),
+            ('p', 25),
+            ('q', 16),
+            ('r', 19),
+            ('s', 31),
+            ('t', 20),
+            ('u', 22),
+            ('v', 47),
+            ('w', 17),
+            ('x', 45),
+            ('y', 21),
+            ('z', 44),
+        ];
+        for (ch, code) in letters {
+            assert_eq!(keycode_for_ascii(ch), Some(code), "letter {ch}");
+        }
+        let digits = [
+            ('1', 2),
+            ('2', 3),
+            ('3', 4),
+            ('4', 5),
+            ('5', 6),
+            ('6', 7),
+            ('7', 8),
+            ('8', 9),
+            ('9', 10),
+            ('0', 11),
+        ];
+        for (ch, code) in digits {
+            assert_eq!(keycode_for_ascii(ch), Some(code), "digit {ch}");
+        }
+        // Every letter and digit must map to a unique code.
+        let mut all: Vec<u16> = letters
+            .iter()
+            .chain(digits.iter())
+            .map(|(_, code)| *code)
+            .collect();
+        let total = all.len();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), total, "keycodes must be unique");
+        // Unmappable characters must be reported, not silently coerced.
+        assert_eq!(keycode_for_ascii('#'), None);
+    }
+
+    #[test]
+    fn named_keys_resolve_to_evdev_codes_including_aliases() {
+        // Named keys and their aliases must resolve to the same code.
+        assert_eq!(keycode("Enter"), Some(28));
+        assert_eq!(keycode("return"), Some(28));
+        assert_eq!(keycode("esc"), keycode("escape"));
+        assert_eq!(keycode("escape"), Some(1));
+        assert_eq!(keycode("del"), keycode("delete"));
+        assert_eq!(keycode("delete"), Some(111));
+        assert_eq!(keycode("page_up"), keycode("pageup"));
+        assert_eq!(keycode("pagedown"), Some(109));
+        assert_eq!(keycode("left"), keycode("arrowleft"));
+        assert_eq!(keycode("arrowright"), Some(106));
+        assert_eq!(keycode("space"), Some(57));
+        assert_eq!(keycode("f5"), Some(63));
+        assert_eq!(keycode("f11"), Some(87));
+        // Single characters route through the ASCII table.
+        assert_eq!(keycode("A"), Some(30));
+        // Unknown multi-character keys are unmapped, not guessed.
+        assert_eq!(keycode("bogus"), None);
+    }
+
+    #[test]
+    fn modifier_keycodes_cover_cross_platform_aliases() {
+        assert_eq!(modifier_keycode("ctrl"), modifier_keycode("control"));
+        assert_eq!(modifier_keycode("control"), Some(29));
+        assert_eq!(modifier_keycode("alt"), modifier_keycode("option"));
+        assert_eq!(modifier_keycode("option"), Some(56));
+        assert_eq!(modifier_keycode("shift"), Some(42));
+        // meta / super / cmd / command all mean the same physical key.
+        for name in ["meta", "super", "cmd", "command"] {
+            assert_eq!(modifier_keycode(name), Some(125), "modifier {name}");
+        }
+        assert_eq!(
+            modifier_keycode("enter"),
+            None,
+            "non-modifiers must not resolve"
+        );
+    }
+
+    #[test]
+    fn normalize_key_trims_lowercases_and_strips_separators() {
+        assert_eq!(normalize_key("  Ctrl "), "ctrl");
+        assert_eq!(normalize_key("Page-Up"), "pageup");
+        assert_eq!(normalize_key("Arrow Left"), "arrowleft");
+        // Normalization is what lets "page up", "page-up", and "PageUp" collapse
+        // to one key; verify it flows through keycode().
+        assert_eq!(keycode("Page Up"), keycode("pageup"));
+    }
+
+    #[test]
+    fn key_sequence_rejects_unknown_keys_and_bad_modifiers() {
+        // A chord with an unmappable key must fail rather than emit a partial
+        // sequence that presses modifiers and never releases them.
+        assert_eq!(key_sequence("Ctrl+bogus"), None);
+        // An unknown modifier fails the whole chord.
+        assert_eq!(key_sequence("Hyper+a"), None);
+        // A bare modifier presses and releases only itself.
+        assert_eq!(
+            key_sequence("Shift"),
+            Some(vec!["42:1".to_string(), "42:0".to_string()])
+        );
+        // Empty input yields nothing.
+        assert_eq!(key_sequence(""), None);
+    }
+
+    #[test]
+    fn mouse_button_codes_map_every_button_and_default_to_left() {
+        assert_eq!(mouse_button_code(None), "0xC0");
+        assert_eq!(mouse_button_code(Some("left")), "0xC0");
+        assert_eq!(mouse_button_code(Some("RIGHT")), "0xC1");
+        assert_eq!(mouse_button_code(Some("middle")), "0xC2");
+        assert_eq!(mouse_button_code(Some("side")), "0xC3");
+        assert_eq!(mouse_button_code(Some("extra")), "0xC4");
+        assert_eq!(mouse_button_code(Some("forward")), "0xC5");
+        assert_eq!(mouse_button_code(Some("back")), "0xC6");
+        // Unknown button names fall back to the primary button.
+        assert_eq!(mouse_button_code(Some("weird")), "0xC0");
+    }
+
+    #[test]
+    fn parse_process_line_splits_pid_comm_and_args() {
+        let parsed = parse_process_line("  1234 chrome /usr/lib/chrome --type=renderer --flag")
+            .expect("well-formed ps line parses");
+        assert_eq!(parsed.pid, 1234);
+        assert_eq!(parsed.name, "chrome");
+        assert_eq!(parsed.command, "/usr/lib/chrome --type=renderer --flag");
+    }
+
+    #[test]
+    fn parse_process_line_tolerates_missing_args_and_rejects_garbage() {
+        // A process with no argv still parses, with an empty command.
+        let parsed = parse_process_line("42 bash").expect("pid + comm parses");
+        assert_eq!((parsed.pid, parsed.name.as_str()), (42, "bash"));
+        assert_eq!(parsed.command, "");
+        // A non-numeric pid is not a process row.
+        assert!(parse_process_line("notapid comm args").is_none());
+        assert!(parse_process_line("").is_none());
+    }
+
+    #[test]
+    fn looks_like_desktop_app_matches_known_apps_and_skips_noise() {
+        assert!(looks_like_desktop_app("chrome", "/usr/lib/chromium"));
+        assert!(looks_like_desktop_app("code", "/usr/share/code/code"));
+        assert!(looks_like_desktop_app("slack", "/opt/slack"));
+        // Kernel threads and daemons must not be surfaced as apps.
+        assert!(!looks_like_desktop_app("kworker/0:1", ""));
+        assert!(!looks_like_desktop_app(
+            "systemd",
+            "/usr/lib/systemd/systemd"
+        ));
+    }
 }

@@ -141,3 +141,61 @@ impl PointerButton {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_name_is_case_insensitive_and_defaults_to_left() {
+        assert!(matches!(
+            PointerButton::from_name(Some("right")),
+            PointerButton::Right
+        ));
+        assert!(matches!(
+            PointerButton::from_name(Some("RIGHT")),
+            PointerButton::Right
+        ));
+        assert!(matches!(
+            PointerButton::from_name(Some("Middle")),
+            PointerButton::Middle
+        ));
+        assert!(matches!(
+            PointerButton::from_name(Some("left")),
+            PointerButton::Left
+        ));
+        // Missing and unknown names both fall back to the left button rather
+        // than failing — a click with no button should still click.
+        assert!(matches!(
+            PointerButton::from_name(None),
+            PointerButton::Left
+        ));
+        assert!(matches!(
+            PointerButton::from_name(Some("nonsense")),
+            PointerButton::Left
+        ));
+    }
+
+    #[test]
+    fn key_codes_match_the_linux_evdev_button_constants() {
+        // These are the fixed Linux input-event codes (BTN_LEFT = 0x110, etc.).
+        // Pinning the raw numbers catches an accidental swap that mapping one
+        // enum variant onto another's KeyCode would otherwise hide.
+        assert_eq!(PointerButton::Left.key_code(), 0x110);
+        assert_eq!(PointerButton::Right.key_code(), 0x111);
+        assert_eq!(PointerButton::Middle.key_code(), 0x112);
+    }
+
+    #[test]
+    fn each_button_synthesizes_a_distinct_code() {
+        let codes = [
+            PointerButton::Left.key_code(),
+            PointerButton::Right.key_code(),
+            PointerButton::Middle.key_code(),
+        ];
+        let mut unique = codes.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), codes.len(), "buttons must not collide");
+    }
+}
