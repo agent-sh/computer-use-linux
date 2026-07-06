@@ -770,3 +770,167 @@ fn gdbus_introspect_contains(
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_normal_window() {
+        let json = r#"{
+            "windows": [{
+                "uuid": "{12345678-90AB-CDEF-1234-567890ABCDEF}",
+                "caption": "  Dolphin  ",
+                "desktopFile": "org.kde.dolphin",
+                "resourceClass": "dolphin",
+                "resourceName": "dolphin",
+                "pid": 4321,
+                "x": 10.0,
+                "y": 20.0,
+                "width": 800,
+                "height": 600,
+                "workspace": 2,
+                "minimized": false,
+                "active": true,
+                "clientType": "wayland",
+                "normalWindow": true
+            }]
+        }"#;
+        let windows = parse_kwin_windows(json).expect("valid KWin JSON parses");
+        assert_eq!(windows.len(), 1);
+        let window = &windows[0];
+        assert_eq!(window.title.as_deref(), Some("Dolphin"));
+        assert_eq!(window.app_id.as_deref(), Some("org.kde.dolphin"));
+        assert_eq!(window.wm_class.as_deref(), Some("dolphin"));
+        assert_eq!(window.pid, Some(4321));
+        assert_eq!(window.backend, KWIN_BACKEND);
+        assert!(window.focused);
+        assert!(!window.hidden);
+        let bounds = window.bounds.as_ref().expect("bounds present");
+        assert_eq!(
+            (bounds.x, bounds.y, bounds.width, bounds.height),
+            (Some(10), Some(20), 800, 600)
+        );
+    }
+
+    #[test]
+    fn filters_out_desktop_dock_and_skip_taskbar_windows() {
+        let json = r#"{
+            "windows": [
+                {"uuid": "a", "desktopWindow": true},
+                {"uuid": "b", "dock": true},
+                {"uuid": "c", "skipTaskbar": true},
+                {"uuid": "d", "caption": "Real", "normalWindow": true}
+            ]
+        }"#;
+        let windows = parse_kwin_windows(json).expect("parses");
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].title.as_deref(), Some("Real"));
+    }
+
+    #[test]
+    fn keeps_windows_when_normal_window_flag_is_absent() {
+        // normalWindow defaults to true when missing, so the window is kept.
+        let json = r#"{"windows": [{"uuid": "a", "caption": "NoFlag"}]}"#;
+        let windows = parse_kwin_windows(json).expect("parses");
+        assert_eq!(windows.len(), 1);
+    }
+
+    #[test]
+    fn falls_back_to_internal_id_when_uuid_missing() {
+        let json =
+            r#"{"windows": [{"internalId": "{DEAD-BEEF}", "caption": "X", "normalWindow": true}]}"#;
+        let windows = parse_kwin_windows(json).expect("parses");
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].window_id, kwin_window_id_from_uuid("dead-beef"));
+    }
+
+    #[test]
+    fn window_without_any_uuid_is_a_hard_error() {
+        let json = r#"{"windows": [{"caption": "X", "normalWindow": true}]}"#;
+        assert!(parse_kwin_windows(json).is_err());
+    }
+
+    #[test]
+    fn windows_are_sorted_by_derived_id() {
+        let json = r#"{
+            "windows": [
+                {"uuid": "zzz", "caption": "Z", "normalWindow": true},
+                {"uuid": "aaa", "caption": "A", "normalWindow": true}
+            ]
+        }"#;
+        let windows = parse_kwin_windows(json).expect("parses");
+        assert_eq!(windows.len(), 2);
+        assert!(windows[0].window_id <= windows[1].window_id);
+    }
+
+    #[test]
+    fn malformed_json_is_reported_not_panicked() {
+        assert!(parse_kwin_windows("not json").is_err());
+        assert!(parse_kwin_windows("{}").is_err());
+    }
+
+    #[test]
+    fn app_id_falls_back_to_resource_class_without_desktop_file() {
+        let json = r#"{"windows": [{"uuid": "a", "resourceClass": "kate", "normalWindow": true}]}"#;
+        let windows = parse_kwin_windows(json).expect("parses");
+        assert_eq!(windows[0].app_id.as_deref(), Some("kate"));
+    }
+
+    #[test]
+    fn window_id_from_uuid_is_stable_and_case_insensitive() {
+        let braced = kwin_window_id_from_uuid("{ABCD-1234}");
+        let bare = kwin_window_id_from_uuid("abcd-1234");
+        assert_eq!(braced, bare, "braces and case must not change the id");
+        assert_ne!(
+            kwin_window_id_from_uuid("abcd-1234"),
+            kwin_window_id_from_uuid("abcd-1235"),
+            "distinct uuids must yield distinct ids"
+        );
+    }
+
+    #[test]
+    fn normalize_uuid_strips_braces_and_rejects_empty() {
+        assert_eq!(normalize_kwin_uuid("{ABC}").as_deref(), Some("abc"));
+        assert_eq!(normalize_kwin_uuid("  def  ").as_deref(), Some("def"));
+        assert_eq!(normalize_kwin_uuid("{}"), None);
+        assert_eq!(normalize_kwin_uuid("   "), None);
+    }
+
+    #[test]
+    fn clean_string_drops_empty_and_literal_null() {
+        assert_eq!(clean_string(Some("  hi  ")).as_deref(), Some("hi"));
+        assert_eq!(clean_string(Some("")), None);
+        assert_eq!(clean_string(Some("   ")), None);
+        assert_eq!(clean_string(Some("null")), None);
+        assert_eq!(clean_string(None), None);
+    }
+
+    #[test]
+    fn json_value_coercions_accept_numbers_and_numeric_strings() {
+        use serde_json::json;
+        assert_eq!(json_value_as_u32(Some(&json!(42))), Some(42));
+        assert_eq!(json_value_as_u32(Some(&json!("42"))), Some(42));
+        assert_eq!(json_value_as_u32(Some(&json!(42.7))), Some(43));
+        // Out-of-range / negative values for u32 are rejected.
+        assert_eq!(json_value_as_u32(Some(&json!(-1))), None);
+        assert_eq!(json_value_as_i32(Some(&json!(-5))), Some(-5));
+        assert_eq!(json_value_as_i32(Some(&json!("-5"))), Some(-5));
+        // Bools accept native and stringified forms.
+        assert_eq!(json_value_as_bool(Some(&json!(true))), Some(true));
+        assert_eq!(json_value_as_bool(Some(&json!("false"))), Some(false));
+        assert_eq!(json_value_as_bool(Some(&json!("maybe"))), None);
+        assert_eq!(json_value_as_bool(Some(&json!(1))), None);
+    }
+
+    #[test]
+    fn bounds_are_dropped_when_width_or_height_missing() {
+        let json =
+            r#"{"windows": [{"uuid": "a", "x": 5, "y": 5, "width": 100, "normalWindow": true}]}"#;
+        let windows = parse_kwin_windows(json).expect("parses");
+        assert!(
+            windows[0].bounds.is_none(),
+            "missing height must drop bounds"
+        );
+    }
+}

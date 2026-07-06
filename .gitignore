@@ -3,6 +3,10 @@
 **/*.rs.bk
 Cargo.lock.bak
 
+# Coverage artifacts (cargo llvm-cov)
+/lcov.info
+/*.profraw
+
 # Editor / OS
 .DS_Store
 *.swp

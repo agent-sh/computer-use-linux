@@ -371,3 +371,308 @@ fn same_optional_string(left: &Option<String>, right: &Option<String>) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::terminal::{TerminalProcess, TerminalWindowContext};
+    use crate::windowing::types::WindowBounds;
+
+    fn window(window_id: u64) -> WindowInfo {
+        WindowInfo {
+            window_id,
+            title: Some("Editor".to_string()),
+            app_id: Some("dev.example.Editor".to_string()),
+            wm_class: Some("Editor".to_string()),
+            pid: Some(1000),
+            bounds: Some(WindowBounds {
+                x: Some(0),
+                y: Some(0),
+                width: 800,
+                height: 600,
+            }),
+            workspace: Some(1),
+            focused: false,
+            hidden: false,
+            client_type: Some("wayland".to_string()),
+            backend: "test".to_string(),
+            terminal: None,
+        }
+    }
+
+    fn terminal_process(pid: u32, command: &str, cwd: Option<&str>) -> TerminalProcess {
+        TerminalProcess {
+            pid,
+            command_name: command.to_string(),
+            command_line: format!("{command} --flag"),
+            cwd: cwd.map(ToOwned::to_owned),
+        }
+    }
+
+    fn terminal_context(
+        tty: &str,
+        root: TerminalProcess,
+        active: Option<TerminalProcess>,
+    ) -> TerminalWindowContext {
+        TerminalWindowContext {
+            tty: tty.to_string(),
+            root_process: root,
+            active_process: active,
+            process_count: 1,
+            confidence: "high".to_string(),
+            match_reason: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn resolve_window_id_matches_exact() {
+        let windows = vec![window(10), window(20)];
+        let target = WindowTarget {
+            window_id: Some(20),
+            ..Default::default()
+        };
+        let resolved = resolve_window_target(&windows, &target).expect("exact id resolves");
+        assert_eq!(resolved.window_id, 20);
+    }
+
+    #[test]
+    fn resolve_window_id_missing_errors() {
+        let windows = vec![window(10)];
+        let target = WindowTarget {
+            window_id: Some(999),
+            ..Default::default()
+        };
+        let error = resolve_window_target(&windows, &target)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("No window matched window_id 999"), "{error}");
+    }
+
+    #[test]
+    fn resolve_by_pid_unique() {
+        let mut other = window(11);
+        other.pid = Some(2222);
+        let windows = vec![window(10), other];
+        let target = WindowTarget {
+            pid: Some(2222),
+            ..Default::default()
+        };
+        let resolved = resolve_window_target(&windows, &target).expect("pid resolves");
+        assert_eq!(resolved.window_id, 11);
+    }
+
+    #[test]
+    fn resolve_by_pid_ambiguous_lists_ids() {
+        let mut a = window(10);
+        a.pid = Some(4242);
+        let mut b = window(11);
+        b.pid = Some(4242);
+        let windows = vec![a, b];
+        let target = WindowTarget {
+            pid: Some(4242),
+            ..Default::default()
+        };
+        let error = resolve_window_target(&windows, &target)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("matched multiple windows"), "{error}");
+        assert!(error.contains("10") && error.contains("11"), "{error}");
+    }
+
+    #[test]
+    fn resolve_by_app_id_is_case_insensitive() {
+        let windows = vec![window(10)];
+        let target = WindowTarget {
+            app_id: Some("dev.example.editor".to_string()),
+            ..Default::default()
+        };
+        let resolved = resolve_window_target(&windows, &target).expect("app_id resolves");
+        assert_eq!(resolved.window_id, 10);
+    }
+
+    #[test]
+    fn resolve_by_wm_class_no_match_errors() {
+        let windows = vec![window(10)];
+        let target = WindowTarget {
+            wm_class: Some("Firefox".to_string()),
+            ..Default::default()
+        };
+        let error = resolve_window_target(&windows, &target)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("No window matched wm_class Firefox"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn resolve_by_title_matches_substring_case_insensitive() {
+        let mut w = window(10);
+        w.title = Some("My Project — VS Code".to_string());
+        let windows = vec![w];
+        let target = WindowTarget {
+            title: Some("vs code".to_string()),
+            ..Default::default()
+        };
+        let resolved = resolve_window_target(&windows, &target).expect("title substring resolves");
+        assert_eq!(resolved.window_id, 10);
+    }
+
+    #[test]
+    fn resolve_without_any_target_errors() {
+        let windows = vec![window(10)];
+        let target = WindowTarget::default();
+        assert!(resolve_window_target(&windows, &target).is_err());
+    }
+
+    #[test]
+    fn blank_string_targets_are_treated_as_absent() {
+        // A whitespace-only app_id must not match; with no other criteria it errors.
+        let windows = vec![window(10)];
+        let target = WindowTarget {
+            app_id: Some("   ".to_string()),
+            ..Default::default()
+        };
+        assert!(resolve_window_target(&windows, &target).is_err());
+    }
+
+    #[test]
+    fn window_id_rounding_needs_disambiguator() {
+        // Above 2^53, distinct u64 window ids collapse to the same f64 (JSON
+        // number). `base`, `base + 1`, and `base + 2` all cast to `base` as f64.
+        // A request for `base + 1` has no exact u64 window, so it falls through
+        // to the rounding path and matches both `base` and `base + 2`. Without a
+        // disambiguator this must fail loudly rather than pick one arbitrarily.
+        let base = 1_u64 << 54;
+        let mut a = window(base);
+        a.pid = Some(100);
+        let mut b = window(base + 2);
+        b.pid = Some(200);
+        let windows = vec![a, b];
+
+        let ambiguous = WindowTarget {
+            window_id: Some(base + 1),
+            ..Default::default()
+        };
+        let error = resolve_window_target(&windows, &ambiguous)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("JSON number rounding"), "{error}");
+
+        // Adding a pid disambiguator resolves to the intended window.
+        let disambiguated = WindowTarget {
+            window_id: Some(base + 1),
+            pid: Some(200),
+            ..Default::default()
+        };
+        let resolved =
+            resolve_window_target(&windows, &disambiguated).expect("pid disambiguates rounded id");
+        assert_eq!(resolved.window_id, base + 2);
+    }
+
+    #[test]
+    fn terminal_target_matches_by_tty() {
+        let mut w = window(10);
+        w.terminal = Some(terminal_context(
+            "/dev/pts/3",
+            terminal_process(500, "bash", Some("/home/user")),
+            None,
+        ));
+        let windows = vec![w];
+        let target = WindowTarget {
+            tty: Some("pts/3".to_string()),
+            ..Default::default()
+        };
+        let resolved = resolve_window_target(&windows, &target).expect("tty resolves");
+        assert_eq!(resolved.window_id, 10);
+    }
+
+    #[test]
+    fn terminal_target_matches_active_process_command() {
+        let mut w = window(10);
+        w.terminal = Some(terminal_context(
+            "/dev/pts/1",
+            terminal_process(500, "bash", Some("/home/user")),
+            Some(terminal_process(777, "vim", Some("/home/user/project"))),
+        ));
+        let windows = vec![w];
+        let target = WindowTarget {
+            terminal_command: Some("vim".to_string()),
+            ..Default::default()
+        };
+        let resolved = resolve_window_target(&windows, &target).expect("command resolves");
+        assert_eq!(resolved.window_id, 10);
+    }
+
+    #[test]
+    fn terminal_target_non_terminal_window_is_skipped() {
+        // A plain window (terminal: None) must never match a terminal target.
+        let windows = vec![window(10)];
+        let target = WindowTarget {
+            terminal_pid: Some(500),
+            ..Default::default()
+        };
+        assert!(resolve_window_target(&windows, &target).is_err());
+    }
+
+    #[test]
+    fn tty_matches_accepts_bare_and_dev_forms() {
+        assert!(tty_matches("/dev/pts/3", "pts/3"));
+        assert!(tty_matches("/dev/tty1", "tty1"));
+        assert!(tty_matches("/dev/pts/3", "3"));
+        assert!(tty_matches("pts/3", "pts/3"));
+        assert!(!tty_matches("/dev/pts/3", "pts/4"));
+    }
+
+    #[test]
+    fn terminal_cwd_matches_exact_and_trailing_component() {
+        let process = terminal_process(1, "bash", Some("/home/user/project"));
+        assert!(terminal_process_matches_cwd(&process, "/home/user/project"));
+        assert!(terminal_process_matches_cwd(
+            &process,
+            "/home/user/project/"
+        ));
+        // A relative suffix on a path boundary matches.
+        assert!(terminal_process_matches_cwd(&process, "project"));
+        // A non-boundary suffix must not match.
+        assert!(!terminal_process_matches_cwd(&process, "roject"));
+        assert!(!terminal_process_matches_cwd(&process, "/other"));
+    }
+
+    #[test]
+    fn optional_matches_treat_absent_request_as_wildcard() {
+        assert!(optional_exact_match(&Some("Editor".to_string()), None));
+        assert!(optional_exact_match(
+            &Some("Editor".to_string()),
+            Some("editor")
+        ));
+        assert!(!optional_exact_match(&None, Some("editor")));
+        assert!(optional_title_match(
+            &Some("My Editor".to_string()),
+            Some("editor")
+        ));
+        assert!(!optional_title_match(&None, Some("editor")));
+    }
+
+    #[test]
+    fn window_permission_hint_recognizes_denied_errors() {
+        assert!(window_permission_hint("org.freedesktop.DBus.Error.AccessDenied").is_some());
+        assert!(window_permission_hint("Operation not permitted").is_some());
+        assert!(window_permission_hint("Failed to connect to session bus").is_some());
+        assert!(window_permission_hint("some unrelated timeout").is_none());
+    }
+
+    #[test]
+    fn ensure_backend_can_focus_rejects_non_exact_backend_for_exact_target() {
+        // A window_id target requires exact focus; a backend that cannot exact-focus
+        // must be rejected. gnome-shell-introspect is a list-only backend.
+        let mut w = window(10);
+        w.backend = "gnome-shell-introspect".to_string();
+        let target = WindowTarget {
+            window_id: Some(10),
+            ..Default::default()
+        };
+        assert!(ensure_backend_can_focus_target(&target, &w).is_err());
+    }
+}
