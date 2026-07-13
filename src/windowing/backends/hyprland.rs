@@ -83,16 +83,28 @@ pub(crate) fn parse_hyprland_clients(json: &str) -> Result<Vec<WindowInfo>> {
 
 pub fn activate_window(window_id: u64) -> Result<()> {
     let address = format!("address:0x{window_id:x}");
-    let output = hyprctl_output(&["dispatch", "focuswindow", &address])
+    let lua_dispatch = lua_focus_dispatch(&address);
+    let lua_output = hyprctl_output(&["dispatch", &lua_dispatch])
+        .with_context(|| format!("failed to run Hyprland Lua focus dispatcher for {address}"))?;
+    if lua_output.status.success() {
+        return Ok(());
+    }
+
+    let legacy_output = hyprctl_output(&["dispatch", "focuswindow", &address])
         .with_context(|| format!("failed to run hyprctl dispatch focuswindow {address}"))?;
-    if output.status.success() {
+    if legacy_output.status.success() {
         Ok(())
     } else {
         bail!(
-            "hyprctl dispatch focuswindow {address} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "Hyprland window focus failed for {address}; Lua dispatcher: {}; legacy dispatcher: {}",
+            String::from_utf8_lossy(&lua_output.stderr).trim(),
+            String::from_utf8_lossy(&legacy_output.stderr).trim()
         );
     }
+}
+
+fn lua_focus_dispatch(address: &str) -> String {
+    format!("hl.dsp.focus({{ window = \"{address}\" }})")
 }
 
 fn hyprctl_output(args: &[&str]) -> std::io::Result<std::process::Output> {
@@ -258,6 +270,14 @@ fn parse_hyprland_address(address: &str) -> Result<u64> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn builds_hyprland_055_lua_focus_dispatch() {
+        assert_eq!(
+            lua_focus_dispatch("address:0x1234abcd"),
+            "hl.dsp.focus({ window = \"address:0x1234abcd\" })"
+        );
+    }
 
     #[test]
     fn selects_wayland_matching_hyprland_instance_before_newer_nonmatch() {

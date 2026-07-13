@@ -66,6 +66,50 @@ pub struct ComputerUseLinux {
     desktop_size: Arc<Mutex<Option<(u32, u32)>>>,
 }
 
+fn sanitize_unsigned_integer_formats(value: &mut serde_json::Value) {
+    let serde_json::Value::Object(object) = value else {
+        return;
+    };
+
+    let has_unsigned_format = matches!(
+        object.get("format").and_then(serde_json::Value::as_str),
+        Some("uint" | "uint8" | "uint16" | "uint32" | "uint64" | "usize")
+    );
+    if has_unsigned_format {
+        object.remove("format");
+    }
+
+    for nested in object.values_mut() {
+        match nested {
+            serde_json::Value::Object(_) => sanitize_unsigned_integer_formats(nested),
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    sanitize_unsigned_integer_formats(item);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl ComputerUseLinux {
+    fn mcp_tool_router(&self) -> rmcp::handler::server::router::tool::ToolRouter<Self> {
+        let mut router = Self::tool_router();
+        for route in router.map.values_mut() {
+            let input_schema = Arc::make_mut(&mut route.attr.input_schema);
+            for value in input_schema.values_mut() {
+                sanitize_unsigned_integer_formats(value);
+            }
+            if let Some(output_schema) = route.attr.output_schema.as_mut() {
+                for value in Arc::make_mut(output_schema).values_mut() {
+                    sanitize_unsigned_integer_formats(value);
+                }
+            }
+        }
+        router
+    }
+}
+
 #[tool_router]
 impl ComputerUseLinux {
     #[tool(
@@ -1287,6 +1331,7 @@ impl ComputerUseLinux {
 }
 
 #[tool_handler(
+    router = self.mcp_tool_router(),
     name = "computer-use-linux",
     // NOTE: keep in lockstep with Cargo.toml + package.json on every release.
     // The rmcp tool_handler macro only accepts a string literal here, so this
@@ -3742,6 +3787,49 @@ mod tests {
     use super::*;
     use crate::atspi_tree::{AccessibilityAction, Bounds};
     use crate::windows::{WindowBounds, GNOME_SHELL_EXTENSION_BACKEND};
+
+    #[test]
+    fn exported_tool_schemas_omit_unsigned_integer_formats() {
+        let tools = ComputerUseLinux::default().mcp_tool_router().list_all();
+        let value = serde_json::to_value(tools).unwrap();
+        let mut unsupported = Vec::new();
+        collect_unsigned_integer_formats(&value, "$", &mut unsupported);
+
+        assert!(
+            unsupported.is_empty(),
+            "unsupported unsigned integer formats: {unsupported:?}"
+        );
+    }
+
+    fn collect_unsigned_integer_formats(
+        value: &serde_json::Value,
+        path: &str,
+        unsupported: &mut Vec<String>,
+    ) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if matches!(
+                    object.get("format").and_then(serde_json::Value::as_str),
+                    Some("uint" | "uint8" | "uint16" | "uint32" | "uint64" | "usize")
+                ) {
+                    unsupported.push(path.to_string());
+                }
+                for (key, nested) in object {
+                    collect_unsigned_integer_formats(nested, &format!("{path}/{key}"), unsupported);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (index, nested) in items.iter().enumerate() {
+                    collect_unsigned_integer_formats(
+                        nested,
+                        &format!("{path}/{index}"),
+                        unsupported,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
 
     fn node(index: u32, bounds: Option<Bounds>) -> AccessibilityNode {
         node_with_actions(index, bounds, Vec::new())
