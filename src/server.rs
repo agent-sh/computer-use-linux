@@ -2997,11 +2997,24 @@ fn prepare_app_state_screenshot(
     options: ScreenshotPayloadOptions,
 ) -> Result<ScreenshotCapture> {
     if let Some(bounds) = bounds {
-        let (x, y, width, height) = window_crop_rect(bounds).ok_or_else(|| {
+        let (mut x, mut y, mut width, mut height) = window_crop_rect(bounds).ok_or_else(|| {
             anyhow::anyhow!(
                 "targeted screenshot has unusable window bounds; refusing to return the full desktop"
             )
         })?;
+        if x < 0 {
+            width = width.saturating_sub(x.unsigned_abs());
+            x = 0;
+        }
+        if y < 0 {
+            height = height.saturating_sub(y.unsigned_abs());
+            y = 0;
+        }
+        if width == 0 || height == 0 {
+            anyhow::bail!(
+                "targeted screenshot window is outside the captured desktop; refusing to return the full desktop"
+            );
+        }
         let (bytes, width, height) = crop_png(&raw.bytes, x, y, width, height)
             .map_err(|error| anyhow::anyhow!("targeted screenshot crop failed: {error}"))?;
         raw = RawScreenshotCapture {
@@ -3948,6 +3961,32 @@ mod tests {
             (200, 100)
         );
         assert_eq!((capture.width, capture.height), (100, 50));
+    }
+
+    #[test]
+    fn targeted_app_state_crops_only_visible_part_of_offscreen_window() {
+        let raw = RawScreenshotCapture {
+            mime_type: "image/png".to_string(),
+            bytes: solid_png(400, 200),
+            source: "test".to_string(),
+            width: 400,
+            height: 200,
+        };
+        let bounds = WindowBounds {
+            x: Some(-50),
+            y: Some(-40),
+            width: 100,
+            height: 100,
+        };
+
+        let capture =
+            prepare_app_state_screenshot(raw, Some(&bounds), ScreenshotPayloadOptions::default())
+                .unwrap();
+
+        assert_eq!(
+            (capture.coordinate_width, capture.coordinate_height),
+            (50, 60)
+        );
     }
 
     #[test]
