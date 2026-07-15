@@ -3,7 +3,7 @@ use crate::windowing::types::{WindowFocusResult, WindowInfo, WindowTarget};
 use anyhow::{bail, Result};
 use tokio::time::{sleep, Duration};
 
-const FOCUS_VERIFY_ATTEMPTS: usize = 6;
+const FOCUS_VERIFY_ATTEMPTS: usize = 21;
 const FOCUS_VERIFY_DELAY: Duration = Duration::from_millis(50);
 
 pub async fn list_windows() -> Result<Vec<WindowInfo>> {
@@ -369,5 +369,16 @@ fn same_optional_string(left: &Option<String>, right: &Option<String>) -> bool {
     match (left.as_deref(), right.as_deref()) {
         (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn focus_verification_allows_workspace_transition_latency() {
+        let verification_budget = FOCUS_VERIFY_DELAY * (FOCUS_VERIFY_ATTEMPTS - 1) as u32;
+        assert!(verification_budget >= Duration::from_secs(1));
     }
 }

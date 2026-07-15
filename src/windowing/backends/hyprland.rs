@@ -64,13 +64,57 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
         );
     }
 
-    parse_hyprland_clients(&String::from_utf8_lossy(&output.stdout))
+    let clients_json = String::from_utf8_lossy(&output.stdout);
+    let monitors_output = hyprctl_output(&["monitors", "-j"]).ok();
+    match monitors_output.filter(|output| output.status.success()) {
+        Some(monitors) => parse_hyprland_clients_with_monitors(&clients_json, &monitors.stdout),
+        None => parse_hyprland_clients(&clients_json),
+    }
+}
+
+fn parse_hyprland_clients_with_monitors(
+    clients_json: &str,
+    monitors_json: &[u8],
+) -> Result<Vec<WindowInfo>> {
+    let monitors: Vec<HyprlandMonitor> = serde_json::from_slice(monitors_json)
+        .context("failed to parse hyprctl monitors -j output")?;
+    let monitors = monitors
+        .into_iter()
+        .map(|monitor| (monitor.id, monitor))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut clients: Vec<HyprlandClient> =
+        serde_json::from_str(clients_json).context("failed to parse hyprctl clients -j output")?;
+    for client in &mut clients {
+        let Some(monitor) = client.monitor.and_then(|id| monitors.get(&id)) else {
+            continue;
+        };
+        if let Some(at) = client.at.as_mut() {
+            at[0] = scale_i32(at[0] - monitor.x, monitor.scale);
+            at[1] = scale_i32(at[1] - monitor.y, monitor.scale);
+        }
+        if let Some(size) = client.size.as_mut() {
+            size[0] = scale_u32(size[0], monitor.scale);
+            size[1] = scale_u32(size[1], monitor.scale);
+        }
+    }
+    windows_from_hyprland_clients(clients)
 }
 
 pub(crate) fn parse_hyprland_clients(json: &str) -> Result<Vec<WindowInfo>> {
     let clients: Vec<HyprlandClient> =
         serde_json::from_str(json).context("failed to parse hyprctl clients -j output")?;
+    windows_from_hyprland_clients(clients)
+}
 
+fn scale_i32(value: i32, scale: f64) -> i32 {
+    (f64::from(value) * scale).round() as i32
+}
+
+fn scale_u32(value: u32, scale: f64) -> u32 {
+    (f64::from(value) * scale).round() as u32
+}
+
+fn windows_from_hyprland_clients(clients: Vec<HyprlandClient>) -> Result<Vec<WindowInfo>> {
     let mut windows = clients
         .into_iter()
         .filter(|client| client.mapped.unwrap_or(true))
@@ -200,12 +244,21 @@ struct HyprlandInstanceCandidate {
 }
 
 #[derive(Debug, Deserialize)]
+struct HyprlandMonitor {
+    id: i32,
+    x: i32,
+    y: i32,
+    scale: f64,
+}
+
+#[derive(Debug, Deserialize)]
 struct HyprlandClient {
     address: String,
     mapped: Option<bool>,
     hidden: Option<bool>,
     at: Option<[i32; 2]>,
     size: Option<[u32; 2]>,
+    monitor: Option<i32>,
     workspace: Option<HyprlandWorkspace>,
     #[serde(rename = "class")]
     class_name: Option<String>,
@@ -270,6 +323,28 @@ fn parse_hyprland_address(address: &str) -> Result<u64> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn rebases_global_window_coordinates_to_screenshot_space() {
+        let clients = r#"[{
+            "address":"0x1234",
+            "mapped":true,
+            "at":[4714,1494],
+            "size":[931,1124],
+            "monitor":0,
+            "class":"com.mitchellh.ghostty",
+            "title":"Ghostty"
+        }]"#;
+        let monitors = br#"[
+            {"id":0,"x":3747,"y":1440,"scale":1.8},
+            {"id":1,"x":5667,"y":0,"scale":2.0}
+        ]"#;
+        let windows = parse_hyprland_clients_with_monitors(clients, monitors).unwrap();
+
+        let bounds = windows[0].bounds.as_ref().unwrap();
+        assert_eq!((bounds.x, bounds.y), (Some(1741), Some(97)));
+        assert_eq!((bounds.width, bounds.height), (1676, 2023));
+    }
 
     #[test]
     fn builds_hyprland_055_lua_focus_dispatch() {
