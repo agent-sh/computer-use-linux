@@ -1155,7 +1155,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "press_key",
-        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app.",
+        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1180,6 +1180,48 @@ impl ComputerUseLinux {
                 });
             }
         };
+        let Some((chord_modifiers, chord_key)) = key_chord(&params.key) else {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "press_key".to_string(),
+                message: "Unsupported key. Use names like Enter, Escape, Tab, ArrowLeft, Super, Ctrl+L, or a single US keyboard letter/digit.".to_string(),
+                received,
+            });
+        };
+        if self.should_prefer_portal_keyboard_for_chords() {
+            match self.ensure_portal_keyboard_session().await {
+                Ok(Some(session)) => {
+                    let modifiers: Vec<i32> =
+                        chord_modifiers.iter().map(|m| i32::from(*m)).collect();
+                    match press_keycode_chord(&session, &modifiers, i32::from(chord_key)).await {
+                        Ok(()) => {
+                            let notes = self.input_landing_notes(focus.as_ref(), false).await;
+                            return Json(with_notes(
+                                successful_action_with_focus(
+                                    "press_key",
+                                    "Action sent through the remote desktop portal.",
+                                    received,
+                                    focus,
+                                ),
+                                notes,
+                            ));
+                        }
+                        Err(error) => {
+                            self.clear_portal_keyboard_session();
+                            return Json(action_result_with_focus(
+                                "press_key",
+                                Err(format!("{error:#}")),
+                                received,
+                                focus,
+                            ));
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => {}
+            }
+        }
         let Some(key_events) = key_sequence(&params.key) else {
             return Json(ActionOutput {
                 ok: false,
@@ -1984,6 +2026,29 @@ impl ComputerUseLinux {
             return self.is_wayland_session() && !self.is_kde_wayland_session();
         }
         self.is_wayland_session() && !self.is_kde_wayland_session() && ydotool_socket().is_none()
+    }
+
+    /// Portal keyboard policy for `press_key` chords. Unlike literal text
+    /// (where KDE prefers the clipboard paste backend), key chords have no
+    /// clipboard route, so the portal keyboard session is preferred on ANY
+    /// Wayland session — including Plasma. An already-active keyboard
+    /// session (e.g. established by a KDE clipboard paste) is reused even
+    /// when ydotool is available, so the consent the user already granted
+    /// keeps covering key chords; otherwise the portal is preferred only
+    /// when ydotool is absent or the portal is forced.
+    fn should_prefer_portal_keyboard_for_chords(&self) -> bool {
+        if env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD") {
+            return false;
+        }
+        if !self.is_wayland_session() {
+            return false;
+        }
+        if self.cached_portal_keyboard_session().is_some()
+            || env_flag_enabled("COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD")
+        {
+            return true;
+        }
+        ydotool_socket().is_none()
     }
 
     fn should_prefer_kde_clipboard_text_backend(&self) -> bool {
@@ -3673,7 +3738,10 @@ fn mouse_button_code(button: Option<&str>) -> String {
     .to_string()
 }
 
-fn key_sequence(key: &str) -> Option<Vec<String>> {
+/// Parse a chord like `Ctrl+Shift+P` into raw evdev codes: the held
+/// modifiers plus the final key. A bare modifier (`Super`) parses as a
+/// chord with no held modifiers whose key is the modifier itself.
+fn key_chord(key: &str) -> Option<(Vec<u16>, u16)> {
     let parts = key
         .split('+')
         .map(str::trim)
@@ -3682,7 +3750,7 @@ fn key_sequence(key: &str) -> Option<Vec<String>> {
     let (key_part, modifier_parts) = parts.split_last()?;
     if modifier_parts.is_empty() {
         if let Some(modifier) = modifier_keycode(key_part) {
-            return Some(vec![format!("{modifier}:1"), format!("{modifier}:0")]);
+            return Some((Vec::new(), modifier));
         }
     }
     let mut modifiers = Vec::new();
@@ -3690,7 +3758,11 @@ fn key_sequence(key: &str) -> Option<Vec<String>> {
         modifiers.push(modifier_keycode(part)?);
     }
     let keycode = keycode(key_part)?;
+    Some((modifiers, keycode))
+}
 
+fn key_sequence(key: &str) -> Option<Vec<String>> {
+    let (modifiers, keycode) = key_chord(key)?;
     let mut events = Vec::new();
     for modifier in &modifiers {
         events.push(format!("{modifier}:1"));
@@ -4710,6 +4782,16 @@ mod tests {
                 "930".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn key_chord_splits_modifiers_and_key() {
+        assert_eq!(key_chord("Ctrl+Shift+P"), Some((vec![29, 42], 25)));
+        assert_eq!(key_chord("Ctrl+S"), Some((vec![29], 31)));
+        assert_eq!(key_chord("Enter"), Some((vec![], 28)));
+        // A bare modifier is a chord with no held modifiers.
+        assert_eq!(key_chord("Super"), Some((vec![], 125)));
+        assert_eq!(key_chord("NotAKey"), None);
     }
 
     #[test]
