@@ -276,6 +276,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "get_app_state",
         description = "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<GetAppStateOutput>(),
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -286,7 +287,7 @@ impl ComputerUseLinux {
     async fn get_app_state(
         &self,
         Parameters(params): Parameters<GetAppStateParams>,
-    ) -> Json<GetAppStateOutput> {
+    ) -> Result<CallToolResult, ErrorData> {
         let verbose = params.verbose.unwrap_or(false);
         let diagnostics = doctor_report();
         let (window_context, window_error, window_permissions_hint) =
@@ -397,13 +398,13 @@ impl ComputerUseLinux {
         {
             message.push_str(" Pass verbose=true for full diagnostics.");
         }
-        Json(GetAppStateOutput {
+        let output = GetAppStateOutput {
             app_name_or_bundle_identifier: params.app_name_or_bundle_identifier,
             window_context,
             window_error,
             window_permissions_hint,
             backend: "linux-atspi".to_string(),
-            screenshot,
+            screenshot: screenshot.as_ref().map(ScreenshotMetadata::from),
             screenshot_error,
             accessibility_tree,
             accessibility_tree_raw_count,
@@ -411,7 +412,8 @@ impl ComputerUseLinux {
             readiness,
             diagnostics: include_full.then_some(diagnostics),
             message,
-        })
+        };
+        app_state_tool_result(output, screenshot.as_ref())
     }
 
     #[tool(
@@ -1350,6 +1352,23 @@ impl ComputerUseLinux {
     }
 }
 
+fn app_state_tool_result(
+    output: GetAppStateOutput,
+    screenshot: Option<&ScreenshotCapture>,
+) -> Result<CallToolResult, ErrorData> {
+    let value = serde_json::to_value(output).map_err(|error| {
+        ErrorData::internal_error(format!("failed to serialize app state: {error}"), None)
+    })?;
+    let mut result = CallToolResult::structured(value);
+    if let Some(screenshot) = screenshot {
+        result.content.push(Content::image(
+            data_url_payload(&screenshot.data_url),
+            screenshot.mime_type.clone(),
+        ));
+    }
+    Ok(result)
+}
+
 #[tool_handler(
     router = self.mcp_tool_router(),
     name = "computer-use-linux",
@@ -1653,7 +1672,7 @@ struct GetAppStateOutput {
     window_error: Option<String>,
     window_permissions_hint: Option<String>,
     backend: String,
-    screenshot: Option<ScreenshotCapture>,
+    screenshot: Option<ScreenshotMetadata>,
     screenshot_error: Option<String>,
     accessibility_tree: Vec<AccessibilityNode>,
     accessibility_tree_raw_count: usize,
@@ -1664,6 +1683,43 @@ struct GetAppStateOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     diagnostics: Option<DoctorReport>,
     message: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct ScreenshotMetadata {
+    mime_type: String,
+    source: String,
+    width: u32,
+    height: u32,
+    coordinate_width: u32,
+    coordinate_height: u32,
+    scale: f32,
+    resized: bool,
+    bytes: usize,
+    original_bytes: usize,
+    max_bytes: usize,
+    format: ScreenshotOutputFormat,
+    quality: Option<u8>,
+}
+
+impl From<&ScreenshotCapture> for ScreenshotMetadata {
+    fn from(capture: &ScreenshotCapture) -> Self {
+        Self {
+            mime_type: capture.mime_type.clone(),
+            source: capture.source.clone(),
+            width: capture.width,
+            height: capture.height,
+            coordinate_width: capture.coordinate_width,
+            coordinate_height: capture.coordinate_height,
+            scale: capture.scale,
+            resized: capture.resized,
+            bytes: capture.bytes,
+            original_bytes: capture.original_bytes,
+            max_bytes: capture.max_bytes,
+            format: capture.format,
+            quality: capture.quality,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
@@ -3869,6 +3925,76 @@ mod tests {
             unsupported.is_empty(),
             "unsupported unsigned integer formats: {unsupported:?}"
         );
+    }
+
+    #[test]
+    fn get_app_state_schema_describes_metadata_without_embedded_image_data() {
+        let tool = ComputerUseLinux::default()
+            .mcp_tool_router()
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "get_app_state")
+            .unwrap();
+        let schema = serde_json::to_string(&tool.output_schema).unwrap();
+
+        assert!(tool.output_schema.is_some());
+        assert!(schema.contains("coordinate_width"));
+        assert!(!schema.contains("data_url"));
+    }
+
+    #[test]
+    fn app_state_result_carries_image_bytes_once_and_metadata_as_structured_content() {
+        let capture = ScreenshotCapture {
+            mime_type: "image/png".to_string(),
+            data_url: "data:image/png;base64,AAAA".to_string(),
+            source: "test".to_string(),
+            width: 2,
+            height: 1,
+            coordinate_width: 4,
+            coordinate_height: 2,
+            scale: 0.5,
+            resized: true,
+            bytes: 3,
+            original_bytes: 6,
+            max_bytes: 1024,
+            format: ScreenshotOutputFormat::Png,
+            quality: None,
+        };
+        let diagnostics = doctor_report();
+        let output = GetAppStateOutput {
+            app_name_or_bundle_identifier: Some("example.app".to_string()),
+            window_context: None,
+            window_error: None,
+            window_permissions_hint: None,
+            backend: "linux-atspi".to_string(),
+            screenshot: Some(ScreenshotMetadata::from(&capture)),
+            screenshot_error: None,
+            accessibility_tree: Vec::new(),
+            accessibility_tree_raw_count: 0,
+            accessibility_error: None,
+            readiness: diagnostics.readiness,
+            diagnostics: None,
+            message: "ready".to_string(),
+        };
+
+        let result = app_state_tool_result(output, Some(&capture)).unwrap();
+        let structured = result.structured_content.as_ref().unwrap();
+        let text: serde_json::Value = serde_json::from_str(
+            result.content[0]
+                .raw
+                .as_text()
+                .expect("first content block should be text")
+                .text
+                .as_str(),
+        )
+        .unwrap();
+        let serialized = serde_json::to_string(&result).unwrap();
+
+        assert_eq!(&text, structured);
+        assert_eq!(structured["screenshot"]["coordinate_width"], 4);
+        assert!(structured["screenshot"].get("data_url").is_none());
+        assert_eq!(serialized.matches("AAAA").count(), 1);
+        assert_eq!(result.content.len(), 2);
     }
 
     fn collect_unsigned_integer_formats(
