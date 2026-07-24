@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Portal `scroll` direction on KDE Plasma Wayland: vertical discrete axis steps
+  are inverted for the xdg-desktop-portal-kde discrete path so `direction:
+  "up"|"down"` matches viewport motion. ydotool / REL_WHEEL polarity is
+  unchanged. Override with `COMPUTER_USE_LINUX_PORTAL_SCROLL_INVERT=0|1`. (#56)
+
 ## [0.4.1] - 2026-07-15
 
 ### Fixed

@@ -179,14 +179,93 @@ pub async fn scroll(
         notify_pointer_motion_absolute(&proxy, &session.session_handle, stream_id, x, y).await?;
     }
 
-    let (axis, steps) = match direction {
-        ScrollDirection::Up => (AXIS_VERTICAL, steps.max(1)),
-        ScrollDirection::Down => (AXIS_VERTICAL, -steps.max(1)),
-        ScrollDirection::Left => (AXIS_HORIZONTAL, steps.max(1)),
-        ScrollDirection::Right => (AXIS_HORIZONTAL, -steps.max(1)),
+    let (axis, steps) = portal_scroll_axis_steps(direction, steps, portal_scroll_polarity());
+    notify_pointer_axis_discrete(&proxy, &session.session_handle, axis, steps).await
+}
+
+/// Native portal discrete-axis polarity for `NotifyPointerAxisDiscrete`.
+///
+/// Positive vertical steps mean "scroll up" (same convention as ydotool
+/// `mousemove --wheel` and Linux `REL_WHEEL`). xdg-desktop-portal-kde's
+/// discrete path forwards the signed step without the vertical negation its
+/// continuous path applies, so on Plasma the portal must invert vertical
+/// steps to keep `direction: "up"|"down"` matching viewport motion.
+/// Horizontal is left unchanged (KDE only special-cases continuous vertical).
+///
+/// Override with `COMPUTER_USE_LINUX_PORTAL_SCROLL_INVERT=1|0|true|false`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PortalScrollPolarity {
+    /// Default / GNOME / generic: match ydotool / REL_WHEEL signs.
+    Standard,
+    /// Invert vertical discrete steps (KDE Plasma portal discrete path).
+    InvertVertical,
+}
+
+fn portal_scroll_polarity() -> PortalScrollPolarity {
+    match std::env::var("COMPUTER_USE_LINUX_PORTAL_SCROLL_INVERT") {
+        Ok(value) => {
+            let value = value.trim();
+            if value.eq_ignore_ascii_case("1")
+                || value.eq_ignore_ascii_case("true")
+                || value.eq_ignore_ascii_case("yes")
+                || value.eq_ignore_ascii_case("on")
+            {
+                return PortalScrollPolarity::InvertVertical;
+            }
+            if value.eq_ignore_ascii_case("0")
+                || value.eq_ignore_ascii_case("false")
+                || value.eq_ignore_ascii_case("no")
+                || value.eq_ignore_ascii_case("off")
+            {
+                return PortalScrollPolarity::Standard;
+            }
+        }
+        Err(_) => {}
+    }
+
+    if desktop_env_is_kde_plasma() {
+        PortalScrollPolarity::InvertVertical
+    } else {
+        PortalScrollPolarity::Standard
+    }
+}
+
+fn desktop_env_is_kde_plasma() -> bool {
+    env_token_contains("XDG_CURRENT_DESKTOP", "kde")
+        || env_token_contains("XDG_CURRENT_DESKTOP", "plasma")
+        || env_token_contains("DESKTOP_SESSION", "plasma")
+        || env_token_contains("DESKTOP_SESSION", "kde")
+}
+
+fn env_token_contains(key: &str, needle: &str) -> bool {
+    std::env::var(key)
+        .map(|value| {
+            value
+                .split([':', ';', ','])
+                .any(|part| part.trim().eq_ignore_ascii_case(needle))
+        })
+        .unwrap_or(false)
+}
+
+/// Map a semantic scroll direction to `(axis, signed_steps)` for the portal.
+pub(crate) fn portal_scroll_axis_steps(
+    direction: ScrollDirection,
+    steps: i32,
+    polarity: PortalScrollPolarity,
+) -> (u32, i32) {
+    let magnitude = steps.max(1);
+    let (axis, standard_signed) = match direction {
+        ScrollDirection::Up => (AXIS_VERTICAL, magnitude),
+        ScrollDirection::Down => (AXIS_VERTICAL, -magnitude),
+        ScrollDirection::Left => (AXIS_HORIZONTAL, magnitude),
+        ScrollDirection::Right => (AXIS_HORIZONTAL, -magnitude),
     };
 
-    notify_pointer_axis_discrete(&proxy, &session.session_handle, axis, steps).await
+    let signed = match (polarity, axis) {
+        (PortalScrollPolarity::InvertVertical, AXIS_VERTICAL) => -standard_signed,
+        _ => standard_signed,
+    };
+    (axis, signed)
 }
 
 pub async fn drag(
@@ -712,5 +791,78 @@ mod tests {
             .to_string();
 
         assert!(error.contains("U+FDD0"));
+    }
+
+    #[test]
+    fn portal_scroll_standard_polarity_matches_ydotool_rel_wheel_signs() {
+        assert_eq!(
+            portal_scroll_axis_steps(ScrollDirection::Up, 1, PortalScrollPolarity::Standard),
+            (AXIS_VERTICAL, 1)
+        );
+        assert_eq!(
+            portal_scroll_axis_steps(ScrollDirection::Down, 3, PortalScrollPolarity::Standard),
+            (AXIS_VERTICAL, -3)
+        );
+        assert_eq!(
+            portal_scroll_axis_steps(ScrollDirection::Left, 2, PortalScrollPolarity::Standard),
+            (AXIS_HORIZONTAL, 2)
+        );
+        assert_eq!(
+            portal_scroll_axis_steps(ScrollDirection::Right, 2, PortalScrollPolarity::Standard),
+            (AXIS_HORIZONTAL, -2)
+        );
+    }
+
+    #[test]
+    fn portal_scroll_kde_inverts_vertical_only() {
+        assert_eq!(
+            portal_scroll_axis_steps(
+                ScrollDirection::Up,
+                1,
+                PortalScrollPolarity::InvertVertical
+            ),
+            (AXIS_VERTICAL, -1)
+        );
+        assert_eq!(
+            portal_scroll_axis_steps(
+                ScrollDirection::Down,
+                3,
+                PortalScrollPolarity::InvertVertical
+            ),
+            (AXIS_VERTICAL, 3)
+        );
+        // Horizontal must stay standard so a KDE flip does not invent L/R bugs.
+        assert_eq!(
+            portal_scroll_axis_steps(
+                ScrollDirection::Left,
+                2,
+                PortalScrollPolarity::InvertVertical
+            ),
+            (AXIS_HORIZONTAL, 2)
+        );
+        assert_eq!(
+            portal_scroll_axis_steps(
+                ScrollDirection::Right,
+                2,
+                PortalScrollPolarity::InvertVertical
+            ),
+            (AXIS_HORIZONTAL, -2)
+        );
+    }
+
+    #[test]
+    fn portal_scroll_clamps_zero_or_negative_steps_to_one() {
+        assert_eq!(
+            portal_scroll_axis_steps(ScrollDirection::Down, 0, PortalScrollPolarity::Standard),
+            (AXIS_VERTICAL, -1)
+        );
+        assert_eq!(
+            portal_scroll_axis_steps(
+                ScrollDirection::Down,
+                -5,
+                PortalScrollPolarity::InvertVertical
+            ),
+            (AXIS_VERTICAL, 1)
+        );
     }
 }
