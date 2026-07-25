@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- X11 keyboard input now goes through `xdotool` (XTEST) instead of ydotool.
+  ydotool injects raw evdev scancodes into a virtual uinput device, which X11
+  re-interprets through the active XKB layout — so `press_key "Return"` and
+  chords like `ctrl+a` landed as stray characters, and `type_text` mangled
+  symbols and digits (`_` → `%`, `1` → `+`) even on a plain US layout. XTEST
+  resolves keysyms against the live layout. Wayland behaviour is unchanged, and
+  the ydotool path remains the fallback when `xdotool` is missing or fails.
+  `doctor` now reports an `xdotool` input backend on X11. Override with
+  `COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD=1` (opt out) or
+  `COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD=1` (force on). (#58)
 - Portal `scroll` direction on KDE Plasma Wayland: vertical discrete axis steps
   are inverted for the xdg-desktop-portal-kde discrete path so `direction:
   "up"|"down"` matches viewport motion. ydotool / REL_WHEEL polarity is

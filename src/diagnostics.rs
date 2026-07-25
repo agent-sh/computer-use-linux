@@ -122,6 +122,9 @@ pub struct InputReport {
     pub ydotoold: Check,
     pub ydotool_socket: Check,
     pub uinput: Check,
+    /// X11 XTEST keyboard backend. Preferred over ydotool on X11 sessions,
+    /// where raw evdev scancodes are re-mapped by the active XKB layout.
+    pub xdotool: Check,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -210,6 +213,9 @@ fn capability_map(
     }
     if input.ydotool_socket.ok {
         input_backends.push("ydotool".to_string());
+    }
+    if input.xdotool.ok && !session_is_wayland_env() {
+        input_backends.push("xdotool".to_string());
     }
 
     let mut screenshot_backends = Vec::new();
@@ -639,6 +645,7 @@ fn input_report() -> InputReport {
         ydotoold: process_check("ydotoold"),
         ydotool_socket: ydotool_socket_check(),
         uinput: read_write_path_check(Path::new("/dev/uinput")),
+        xdotool: command_path_check("xdotool"),
     }
 }
 
@@ -807,6 +814,17 @@ fn user_id() -> Option<String> {
 
 fn command_path_check(command: &str) -> Check {
     command_check("sh", &["-c", &format!("command -v {command}")])
+}
+
+/// True when this looks like a Wayland session. Used to avoid advertising the
+/// X11-only `xdotool` backend on Wayland, where XTEST does not reach clients.
+fn session_is_wayland_env() -> bool {
+    match std::env::var("XDG_SESSION_TYPE") {
+        Ok(value) => value.eq_ignore_ascii_case("wayland"),
+        Err(_) => std::env::var("WAYLAND_DISPLAY")
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false),
+    }
 }
 
 fn process_check(process_name: &str) -> Check {
@@ -1065,6 +1083,7 @@ mod tests {
             ydotoold,
             ydotool_socket,
             uinput,
+            xdotool: Check::fail("missing xdotool"),
         }
     }
 
