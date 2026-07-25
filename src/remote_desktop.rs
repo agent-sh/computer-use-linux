@@ -202,25 +202,22 @@ pub(crate) enum PortalScrollPolarity {
 }
 
 fn portal_scroll_polarity() -> PortalScrollPolarity {
-    match std::env::var("COMPUTER_USE_LINUX_PORTAL_SCROLL_INVERT") {
-        Ok(value) => {
-            let value = value.trim();
-            if value.eq_ignore_ascii_case("1")
-                || value.eq_ignore_ascii_case("true")
-                || value.eq_ignore_ascii_case("yes")
-                || value.eq_ignore_ascii_case("on")
-            {
-                return PortalScrollPolarity::InvertVertical;
-            }
-            if value.eq_ignore_ascii_case("0")
-                || value.eq_ignore_ascii_case("false")
-                || value.eq_ignore_ascii_case("no")
-                || value.eq_ignore_ascii_case("off")
-            {
-                return PortalScrollPolarity::Standard;
-            }
+    if let Ok(value) = std::env::var("COMPUTER_USE_LINUX_PORTAL_SCROLL_INVERT") {
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("1")
+            || value.eq_ignore_ascii_case("true")
+            || value.eq_ignore_ascii_case("yes")
+            || value.eq_ignore_ascii_case("on")
+        {
+            return PortalScrollPolarity::InvertVertical;
         }
-        Err(_) => {}
+        if value.eq_ignore_ascii_case("0")
+            || value.eq_ignore_ascii_case("false")
+            || value.eq_ignore_ascii_case("no")
+            || value.eq_ignore_ascii_case("off")
+        {
+            return PortalScrollPolarity::Standard;
+        }
     }
 
     if desktop_env_is_kde_plasma() {
@@ -816,11 +813,7 @@ mod tests {
     #[test]
     fn portal_scroll_kde_inverts_vertical_only() {
         assert_eq!(
-            portal_scroll_axis_steps(
-                ScrollDirection::Up,
-                1,
-                PortalScrollPolarity::InvertVertical
-            ),
+            portal_scroll_axis_steps(ScrollDirection::Up, 1, PortalScrollPolarity::InvertVertical),
             (AXIS_VERTICAL, -1)
         );
         assert_eq!(
