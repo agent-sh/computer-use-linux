@@ -1,3 +1,5 @@
+[![MCP Toplist](https://mcptoplist.com/badge/glama%2Fagent-sh%2Fcomputer-use-linux.svg)](https://mcptoplist.com/server/glama%2Fagent-sh%2Fcomputer-use-linux)
+
 <div align="center">
   <h1>computer-use-linux</h1>
   <p><strong>Control a real Linux desktop from any MCP host.</strong></p>
