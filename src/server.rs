@@ -1254,8 +1254,7 @@ impl ComputerUseLinux {
                 }
             }
         }
-        let mut args = vec!["key".to_string()];
-        args.extend(key_events);
+        let args = ydotool_key_args(key_events, !chord_modifiers.is_empty());
         let result = run_ydotool(&args).await.map(|output| vec![output]);
         let mut output = action_result_with_focus("press_key", result, received, focus.clone());
         if output.ok && focus.is_some() {
@@ -3979,6 +3978,15 @@ fn key_sequence(key: &str) -> Option<Vec<String>> {
     Some(events)
 }
 
+fn ydotool_key_args(key_events: Vec<String>, has_modifiers: bool) -> Vec<String> {
+    let mut args = vec!["key".to_string()];
+    if has_modifiers {
+        args.extend(["-d".to_string(), "100".to_string()]);
+    }
+    args.extend(key_events);
+    args
+}
+
 fn modifier_keycode(key: &str) -> Option<u16> {
     match normalize_key(key).as_str() {
         "ctrl" | "control" => Some(29),
@@ -5011,6 +5019,13 @@ mod tests {
                 "29:0".to_string(),
             ])
         );
+    }
+
+    #[test]
+    fn ydotool_modifier_chords_include_an_inter_event_delay() {
+        let args = ydotool_key_args(key_sequence("Ctrl+T").unwrap(), true);
+
+        assert_eq!(args, ["key", "-d", "100", "29:1", "20:1", "20:0", "29:0"]);
     }
 
     #[test]

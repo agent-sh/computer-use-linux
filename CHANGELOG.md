@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Hyprland window activation now checks `hyprctl dispatch` stdout instead of
+  trusting its exit status, so an exit-zero `Invalid dispatcher` response falls
+  through to the compatible focus dispatcher. (#62)
+- Modifier chords sent through the ydotool fallback now include a 100 ms
+  inter-event delay so applications such as Firefox do not drop simultaneous
+  modifier and key events. (#63)
+
 ## [0.4.2] - 2026-07-25
 
 ### Fixed

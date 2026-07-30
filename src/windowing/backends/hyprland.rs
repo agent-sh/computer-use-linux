@@ -130,20 +130,39 @@ pub fn activate_window(window_id: u64) -> Result<()> {
     let lua_dispatch = lua_focus_dispatch(&address);
     let lua_output = hyprctl_output(&["dispatch", &lua_dispatch])
         .with_context(|| format!("failed to run Hyprland Lua focus dispatcher for {address}"))?;
-    if lua_output.status.success() {
+    if dispatch_succeeded(&lua_output) {
         return Ok(());
     }
 
     let legacy_output = hyprctl_output(&["dispatch", "focuswindow", &address])
         .with_context(|| format!("failed to run hyprctl dispatch focuswindow {address}"))?;
-    if legacy_output.status.success() {
+    if dispatch_succeeded(&legacy_output) {
         Ok(())
     } else {
         bail!(
             "Hyprland window focus failed for {address}; Lua dispatcher: {}; legacy dispatcher: {}",
-            String::from_utf8_lossy(&lua_output.stderr).trim(),
-            String::from_utf8_lossy(&legacy_output.stderr).trim()
+            command_detail(&lua_output),
+            command_detail(&legacy_output)
         );
+    }
+}
+
+fn dispatch_succeeded(output: &std::process::Output) -> bool {
+    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "ok"
+}
+
+fn command_detail(output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    if detail.is_empty() {
+        format!("exit status {}", output.status)
+    } else {
+        detail.to_string()
     }
 }
 
@@ -322,6 +341,7 @@ fn parse_hyprland_address(address: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::ExitStatusExt;
     use std::time::Duration;
 
     #[test]
@@ -352,6 +372,29 @@ mod tests {
             lua_focus_dispatch("address:0x1234abcd"),
             "hl.dsp.focus({ window = \"address:0x1234abcd\" })"
         );
+    }
+
+    #[test]
+    fn dispatch_rejects_exit_zero_error_output() {
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: b"Invalid dispatcher\n".to_vec(),
+            stderr: Vec::new(),
+        };
+
+        assert!(!dispatch_succeeded(&output));
+        assert_eq!(command_detail(&output), "Invalid dispatcher");
+    }
+
+    #[test]
+    fn dispatch_accepts_ok_output() {
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: b"ok\n".to_vec(),
+            stderr: Vec::new(),
+        };
+
+        assert!(dispatch_succeeded(&output));
     }
 
     #[test]
