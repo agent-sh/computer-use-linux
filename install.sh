@@ -168,6 +168,7 @@ detect_distro() {
     local desktop="${XDG_CURRENT_DESKTOP:-unknown}"
     case "${desktop}" in
         *GNOME*)         log_ok "compositor: GNOME (${desktop})" ;;
+        *niri*)          log_ok "compositor: niri (${desktop}) — window backend via niri msg" ;;
         *KDE*|*Plasma*)  log_warn "compositor: KDE (${desktop}) — untested, AT-SPI step will be skipped" ;;
         *sway*)          log_warn "compositor: sway — untested" ;;
         *Hyprland*)      log_warn "compositor: hyprland — untested" ;;

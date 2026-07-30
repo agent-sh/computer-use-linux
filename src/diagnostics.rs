@@ -1,6 +1,6 @@
 use crate::windowing::registry::{
     self, COSMIC_WAYLAND_BACKEND, GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND,
-    HYPRLAND_BACKEND, I3_BACKEND, KWIN_BACKEND, X11_BACKEND,
+    HYPRLAND_BACKEND, I3_BACKEND, KWIN_BACKEND, NIRI_BACKEND, X11_BACKEND,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -255,6 +255,13 @@ fn capability_map(
         .is_some_and(|check| check.ok)
     {
         window_backends.push(I3_BACKEND.to_string());
+    }
+    if windowing
+        .backends
+        .get(NIRI_BACKEND)
+        .is_some_and(|check| check.ok)
+    {
+        window_backends.push(NIRI_BACKEND.to_string());
     }
     if windowing
         .backends
@@ -609,6 +616,11 @@ fn windowing_report(platform: &PlatformReport) -> WindowingReport {
             "A KWin/Plasma window backend is available for list_windows, focused_window, and targeted input verification."
         } else if hyprland.ok {
             "A Hyprland window backend is available for list_windows, focused_window, and targeted input verification."
+        } else if backends
+            .get(NIRI_BACKEND)
+            .is_some_and(|check| check.ok)
+        {
+            "A niri window backend is available for list_windows, focused_window, and targeted input verification."
         } else {
             "A window listing backend is available for list_windows, focused_window, and targeted input verification."
         }
