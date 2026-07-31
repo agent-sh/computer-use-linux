@@ -49,6 +49,11 @@ pub async fn list_windows() -> Result<Vec<WindowInfo>> {
     Ok(windows)
 }
 
+pub(crate) async fn logical_desktop_rect() -> Result<(i32, i32, i32, i32)> {
+    let json = call_kwin_window_script().await?;
+    parse_kwin_logical_desktop_rect(&json)
+}
+
 pub async fn activate_window(window_id: u64) -> Result<()> {
     let uuid = kwin_uuid_for_window_id(window_id).await?.with_context(|| {
         format!("No KWin window matched window_id {window_id} during activation")
@@ -357,6 +362,22 @@ pub(crate) fn kwin_window_script_source(
         }};
     }}
 
+    function workspaceGeometry() {{
+        var rect = null;
+        try {{
+            rect = workspace.virtualScreenGeometry;
+        }} catch (error) {{}}
+        if (rect === null || rect === undefined) {{
+            return null;
+        }}
+        return {{
+            x: read(rect, "x"),
+            y: read(rect, "y"),
+            width: read(rect, "width"),
+            height: read(rect, "height")
+        }};
+    }}
+
     function firstDesktop(window) {{
         var desktops = read(window, "desktops");
         if (!Array.isArray(desktops) || desktops.length === 0) {{
@@ -429,6 +450,7 @@ pub(crate) fn kwin_window_script_source(
     callDBus(serviceName, objectPath, iface, "ReceiveWindows", JSON.stringify({{
         backend: "kwin",
         pluginName: pluginName,
+        desktopGeometry: workspaceGeometry(),
         windows: windows
     }}));
 }})();
@@ -667,13 +689,47 @@ pub(crate) fn parse_kwin_windows(json: &str) -> Result<Vec<WindowInfo>> {
     Ok(windows)
 }
 
+pub(crate) fn parse_kwin_logical_desktop_rect(json: &str) -> Result<(i32, i32, i32, i32)> {
+    parse_kwin_snapshot(json)?.logical_desktop_rect()
+}
+
 fn parse_kwin_snapshot(json: &str) -> Result<KwinWindowSnapshot> {
     serde_json::from_str(json).context("failed to parse KWin temporary script output")
 }
 
 #[derive(Debug, Deserialize)]
 struct KwinWindowSnapshot {
+    #[serde(default, rename = "desktopGeometry")]
+    desktop_geometry: Option<KwinRawGeometry>,
     windows: Vec<KwinRawWindow>,
+}
+
+impl KwinWindowSnapshot {
+    fn logical_desktop_rect(&self) -> Result<(i32, i32, i32, i32)> {
+        let geometry = self
+            .desktop_geometry
+            .as_ref()
+            .context("KWin did not expose virtualScreenGeometry")?;
+        let x = json_value_as_i32(geometry.x.as_ref())
+            .context("KWin virtualScreenGeometry x is unavailable")?;
+        let y = json_value_as_i32(geometry.y.as_ref())
+            .context("KWin virtualScreenGeometry y is unavailable")?;
+        let width = json_value_as_i32(geometry.width.as_ref())
+            .filter(|width| *width > 0)
+            .context("KWin virtualScreenGeometry width is unavailable")?;
+        let height = json_value_as_i32(geometry.height.as_ref())
+            .filter(|height| *height > 0)
+            .context("KWin virtualScreenGeometry height is unavailable")?;
+        Ok((x, y, width, height))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct KwinRawGeometry {
+    x: Option<serde_json::Value>,
+    y: Option<serde_json::Value>,
+    width: Option<serde_json::Value>,
+    height: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]

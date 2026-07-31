@@ -72,7 +72,7 @@ pub async fn list_windows() -> Result<Vec<WindowInfo>> {
     let monitors_output = hyprctl_output_async(&["monitors", "-j"]).await.ok();
     match monitors_output.filter(|output| output.status.success()) {
         Some(monitors) => parse_hyprland_clients_with_monitors(&clients_json, &monitors.stdout),
-        None => parse_hyprland_clients(&clients_json),
+        None => parse_hyprland_clients_without_bounds(&clients_json),
     }
 }
 
@@ -80,42 +80,131 @@ fn parse_hyprland_clients_with_monitors(
     clients_json: &str,
     monitors_json: &[u8],
 ) -> Result<Vec<WindowInfo>> {
-    let monitors: Vec<HyprlandMonitor> = serde_json::from_slice(monitors_json)
-        .context("failed to parse hyprctl monitors -j output")?;
-    let monitors = monitors
-        .into_iter()
-        .map(|monitor| (monitor.id, monitor))
-        .collect::<std::collections::HashMap<_, _>>();
     let mut clients: Vec<HyprlandClient> =
         serde_json::from_str(clients_json).context("failed to parse hyprctl clients -j output")?;
+    let Ok(monitors) = serde_json::from_slice::<Vec<HyprlandMonitor>>(monitors_json) else {
+        clear_hyprland_client_bounds(&mut clients);
+        return windows_from_hyprland_clients(clients);
+    };
+    let Some(layout) = HyprlandCaptureLayout::from_monitors(&monitors) else {
+        clear_hyprland_client_bounds(&mut clients);
+        return windows_from_hyprland_clients(clients);
+    };
+    let monitor_ids = monitors
+        .iter()
+        .map(|monitor| monitor.id)
+        .collect::<std::collections::HashSet<_>>();
     for client in &mut clients {
-        let Some(monitor) = client.monitor.and_then(|id| monitors.get(&id)) else {
+        if !client
+            .monitor
+            .is_some_and(|monitor_id| monitor_ids.contains(&monitor_id))
+        {
+            client.at = None;
+            client.size = None;
+            continue;
+        }
+        let Some((at, size)) = client
+            .at
+            .zip(client.size)
+            .and_then(|(at, size)| layout.map_bounds(at, size))
+        else {
+            client.at = None;
+            client.size = None;
             continue;
         };
-        if let Some(at) = client.at.as_mut() {
-            at[0] = scale_i32(at[0] - monitor.x, monitor.scale);
-            at[1] = scale_i32(at[1] - monitor.y, monitor.scale);
-        }
-        if let Some(size) = client.size.as_mut() {
-            size[0] = scale_u32(size[0], monitor.scale);
-            size[1] = scale_u32(size[1], monitor.scale);
-        }
+        client.at = Some(at);
+        client.size = Some(size);
     }
     windows_from_hyprland_clients(clients)
 }
 
+#[cfg(test)]
 pub(crate) fn parse_hyprland_clients(json: &str) -> Result<Vec<WindowInfo>> {
     let clients: Vec<HyprlandClient> =
         serde_json::from_str(json).context("failed to parse hyprctl clients -j output")?;
     windows_from_hyprland_clients(clients)
 }
 
-fn scale_i32(value: i32, scale: f64) -> i32 {
-    (f64::from(value) * scale).round() as i32
+fn parse_hyprland_clients_without_bounds(json: &str) -> Result<Vec<WindowInfo>> {
+    let mut clients: Vec<HyprlandClient> =
+        serde_json::from_str(json).context("failed to parse hyprctl clients -j output")?;
+    clear_hyprland_client_bounds(&mut clients);
+    windows_from_hyprland_clients(clients)
 }
 
-fn scale_u32(value: u32, scale: f64) -> u32 {
-    (f64::from(value) * scale).round() as u32
+fn clear_hyprland_client_bounds(clients: &mut [HyprlandClient]) {
+    for client in clients {
+        client.at = None;
+        client.size = None;
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HyprlandCaptureLayout {
+    origin_x: i32,
+    origin_y: i32,
+    scale: f64,
+}
+
+impl HyprlandCaptureLayout {
+    fn from_monitors(monitors: &[HyprlandMonitor]) -> Option<Self> {
+        let first = monitors.first()?;
+        if monitors
+            .iter()
+            .any(|monitor| !monitor.scale.is_finite() || monitor.scale <= 0.0)
+        {
+            return None;
+        }
+        Some(Self {
+            origin_x: monitors
+                .iter()
+                .map(|monitor| monitor.x)
+                .min()
+                .unwrap_or(first.x),
+            origin_y: monitors
+                .iter()
+                .map(|monitor| monitor.y)
+                .min()
+                .unwrap_or(first.y),
+            scale: monitors
+                .iter()
+                .map(|monitor| monitor.scale)
+                .fold(first.scale, f64::max),
+        })
+    }
+
+    fn map_bounds(&self, at: [i32; 2], size: [u32; 2]) -> Option<([i32; 2], [u32; 2])> {
+        if size[0] == 0 || size[1] == 0 {
+            return None;
+        }
+        let left = ((i64::from(at[0]) - i64::from(self.origin_x)) as f64 * self.scale).floor();
+        let top = ((i64::from(at[1]) - i64::from(self.origin_y)) as f64 * self.scale).floor();
+        let right = ((i64::from(at[0]) + i64::from(size[0]) - i64::from(self.origin_x)) as f64
+            * self.scale)
+            .ceil();
+        let bottom = ((i64::from(at[1]) + i64::from(size[1]) - i64::from(self.origin_y)) as f64
+            * self.scale)
+            .ceil();
+        if !left.is_finite()
+            || !top.is_finite()
+            || !right.is_finite()
+            || !bottom.is_finite()
+            || left < f64::from(i32::MIN)
+            || left > f64::from(i32::MAX)
+            || top < f64::from(i32::MIN)
+            || top > f64::from(i32::MAX)
+            || right <= left
+            || bottom <= top
+            || right - left > f64::from(u32::MAX)
+            || bottom - top > f64::from(u32::MAX)
+        {
+            return None;
+        }
+        Some((
+            [left as i32, top as i32],
+            [(right - left) as u32, (bottom - top) as u32],
+        ))
+    }
 }
 
 fn windows_from_hyprland_clients(clients: Vec<HyprlandClient>) -> Result<Vec<WindowInfo>> {
@@ -382,8 +471,70 @@ mod tests {
         let windows = parse_hyprland_clients_with_monitors(clients, monitors).unwrap();
 
         let bounds = windows[0].bounds.as_ref().unwrap();
-        assert_eq!((bounds.x, bounds.y), (Some(1741), Some(97)));
-        assert_eq!((bounds.width, bounds.height), (1676, 2023));
+        assert_eq!((bounds.x, bounds.y), (Some(1934), Some(2988)));
+        assert_eq!((bounds.width, bounds.height), (1862, 2248));
+    }
+
+    #[test]
+    fn global_union_accounts_for_negative_monitor_origins() {
+        let clients = r#"[{
+            "address":"0x1234",
+            "at":[-1800,100],
+            "size":[600,400],
+            "monitor":0,
+            "class":"foot",
+            "title":"Shell"
+        }]"#;
+        let monitors = br#"[
+            {"id":0,"x":-1920,"y":0,"scale":1.0},
+            {"id":1,"x":0,"y":0,"scale":2.0}
+        ]"#;
+        let windows = parse_hyprland_clients_with_monitors(clients, monitors).unwrap();
+
+        let bounds = windows[0].bounds.as_ref().unwrap();
+        assert_eq!((bounds.x, bounds.y), (Some(240), Some(200)));
+        assert_eq!((bounds.width, bounds.height), (1200, 800));
+    }
+
+    #[test]
+    fn fractional_scale_rounds_crop_edges_outward() {
+        let clients = r#"[{
+            "address":"0x1234",
+            "at":[1,1],
+            "size":[1,1],
+            "monitor":0,
+            "class":"foot",
+            "title":"Shell"
+        }]"#;
+        let monitors = br#"[{"id":0,"x":0,"y":0,"scale":1.25}]"#;
+        let windows = parse_hyprland_clients_with_monitors(clients, monitors).unwrap();
+
+        let bounds = windows[0].bounds.as_ref().unwrap();
+        assert_eq!((bounds.x, bounds.y), (Some(1), Some(1)));
+        assert_eq!((bounds.width, bounds.height), (2, 2));
+    }
+
+    #[test]
+    fn bounds_are_omitted_without_valid_monitor_metadata() {
+        let clients = r#"[{
+            "address":"0x1234",
+            "at":[100,100],
+            "size":[600,400],
+            "monitor":7,
+            "class":"foot",
+            "title":"Shell"
+        }]"#;
+
+        for monitors in [
+            br#"[]"#.as_slice(),
+            br#"[{"id":7,"x":0,"y":0,"scale":0.0}]"#.as_slice(),
+            b"not json".as_slice(),
+        ] {
+            let windows = parse_hyprland_clients_with_monitors(clients, monitors).unwrap();
+            assert!(windows[0].bounds.is_none());
+        }
+        let windows = parse_hyprland_clients_without_bounds(clients).unwrap();
+        assert!(windows[0].bounds.is_none());
     }
 
     #[test]

@@ -23,7 +23,7 @@ mod tests {
     use super::backends::i3::{parse_i3_tree, parse_xprop_pid, I3_BACKEND};
     use super::backends::kwin::{
         kwin_activate_script_source, kwin_window_id_from_uuid, kwin_window_script_source,
-        parse_kwin_windows, KWIN_BACKEND,
+        parse_kwin_logical_desktop_rect, parse_kwin_windows, KWIN_BACKEND,
     };
     use super::registry::{
         descriptors, list_note, COSMIC_WAYLAND_BACKEND, GNOME_SHELL_EXTENSION_BACKEND,
@@ -644,6 +644,7 @@ mod tests {
         let uuid = "b4dfacf8-a559-43c9-8b1f-ecd5cfd78359";
         let windows_json = r#"{
           "backend": "kwin",
+          "desktopGeometry": {"x": 100, "y": -50, "width": 3840, "height": "2160"},
           "windows": [
             {
               "uuid": "{b4dfacf8-a559-43c9-8b1f-ecd5cfd78359}",
@@ -687,6 +688,10 @@ mod tests {
         assert!(!windows[0].hidden);
         assert_eq!(windows[0].client_type.as_deref(), Some("wayland"));
         assert_eq!(windows[0].backend, KWIN_BACKEND);
+        assert_eq!(
+            parse_kwin_logical_desktop_rect(windows_json).unwrap(),
+            (100, -50, 3840, 2160)
+        );
     }
 
     #[test]
@@ -716,6 +721,8 @@ mod tests {
         assert!(script.contains(
             r#"activeWindow = "activeWindow" in workspace ? workspace.activeWindow : workspace.activeClient;"#
         ));
+        assert!(script.contains("workspace.virtualScreenGeometry"));
+        assert!(script.contains("desktopGeometry: workspaceGeometry()"));
     }
 
     #[test]

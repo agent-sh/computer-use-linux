@@ -19,7 +19,7 @@ use crate::windowing::registry;
 use crate::windows::{
     focus_window_target, focused_window, list_windows, resolve_window_target,
     window_permission_hint, WindowFocusResult, WindowInfo, WindowTarget,
-    GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND,
+    GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND, KWIN_BACKEND,
 };
 use crate::ydotool;
 use anyhow::Result;
@@ -606,7 +606,7 @@ impl ComputerUseLinux {
     )]
     async fn click(&self, Parameters(mut params): Parameters<ClickParams>) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
-        let _input_guard = self.input_operation_lock.lock().await;
+        let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let mut portal_target_point = None;
         // Raise the target window first (if specified) so the click lands on the
         // intended app rather than whatever is stacked on top at that pixel.
@@ -851,7 +851,7 @@ impl ComputerUseLinux {
                 Err(_) => {}
             }
         }
-        let result = run_ydotool_sequence(&[
+        let commands = vec![
             absolute_mousemove_args(x, y),
             vec![
                 "click".to_string(),
@@ -859,8 +859,12 @@ impl ComputerUseLinux {
                 click_count,
                 button,
             ],
-        ])
+        ];
+        let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
+            run_ydotool_sequence(&commands).await
+        })
         .await;
+        let _input_guard = input_guard;
         Json(with_notes(
             action_result("click", result, received),
             off_screen_note,
@@ -956,7 +960,7 @@ impl ComputerUseLinux {
     )]
     async fn scroll(&self, Parameters(mut params): Parameters<ScrollParams>) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
-        let _input_guard = self.input_operation_lock.lock().await;
+        let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let mut portal_target_point = None;
         let units = ((params.pages.unwrap_or(1.0).abs().max(0.1) * 5.0).round() as i32).max(1);
         // Raise/focus the target window first (parity with click) so wheel
@@ -1199,7 +1203,11 @@ impl ComputerUseLinux {
             sequence.push(absolute_mousemove_args(x, y));
         }
         sequence.push(wheel_mousemove_args(dx, dy));
-        let result = run_ydotool_sequence(&sequence).await;
+        let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
+            run_ydotool_sequence(&sequence).await
+        })
+        .await;
+        let _input_guard = input_guard;
         Json(with_notes(
             action_result("scroll", result, received),
             off_screen_note,
@@ -1218,7 +1226,7 @@ impl ComputerUseLinux {
     )]
     async fn drag(&self, Parameters(params): Parameters<DragParams>) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params));
-        let _input_guard = self.input_operation_lock.lock().await;
+        let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         // Preferred backend: the uinput absolute pointer (accurate landing).
         if self.ensure_abs_pointer().await {
             let abs_pointer = Arc::clone(&self.abs_pointer);
@@ -1315,13 +1323,11 @@ impl ComputerUseLinux {
                 Err(_) => {}
             }
         }
-        let result = run_ydotool_sequence(&[
-            absolute_mousemove_args(params.start_x, params.start_y),
-            vec!["click".to_string(), "0x40".to_string()],
-            absolute_mousemove_args(params.end_x, params.end_y),
-            vec!["click".to_string(), "0x80".to_string()],
-        ])
+        let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
+            run_ydotool_drag(params.start_x, params.start_y, params.end_x, params.end_y).await
+        })
         .await;
+        let _input_guard = input_guard;
         Json(action_result("drag", result, received))
     }
 
@@ -1340,7 +1346,7 @@ impl ComputerUseLinux {
         Parameters(params): Parameters<PressKeyParams>,
     ) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
-        let _input_guard = self.input_operation_lock.lock().await;
+        let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let focus = match self.focus_target_for_input(&params.window_target()).await {
             Ok(focus) => focus,
             Err(message) => {
@@ -1412,10 +1418,14 @@ impl ComputerUseLinux {
                 let xdotool_args = vec!["key".to_string(), "--clearmodifiers".to_string(), spec];
                 let ydotool_args =
                     ydotool_key_args(key_events.clone(), !chord_modifiers.is_empty());
-                let result = run_xdotool_or_fallback(Path::new("xdotool"), &xdotool_args, || {
-                    run_ydotool(&ydotool_args)
+                let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
+                    run_xdotool_or_fallback(Path::new("xdotool"), &xdotool_args, || {
+                        run_ydotool(&ydotool_args)
+                    })
+                    .await
                 })
                 .await;
+                let _input_guard = input_guard;
                 let used_xdotool = result
                     .as_ref()
                     .is_ok_and(|result| result.backend == KeyboardCommandBackend::Xdotool);
@@ -1436,7 +1446,11 @@ impl ComputerUseLinux {
             }
         }
         let args = ydotool_key_args(key_events, !chord_modifiers.is_empty());
-        let result = run_ydotool(&args).await.map(|output| vec![output]);
+        let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
+            run_ydotool(&args).await.map(|output| vec![output])
+        })
+        .await;
+        let _input_guard = input_guard;
         let mut output = action_result_with_focus("press_key", result, received, focus.clone());
         if output.ok && focus.is_some() {
             let notes = self.input_landing_notes(focus.as_ref(), false).await;
@@ -1460,7 +1474,7 @@ impl ComputerUseLinux {
         Parameters(params): Parameters<TypeTextParams>,
     ) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
-        let _input_guard = self.input_operation_lock.lock().await;
+        let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let focus = match self.focus_target_for_input(&params.window_target()).await {
             Ok(focus) => focus,
             Err(message) => {
@@ -1545,10 +1559,15 @@ impl ComputerUseLinux {
         // digits (`_` → `%`, `1` → `+`) even on a plain US layout (issue #58).
         if self.should_prefer_xdotool_keyboard() {
             let args = xdotool_type_args(&params.text);
-            let result = run_xdotool_or_fallback(Path::new("xdotool"), &args, || {
-                run_ydotool_type_text(&params.text)
+            let text = params.text.clone();
+            let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
+                run_xdotool_or_fallback(Path::new("xdotool"), &args, || {
+                    run_ydotool_type_text(&text)
+                })
+                .await
             })
             .await;
+            let _input_guard = input_guard;
             let used_xdotool = result
                 .as_ref()
                 .is_ok_and(|result| result.backend == KeyboardCommandBackend::Xdotool);
@@ -1567,9 +1586,14 @@ impl ComputerUseLinux {
             }
             return Json(output);
         }
-        let result = run_ydotool_type_text(&params.text)
-            .await
-            .map(|output| vec![output]);
+        let text = params.text.clone();
+        let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
+            run_ydotool_type_text(&text)
+                .await
+                .map(|output| vec![output])
+        })
+        .await;
+        let _input_guard = input_guard;
         let mut output = action_result_with_focus("type_text", result, received, focus.clone());
         if output.ok && focus.is_some() {
             let notes = self.input_landing_notes(focus.as_ref(), true).await;
@@ -2510,12 +2534,31 @@ impl ComputerUseLinux {
                         anyhow::anyhow!(
                             "GNOME targeted screenshot requires logical monitor geometry: {error:#}"
                         )
-                    })?,
+                    })?
+                    .into_iter()
+                    .map(|monitor| (monitor.x, monitor.y, monitor.width, monitor.height))
+                    .collect(),
             )
         } else if window.backend == GNOME_SHELL_INTROSPECT_BACKEND {
             crate::windowing::backends::gnome::extension_monitor_layout()
                 .await
                 .ok()
+                .map(|monitors| {
+                    monitors
+                        .into_iter()
+                        .map(|monitor| (monitor.x, monitor.y, monitor.width, monitor.height))
+                        .collect()
+                })
+        } else if window.backend == KWIN_BACKEND {
+            Some(vec![
+                crate::windowing::backends::kwin::logical_desktop_rect()
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "KWin targeted screenshot requires logical workspace geometry: {error:#}"
+                        )
+                    })?,
+            ])
         } else {
             None
         };
@@ -2543,7 +2586,7 @@ impl ComputerUseLinux {
             .unwrap_or(&focus.requested_window);
         if !matches!(
             window.backend.as_str(),
-            GNOME_SHELL_EXTENSION_BACKEND | GNOME_SHELL_INTROSPECT_BACKEND
+            GNOME_SHELL_EXTENSION_BACKEND | GNOME_SHELL_INTROSPECT_BACKEND | KWIN_BACKEND
         ) {
             let full_capture_rect = window
                 .bounds
@@ -3597,26 +3640,26 @@ fn map_coordinate_between_rects(
 
 fn logical_window_crop_rect(
     bounds: &crate::windowing::WindowBounds,
-    monitors: &[crate::windowing::backends::gnome::MonitorInfo],
+    monitors: &[(i32, i32, i32, i32)],
     capture_width: u32,
     capture_height: u32,
 ) -> Result<(i32, i32, u32, u32)> {
     let mut monitors = monitors
         .iter()
-        .filter(|monitor| monitor.width > 0 && monitor.height > 0);
+        .filter(|(_, _, width, height)| *width > 0 && *height > 0);
     let first = monitors
         .next()
-        .ok_or_else(|| anyhow::anyhow!("GNOME returned no usable monitor geometry"))?;
-    let (mut min_x, mut min_y) = (i64::from(first.x), i64::from(first.y));
+        .ok_or_else(|| anyhow::anyhow!("desktop returned no usable monitor geometry"))?;
+    let (mut min_x, mut min_y) = (i64::from(first.0), i64::from(first.1));
     let (mut max_x, mut max_y) = (
-        i64::from(first.x) + i64::from(first.width),
-        i64::from(first.y) + i64::from(first.height),
+        i64::from(first.0) + i64::from(first.2),
+        i64::from(first.1) + i64::from(first.3),
     );
-    for monitor in monitors {
-        min_x = min_x.min(i64::from(monitor.x));
-        min_y = min_y.min(i64::from(monitor.y));
-        max_x = max_x.max(i64::from(monitor.x) + i64::from(monitor.width));
-        max_y = max_y.max(i64::from(monitor.y) + i64::from(monitor.height));
+    for (x, y, width, height) in monitors {
+        min_x = min_x.min(i64::from(*x));
+        min_y = min_y.min(i64::from(*y));
+        max_x = max_x.max(i64::from(*x) + i64::from(*width));
+        max_y = max_y.max(i64::from(*y) + i64::from(*height));
     }
     let logical_width = max_x - min_x;
     let logical_height = max_y - min_y;
@@ -3996,6 +4039,65 @@ async fn run_ydotool_sequence(
         }
     }
     Ok(outputs)
+}
+
+async fn run_ydotool_drag(
+    start_x: i32,
+    start_y: i32,
+    end_x: i32,
+    end_y: i32,
+) -> std::result::Result<Vec<Output>, String> {
+    let mut outputs = vec![run_ydotool(&absolute_mousemove_args(start_x, start_y)).await?];
+    sleep(Duration::from_millis(35)).await;
+
+    let mut first_error = match run_ydotool(&["click".to_string(), "0x40".to_string()]).await {
+        Ok(output) => {
+            outputs.push(output);
+            None
+        }
+        Err(error) => Some(error),
+    };
+    sleep(Duration::from_millis(35)).await;
+
+    if first_error.is_none() {
+        match run_ydotool(&absolute_mousemove_args(end_x, end_y)).await {
+            Ok(output) => outputs.push(output),
+            Err(error) => first_error = Some(error),
+        }
+        sleep(Duration::from_millis(35)).await;
+    }
+
+    let release = run_ydotool(&["click".to_string(), "0x80".to_string()]).await;
+    match (first_error, release) {
+        (None, Ok(output)) => {
+            outputs.push(output);
+            Ok(outputs)
+        }
+        (Some(error), Ok(_)) => Err(error),
+        (None, Err(error)) => Err(error),
+        (Some(error), Err(release_error)) => Err(format!(
+            "{error}; ydotool button release also failed: {release_error}"
+        )),
+    }
+}
+
+async fn run_cancellation_safe_input<T, F>(
+    input_guard: tokio::sync::OwnedMutexGuard<()>,
+    operation: F,
+) -> (
+    Option<tokio::sync::OwnedMutexGuard<()>>,
+    std::result::Result<T, String>,
+)
+where
+    T: Send + 'static,
+    F: Future<Output = std::result::Result<T, String>> + Send + 'static,
+{
+    // Dropping a JoinHandle detaches its task, retaining the guard until the
+    // stateful input operation has completed even if the caller is cancelled.
+    match tokio::spawn(async move { (input_guard, operation.await) }).await {
+        Ok((input_guard, result)) => (Some(input_guard), result),
+        Err(error) => (None, Err(format!("stateful input task failed: {error}"))),
+    }
 }
 
 async fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
@@ -4832,15 +4934,7 @@ mod tests {
             width: 1357,
             height: 1144,
         };
-        let monitors = [crate::windowing::backends::gnome::MonitorInfo {
-            index: 0,
-            x: 0,
-            y: 0,
-            width: 1920,
-            height: 1200,
-            primary: true,
-            scale: 4.0 / 3.0,
-        }];
+        let monitors = [(0, 0, 1920, 1200)];
 
         assert_eq!(
             logical_window_crop_rect(&bounds, &monitors, 2560, 1600).unwrap(),
@@ -4866,6 +4960,48 @@ mod tests {
     }
 
     #[test]
+    fn scaled_kwin_bounds_keep_capture_and_portal_spaces_distinct() {
+        let bounds = WindowBounds {
+            x: Some(1000),
+            y: Some(100),
+            width: 800,
+            height: 600,
+        };
+        let logical_rect = window_crop_rect(&bounds).unwrap();
+        let full_capture_rect =
+            logical_window_crop_rect(&bounds, &[(0, 0, 1920, 1080)], 3840, 2160).unwrap();
+        let mapping = WindowCoordinateMap {
+            capture_rect: full_capture_rect,
+            full_capture_rect,
+            portal_rect: Some(logical_rect),
+        };
+
+        assert_eq!(mapping.capture_rect, (2000, 200, 1600, 1200));
+        assert_eq!(mapping.portal_point(2400, 500), Some((1200, 250)));
+    }
+
+    #[test]
+    fn kwin_mapping_uses_the_workspace_geometry_origin() {
+        let bounds = WindowBounds {
+            x: Some(1100),
+            y: Some(50),
+            width: 800,
+            height: 600,
+        };
+        let logical_rect = window_crop_rect(&bounds).unwrap();
+        let full_capture_rect =
+            logical_window_crop_rect(&bounds, &[(100, -50, 1920, 1080)], 3840, 2160).unwrap();
+        let mapping = WindowCoordinateMap {
+            capture_rect: full_capture_rect,
+            full_capture_rect,
+            portal_rect: Some(logical_rect),
+        };
+
+        assert_eq!(mapping.capture_rect, (2000, 200, 1600, 1200));
+        assert_eq!(mapping.portal_point(2400, 500), Some((1300, 200)));
+    }
+
+    #[test]
     fn gnome_window_crop_accounts_for_negative_monitor_origins() {
         let bounds = WindowBounds {
             x: Some(-900),
@@ -4873,26 +5009,7 @@ mod tests {
             width: 400,
             height: 300,
         };
-        let monitors = [
-            crate::windowing::backends::gnome::MonitorInfo {
-                index: 0,
-                x: -1000,
-                y: 0,
-                width: 1000,
-                height: 800,
-                primary: false,
-                scale: 1.0,
-            },
-            crate::windowing::backends::gnome::MonitorInfo {
-                index: 1,
-                x: 0,
-                y: 0,
-                width: 1200,
-                height: 800,
-                primary: true,
-                scale: 1.0,
-            },
-        ];
+        let monitors = [(-1000, 0, 1000, 800), (0, 0, 1200, 800)];
 
         assert_eq!(
             logical_window_crop_rect(&bounds, &monitors, 2200, 800).unwrap(),
@@ -5748,6 +5865,47 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(dir);
         panic!("cancelled xdotool child {pid} was not killed");
+    }
+
+    #[tokio::test]
+    async fn cancelling_between_press_and_release_keeps_input_locked() {
+        let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let guard = std::sync::Arc::clone(&lock).lock_owned().await;
+        let (pressed_tx, pressed_rx) = tokio::sync::oneshot::channel();
+        let (allow_release_tx, allow_release_rx) = tokio::sync::oneshot::channel();
+        let (released_tx, released_rx) = tokio::sync::oneshot::channel();
+
+        let waiter = tokio::spawn(async move {
+            run_cancellation_safe_input(guard, async move {
+                let _ = pressed_tx.send(());
+                let _ = allow_release_rx.await;
+                let _ = released_tx.send(());
+                Ok::<(), String>(())
+            })
+            .await
+        });
+
+        pressed_rx.await.expect("press command did not finish");
+        waiter.abort();
+        let _ = waiter.await;
+        assert!(
+            lock.try_lock().is_err(),
+            "input lock was released while the paired operation was incomplete"
+        );
+
+        allow_release_tx
+            .send(())
+            .expect("release command stopped on caller cancellation");
+        timeout(Duration::from_secs(1), released_rx)
+            .await
+            .expect("release command did not finish")
+            .expect("release command dropped its completion marker");
+        timeout(
+            Duration::from_secs(1),
+            std::sync::Arc::clone(&lock).lock_owned(),
+        )
+        .await
+        .expect("input lock remained held after the operation finished");
     }
 
     /// The xdotool path must accept exactly the keys the evdev grammar accepts,
