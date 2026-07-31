@@ -27,8 +27,8 @@ pub fn probe() -> BackendProbe {
     }
 }
 
-pub fn list_windows() -> Result<Vec<WindowInfo>> {
-    let json = cosmic_helper::list_windows_json()?;
+pub async fn list_windows() -> Result<Vec<WindowInfo>> {
+    let json = cosmic_helper::list_windows_json().await?;
     let mut windows: Vec<WindowInfo> =
         serde_json::from_str(&json).context("COSMIC helper returned invalid list-windows JSON")?;
     for window in &mut windows {
@@ -39,8 +39,8 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
     Ok(windows)
 }
 
-pub fn focused_window() -> Result<Option<WindowInfo>> {
-    let json = cosmic_helper::focused_window_json()?;
+pub async fn focused_window() -> Result<Option<WindowInfo>> {
+    let json = cosmic_helper::focused_window_json().await?;
     let mut window: Option<WindowInfo> = serde_json::from_str(&json)
         .context("COSMIC helper returned invalid focused-window JSON")?;
     if let Some(window) = window.as_mut() {
@@ -49,8 +49,8 @@ pub fn focused_window() -> Result<Option<WindowInfo>> {
     Ok(window)
 }
 
-pub fn activate_window(window_id: u64) -> Result<()> {
-    let activation = cosmic_helper::activate_window(window_id)?;
+pub async fn activate_window(window_id: u64) -> Result<()> {
+    let activation = cosmic_helper::activate_window(window_id).await?;
     if activation.ok {
         Ok(())
     } else {

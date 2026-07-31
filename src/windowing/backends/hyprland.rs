@@ -1,3 +1,4 @@
+use crate::command_runner;
 use crate::terminal::enrich_terminal_windows;
 use crate::windowing::registry::BackendProbe;
 use crate::windowing::types::{WindowBounds, WindowInfo};
@@ -6,8 +7,9 @@ use serde::Deserialize;
 use std::fs;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::Command as StdCommand;
 use std::time::SystemTime;
+use tokio::process::Command;
 
 pub const HYPRLAND_BACKEND: &str = "hyprland";
 
@@ -55,8 +57,10 @@ pub fn probe() -> BackendProbe {
     }
 }
 
-pub fn list_windows() -> Result<Vec<WindowInfo>> {
-    let output = hyprctl_output(&["clients", "-j"]).context("failed to run hyprctl clients -j")?;
+pub async fn list_windows() -> Result<Vec<WindowInfo>> {
+    let output = hyprctl_output_async(&["clients", "-j"])
+        .await
+        .context("failed to run hyprctl clients -j")?;
     if !output.status.success() {
         bail!(
             "hyprctl clients -j failed: {}",
@@ -65,7 +69,7 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
     }
 
     let clients_json = String::from_utf8_lossy(&output.stdout);
-    let monitors_output = hyprctl_output(&["monitors", "-j"]).ok();
+    let monitors_output = hyprctl_output_async(&["monitors", "-j"]).await.ok();
     match monitors_output.filter(|output| output.status.success()) {
         Some(monitors) => parse_hyprland_clients_with_monitors(&clients_json, &monitors.stdout),
         None => parse_hyprland_clients(&clients_json),
@@ -125,16 +129,18 @@ fn windows_from_hyprland_clients(clients: Vec<HyprlandClient>) -> Result<Vec<Win
     Ok(windows)
 }
 
-pub fn activate_window(window_id: u64) -> Result<()> {
+pub async fn activate_window(window_id: u64) -> Result<()> {
     let address = format!("address:0x{window_id:x}");
     let lua_dispatch = lua_focus_dispatch(&address);
-    let lua_output = hyprctl_output(&["dispatch", &lua_dispatch])
+    let lua_output = hyprctl_output_async(&["dispatch", &lua_dispatch])
+        .await
         .with_context(|| format!("failed to run Hyprland Lua focus dispatcher for {address}"))?;
     if dispatch_succeeded(&lua_output) {
         return Ok(());
     }
 
-    let legacy_output = hyprctl_output(&["dispatch", "focuswindow", &address])
+    let legacy_output = hyprctl_output_async(&["dispatch", "focuswindow", &address])
+        .await
         .with_context(|| format!("failed to run hyprctl dispatch focuswindow {address}"))?;
     if dispatch_succeeded(&legacy_output) {
         Ok(())
@@ -171,7 +177,7 @@ fn lua_focus_dispatch(address: &str) -> String {
 }
 
 fn hyprctl_output(args: &[&str]) -> std::io::Result<std::process::Output> {
-    let mut command = Command::new("hyprctl");
+    let mut command = StdCommand::new("hyprctl");
     let has_signature = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
         .ok()
         .is_some_and(|value| !value.trim().is_empty());
@@ -181,6 +187,20 @@ fn hyprctl_output(args: &[&str]) -> std::io::Result<std::process::Output> {
         }
     }
     command.args(args).output()
+}
+
+async fn hyprctl_output_async(args: &[&str]) -> Result<std::process::Output> {
+    let mut command = Command::new("hyprctl");
+    let has_signature = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty());
+    if !has_signature {
+        if let Some(signature) = infer_hyprland_instance_signature() {
+            command.args(["-i", &signature]);
+        }
+    }
+    command.args(args);
+    command_runner::output(command, "run hyprctl").await
 }
 
 fn infer_hyprland_instance_signature() -> Option<String> {

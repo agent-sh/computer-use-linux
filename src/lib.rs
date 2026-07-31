@@ -2,6 +2,7 @@ mod abs_pointer;
 #[path = "atspi_tree.rs"]
 mod atspi_tree_impl;
 mod cli;
+mod command_runner;
 mod cosmic_helper;
 #[path = "diagnostics.rs"]
 mod diagnostics_impl;
@@ -14,6 +15,7 @@ mod server;
 mod terminal;
 mod windowing;
 mod windows;
+mod ydotool;
 
 pub mod atspi_tree {
     pub(crate) use crate::atspi_tree_impl::{

@@ -41,10 +41,11 @@ If `doctor` reports missing input or accessibility support, run:
 
 ```bash
 computer-use-linux setup
-systemctl --user enable --now ydotoold
 computer-use-linux setup-window-targeting
 computer-use-linux doctor | jq .readiness
 ```
+
+If `doctor` selects ydotool as the input backend, also enable its per-user daemon with `systemctl --user enable --now ydotoold`. Direct uinput, X11 xdotool, and RemoteDesktop portal input do not require `ydotoold`.
 
 On GNOME Wayland, log out and back in after `setup-window-targeting` if the GNOME Shell extension was newly installed.
 
@@ -83,7 +84,8 @@ If the binary is not on `PATH`, use the absolute path (typically `~/.local/bin/c
 - GNOME may show a portal prompt on the first screenshot or `get_app_state` call with screenshots enabled.
 - Desktop input is stateful. Avoid concurrent tool calls against this MCP server.
 - `click`, `drag`, `press_key`, `type_text`, `perform_action`, and `set_value` can change real application state.
-- `ydotoold` should run as a per-user service with its socket under `/run/user/$UID`, not as a system-wide service.
+- When ydotool is selected, `ydotoold` should run as a per-user service with its socket under `/run/user/$UID`, not as a system-wide service.
+- The optional ydotool backend requires version 1.0.3 or newer; `doctor` rejects older or semantically incompatible CLIs even when `ydotoold` is running.
 - On COSMIC, the standard npm, Cargo, and install-script paths install the `computer-use-linux-cosmic` helper automatically. Manual binary installs must copy both binaries.
 
 ## Verification

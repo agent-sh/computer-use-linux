@@ -35,14 +35,17 @@ base64 = "0.22.1"
 evdev = "0.13.2"
 cosmic-protocols = { version = "0.2.0", default-features = false, features = ["client"] }
 futures-util = "0.3.32"
+getrandom = "0.4.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+libc = "0.2"
 rmcp = { version = "1.5.0", features = ["transport-io"] }
 schemars = "1.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-tokio = { version = "1.51.1", features = ["macros", "process", "rt", "time"] }
+tokio = { version = "1.51.1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
 wayland-client = "0.31.11"
 wayland-protocols = { version = "0.32.9", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 xkeysym = "0.2.1"
 zbus = "5.14.0"
 

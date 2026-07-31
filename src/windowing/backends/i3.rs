@@ -1,9 +1,11 @@
+use crate::command_runner;
 use crate::terminal::enrich_terminal_windows;
 use crate::windowing::registry::BackendProbe;
 use crate::windowing::types::{WindowBounds, WindowInfo};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::{env, fs, os::unix::fs::FileTypeExt, path::PathBuf, process::Command};
+use tokio::process::Command as TokioCommand;
 
 pub const I3_BACKEND: &str = "i3";
 
@@ -51,11 +53,10 @@ pub fn probe() -> BackendProbe {
     }
 }
 
-pub fn list_windows() -> Result<Vec<WindowInfo>> {
-    let output = i3_msg_command()
-        .args(["-t", "get_tree"])
-        .output()
-        .context("failed to run i3-msg -t get_tree")?;
+pub async fn list_windows() -> Result<Vec<WindowInfo>> {
+    let mut command = i3_msg_command_async();
+    command.args(["-t", "get_tree"]);
+    let output = command_runner::output(command, "run i3-msg -t get_tree").await?;
     if !output.status.success() {
         bail!(
             "i3-msg -t get_tree failed: {}",
@@ -64,7 +65,7 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
     }
 
     let mut windows = parse_i3_tree(&String::from_utf8_lossy(&output.stdout))?;
-    hydrate_i3_window_pids(&mut windows);
+    hydrate_i3_window_pids(&mut windows).await;
     enrich_terminal_windows(&mut windows);
     Ok(windows)
 }
@@ -78,12 +79,11 @@ pub(crate) fn parse_i3_tree(json: &str) -> Result<Vec<WindowInfo>> {
     Ok(windows)
 }
 
-pub fn activate_window(window_id: u64) -> Result<()> {
+pub async fn activate_window(window_id: u64) -> Result<()> {
     let selector = format!(r#"[id="0x{window_id:x}"] focus"#);
-    let output = i3_msg_command()
-        .arg(&selector)
-        .output()
-        .with_context(|| format!("failed to run i3-msg {selector}"))?;
+    let mut command = i3_msg_command_async();
+    command.arg(&selector);
+    let output = command_runner::output(command, &format!("run i3-msg {selector}")).await?;
     if !output.status.success() {
         bail!(
             "i3-msg {selector} failed: {}",
@@ -138,18 +138,19 @@ fn collect_i3_windows(
     }
 }
 
-fn hydrate_i3_window_pids(windows: &mut [WindowInfo]) {
+async fn hydrate_i3_window_pids(windows: &mut [WindowInfo]) {
     for window in windows {
         if window.pid.is_none() {
-            window.pid = i3_window_pid(window.window_id);
+            window.pid = i3_window_pid(window.window_id).await;
         }
     }
 }
 
-fn i3_window_pid(window_id: u64) -> Option<u32> {
-    let output = Command::new("xprop")
-        .args(["-id", &window_id.to_string(), "_NET_WM_PID"])
-        .output()
+async fn i3_window_pid(window_id: u64) -> Option<u32> {
+    let mut command = TokioCommand::new("xprop");
+    command.args(["-id", &window_id.to_string(), "_NET_WM_PID"]);
+    let output = command_runner::output(command, "query X11 window pid")
+        .await
         .ok()?;
     if !output.status.success() {
         return None;
@@ -163,6 +164,14 @@ pub(crate) fn parse_xprop_pid(output: &str) -> Option<u32> {
 
 fn i3_msg_command() -> Command {
     let mut command = Command::new("i3-msg");
+    if let Some(socket_path) = i3_socket_path() {
+        command.arg("-s").arg(socket_path);
+    }
+    command
+}
+
+fn i3_msg_command_async() -> TokioCommand {
+    let mut command = TokioCommand::new("i3-msg");
     if let Some(socket_path) = i3_socket_path() {
         command.arg("-s").arg(socket_path);
     }

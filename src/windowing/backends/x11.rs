@@ -10,14 +10,21 @@
 //! [EWMH]: https://specifications.freedesktop.org/wm-spec/latest/
 //! [ICCCM]: https://tronche.com/gui/x/icccm/
 
+use crate::command_runner;
 use crate::terminal::enrich_terminal_windows;
 use crate::windowing::registry::BackendProbe;
 use crate::windowing::types::{WindowBounds, WindowInfo};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::env;
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
+use tokio::process::Command as TokioCommand;
+use tokio::time::{sleep, Duration};
 
 pub const X11_BACKEND: &str = "x11";
+const GEOMETRY_VERIFY_ATTEMPTS: usize = 11;
+const GEOMETRY_VERIFY_DELAY: Duration = Duration::from_millis(50);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// True when this looks like a plain X11 session we can drive over EWMH.
 ///
@@ -35,17 +42,27 @@ fn is_x11_session() -> bool {
     }
 }
 
+pub(crate) fn can_exact_focus() -> bool {
+    is_x11_session() && command_on_path("wmctrl") && command_on_path("xprop")
+}
+
 pub fn probe() -> BackendProbe {
     if !is_x11_session() {
         return probe_fail("no X11 session (needs DISPLAY on an X11, not Wayland, session)");
     }
-    match wmctrl().args(["-l", "-p", "-G", "-x"]).output() {
+    let mut command = wmctrl();
+    command.args(["-l", "-p", "-G", "-x"]);
+    match command_runner::output_blocking_with_timeout(
+        &mut command,
+        "probe X11 windows",
+        PROBE_TIMEOUT,
+    ) {
         Ok(output) if output.status.success() => {
             // Listing only needs wmctrl, but the `focused` flag (and therefore
             // focused_window() and activate_window's focus verification) comes
             // from `_NET_ACTIVE_WINDOW` read via xprop. Without xprop we can list
             // but cannot verify focus, so don't advertise focus capabilities.
-            let can_focus = command_on_path("xprop");
+            let can_focus = can_exact_focus() && active_window_query().is_some();
             BackendProbe {
                 id: X11_BACKEND,
                 ok: true,
@@ -78,17 +95,24 @@ fn probe_fail(detail: &str) -> BackendProbe {
     }
 }
 
-pub fn list_windows() -> Result<Vec<WindowInfo>> {
+pub async fn list_windows() -> Result<Vec<WindowInfo>> {
+    list_windows_with_focus_query(false).await
+}
+
+pub(crate) async fn list_windows_for_exact_focus() -> Result<Vec<WindowInfo>> {
+    list_windows_with_focus_query(true).await
+}
+
+async fn list_windows_with_focus_query(require_focus_query: bool) -> Result<Vec<WindowInfo>> {
     // Guard the session too, not just probe(): registry::list_windows() tries
     // each backend directly, so without this a Wayland session with no native
     // backend would fall through here and return XWayland-only windows.
     if !is_x11_session() {
         bail!("not an X11 session (needs DISPLAY on an X11, not Wayland, session)");
     }
-    let output = wmctrl()
-        .args(["-l", "-p", "-G", "-x"])
-        .output()
-        .context("failed to run wmctrl -l -p -G -x")?;
+    let mut command = wmctrl_async();
+    command.args(["-l", "-p", "-G", "-x"]);
+    let output = command_runner::output(command, "run wmctrl -l -p -G -x").await?;
     if !output.status.success() {
         bail!(
             "wmctrl -l -p -G -x failed: {}",
@@ -96,19 +120,20 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
         );
     }
 
-    let active_id = active_window_id();
+    let active_id =
+        resolve_active_window_query(active_window_query_async().await, require_focus_query)?;
     let mut windows = parse_wmctrl_windows(&String::from_utf8_lossy(&output.stdout), active_id);
     enrich_terminal_windows(&mut windows);
     Ok(windows)
 }
 
-pub fn activate_window(window_id: u64) -> Result<()> {
+pub async fn activate_window(window_id: u64) -> Result<()> {
     let id = window_id_arg(window_id);
-    run_wmctrl(&["-i", "-a", id.as_str()], "activate window", window_id)
+    run_wmctrl(&["-i", "-a", id.as_str()], "activate window", window_id).await
 }
 
-pub fn move_window(window_id: u64, x: i32, y: i32) -> Result<String> {
-    unmaximize(window_id)?;
+pub async fn move_window(window_id: u64, x: i32, y: i32) -> Result<String> {
+    unmaximize(window_id).await?;
     let id = window_id_arg(window_id);
     // wmctrl -e is `gravity,x,y,width,height`; the trailing -1,-1 keep the size.
     // wmctrl also reads -1 in the x/y fields as "preserve current position", so a
@@ -118,8 +143,23 @@ pub fn move_window(window_id: u64, x: i32, y: i32) -> Result<String> {
         &["-i", "-r", id.as_str(), "-e", geometry.as_str()],
         "move window",
         window_id,
-    )?;
-    Ok(format!("Moved window to ({x}, {y}) via X11/EWMH (wmctrl)."))
+    )
+    .await?;
+    let expected_x = wmctrl_move_coord(x);
+    let expected_y = wmctrl_move_coord(y);
+    let (bounds, exact) = wait_for_window_geometry(window_id, |bounds| {
+        bounds_at_position(bounds, expected_x, expected_y)
+    })
+    .await?;
+    if exact {
+        Ok(format!("Moved window to ({x}, {y}) via X11/EWMH (wmctrl)."))
+    } else {
+        Ok(format!(
+            "Requested move to ({x}, {y}) via X11/EWMH; the window manager reported position ({}, {}).",
+            bounds.x.map_or_else(|| "unknown".to_string(), |value| value.to_string()),
+            bounds.y.map_or_else(|| "unknown".to_string(), |value| value.to_string())
+        ))
+    }
 }
 
 /// `wmctrl -e` treats -1 in any field as "keep current value", so a literal -1
@@ -133,29 +173,88 @@ fn wmctrl_move_coord(value: i32) -> i32 {
     }
 }
 
-pub fn resize_window(window_id: u64, width: i32, height: i32) -> Result<String> {
+pub async fn resize_window(window_id: u64, width: i32, height: i32) -> Result<String> {
     // wmctrl -e reads -1 (and rejects <= 0) as "preserve current value" per
     // field, so a non-positive size would silently leave a dimension unchanged
     // while reporting success. Reject it up front.
     if width <= 0 || height <= 0 {
         bail!("resize requires positive width and height (got {width}x{height})");
     }
-    unmaximize(window_id)?;
+    unmaximize(window_id).await?;
     let id = window_id_arg(window_id);
     let geometry = format!("0,-1,-1,{width},{height}");
     run_wmctrl(
         &["-i", "-r", id.as_str(), "-e", geometry.as_str()],
         "resize window",
         window_id,
-    )?;
-    Ok(format!(
-        "Resized window to {width}x{height} via X11/EWMH (wmctrl)."
-    ))
+    )
+    .await?;
+    let (bounds, exact) = wait_for_window_geometry(window_id, |bounds| {
+        bounds_at_size(bounds, width as u32, height as u32)
+    })
+    .await?;
+    if exact {
+        Ok(format!(
+            "Resized window to {width}x{height} via X11/EWMH (wmctrl)."
+        ))
+    } else {
+        Ok(format!(
+            "Requested resize to {width}x{height} via X11/EWMH; the window manager reported {}x{}.",
+            bounds.width, bounds.height
+        ))
+    }
+}
+
+async fn wait_for_window_geometry(
+    window_id: u64,
+    matches: impl Fn(&WindowBounds) -> bool,
+) -> Result<(WindowBounds, bool)> {
+    let mut last_bounds = None;
+    for attempt in 0..GEOMETRY_VERIFY_ATTEMPTS {
+        if let Some(bounds) = query_window_bounds(window_id).await {
+            if matches(&bounds) {
+                return Ok((bounds, true));
+            }
+            last_bounds = Some(bounds);
+        }
+        if attempt + 1 < GEOMETRY_VERIFY_ATTEMPTS {
+            sleep(GEOMETRY_VERIFY_DELAY).await;
+        }
+    }
+    match last_bounds {
+        Some(bounds) => Ok((bounds, false)),
+        None => {
+            bail!("X11/EWMH window 0x{window_id:x} could not be queried after the geometry request")
+        }
+    }
+}
+
+async fn query_window_bounds(window_id: u64) -> Option<WindowBounds> {
+    let mut command = wmctrl_async();
+    command.args(["-l", "-p", "-G", "-x"]);
+    let output = command_runner::output(command, "query X11 window geometry")
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_wmctrl_windows(&String::from_utf8_lossy(&output.stdout), None)
+        .into_iter()
+        .find(|window| window.window_id == window_id)
+        .and_then(|window| window.bounds)
+}
+
+fn bounds_at_position(bounds: &WindowBounds, x: i32, y: i32) -> bool {
+    bounds.x == Some(x) && bounds.y == Some(y)
+}
+
+fn bounds_at_size(bounds: &WindowBounds, width: u32, height: u32) -> bool {
+    bounds.width == width && bounds.height == height
 }
 
 /// EWMH move/resize only take effect on unmaximized windows, so drop the
 /// maximized state first (mirrors the GNOME extension backend behaviour).
-fn unmaximize(window_id: u64) -> Result<()> {
+async fn unmaximize(window_id: u64) -> Result<()> {
     let id = window_id_arg(window_id);
     run_wmctrl(
         &[
@@ -168,13 +267,14 @@ fn unmaximize(window_id: u64) -> Result<()> {
         "unmaximize window",
         window_id,
     )
+    .await
 }
 
-fn run_wmctrl(args: &[&str], action: &str, window_id: u64) -> Result<()> {
-    let output = wmctrl()
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to run wmctrl to {action} 0x{window_id:x}"))?;
+async fn run_wmctrl(args: &[&str], action: &str, window_id: u64) -> Result<()> {
+    let mut command = wmctrl_async();
+    command.args(args);
+    let output =
+        command_runner::output(command, &format!("run wmctrl to {action} 0x{window_id:x}")).await?;
     if !output.status.success() {
         bail!(
             "wmctrl failed to {action} 0x{window_id:x}: {}",
@@ -192,27 +292,55 @@ fn wmctrl() -> Command {
     Command::new("wmctrl")
 }
 
-fn active_window_id() -> Option<u64> {
-    let output = Command::new("xprop")
-        .args(["-root", "-notype", "_NET_ACTIVE_WINDOW"])
-        .output()
+fn wmctrl_async() -> TokioCommand {
+    TokioCommand::new("wmctrl")
+}
+
+async fn active_window_query_async() -> Option<Option<u64>> {
+    let mut command = TokioCommand::new("xprop");
+    command.args(["-root", "-notype", "_NET_ACTIVE_WINDOW"]);
+    let output = command_runner::output(command, "query the active X11 window")
+        .await
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    parse_active_window_id(&String::from_utf8_lossy(&output.stdout))
+    parse_active_window_query(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// Parse the window id out of an `xprop _NET_ACTIVE_WINDOW` line, e.g.
-/// `_NET_ACTIVE_WINDOW: window id # 0x7000004`. Returns `None` for `0x0`.
-pub(crate) fn parse_active_window_id(xprop_output: &str) -> Option<u64> {
+fn resolve_active_window_query(
+    query: Option<Option<u64>>,
+    require_focus_query: bool,
+) -> Result<Option<u64>> {
+    if require_focus_query && query.is_none() {
+        bail!("xprop could not query _NET_ACTIVE_WINDOW");
+    }
+    Ok(query.flatten())
+}
+
+fn active_window_query() -> Option<Option<u64>> {
+    let mut command = Command::new("xprop");
+    command.args(["-root", "-notype", "_NET_ACTIVE_WINDOW"]);
+    let output = command_runner::output_blocking_with_timeout(
+        &mut command,
+        "probe the active X11 window",
+        PROBE_TIMEOUT,
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_active_window_query(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_active_window_query(xprop_output: &str) -> Option<Option<u64>> {
     let after = xprop_output.split("0x").nth(1)?;
     let hex: String = after
         .chars()
         .take_while(|character| character.is_ascii_hexdigit())
         .collect();
     let id = u64::from_str_radix(&hex, 16).ok()?;
-    (id != 0).then_some(id)
+    Some((id != 0).then_some(id))
 }
 
 /// Parse `wmctrl -l -p -G -x` output into window records.
@@ -309,8 +437,13 @@ fn env_nonempty(name: &str) -> Option<String> {
 /// capabilities on `xprop` without spawning it (xprop with no args would block
 /// reading a window interactively).
 fn command_on_path(cmd: &str) -> bool {
-    env::var_os("PATH")
-        .is_some_and(|paths| env::split_paths(&paths).any(|dir| dir.join(cmd).is_file()))
+    env::var_os("PATH").is_some_and(|paths| {
+        env::split_paths(&paths).any(|dir| {
+            dir.join(cmd).metadata().is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
+    })
 }
 
 #[cfg(test)]
@@ -320,17 +453,32 @@ mod tests {
     #[test]
     fn parses_active_window_id_from_xprop() {
         assert_eq!(
-            parse_active_window_id("_NET_ACTIVE_WINDOW: window id # 0x7000004\n"),
-            Some(0x7000004)
+            parse_active_window_query("_NET_ACTIVE_WINDOW: window id # 0x7000004\n"),
+            Some(Some(0x7000004))
         );
         assert_eq!(
-            parse_active_window_id("_NET_ACTIVE_WINDOW(WINDOW): window id # 0x03a00017\n"),
-            Some(0x03a00017)
+            parse_active_window_query("_NET_ACTIVE_WINDOW(WINDOW): window id # 0x03a00017\n"),
+            Some(Some(0x03a00017))
         );
         assert_eq!(
-            parse_active_window_id("_NET_ACTIVE_WINDOW: window id # 0x0\n"),
+            parse_active_window_query("_NET_ACTIVE_WINDOW: window id # 0x0\n"),
+            Some(None)
+        );
+        assert_eq!(
+            parse_active_window_query("_NET_ACTIVE_WINDOW:  not found.\n"),
             None
         );
+    }
+
+    #[test]
+    fn exact_focus_listing_requires_a_live_active_window_query() {
+        assert!(resolve_active_window_query(None, true).is_err());
+        assert_eq!(resolve_active_window_query(Some(None), true).unwrap(), None);
+        assert_eq!(
+            resolve_active_window_query(Some(Some(0x7000004)), true).unwrap(),
+            Some(0x7000004)
+        );
+        assert_eq!(resolve_active_window_query(None, false).unwrap(), None);
     }
 
     #[test]
@@ -383,6 +531,20 @@ mod tests {
         assert_eq!(wmctrl_move_coord(0), 0);
         assert_eq!(wmctrl_move_coord(-40), -40);
         assert_eq!(wmctrl_move_coord(1920), 1920);
+    }
+
+    #[test]
+    fn geometry_matchers_require_the_requested_values() {
+        let bounds = WindowBounds {
+            x: Some(10),
+            y: Some(20),
+            width: 800,
+            height: 600,
+        };
+        assert!(bounds_at_position(&bounds, 10, 20));
+        assert!(!bounds_at_position(&bounds, 11, 20));
+        assert!(bounds_at_size(&bounds, 800, 600));
+        assert!(!bounds_at_size(&bounds, 801, 600));
     }
 
     #[test]

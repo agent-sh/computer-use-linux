@@ -1,9 +1,10 @@
 use crate::windowing::registry::{self, WINDOW_PERMISSION_HINT};
 use crate::windowing::types::{WindowFocusResult, WindowInfo, WindowTarget};
 use anyhow::{bail, Result};
-use tokio::time::{sleep, Duration};
+use std::future::Future;
+use tokio::time::{sleep_until, timeout_at, Duration, Instant};
 
-const FOCUS_VERIFY_ATTEMPTS: usize = 21;
+const FOCUS_VERIFY_TIMEOUT: Duration = Duration::from_secs(1);
 const FOCUS_VERIFY_DELAY: Duration = Duration::from_millis(50);
 
 pub async fn list_windows() -> Result<Vec<WindowInfo>> {
@@ -58,7 +59,7 @@ pub(crate) fn ensure_backend_can_focus_target(
 }
 
 async fn current_focused_window() -> Result<Option<WindowInfo>> {
-    if let Some(window) = registry::focused_window_override() {
+    if let Some(window) = registry::focused_window_override().await {
         return Ok(Some(window));
     }
 
@@ -69,23 +70,45 @@ async fn current_focused_window() -> Result<Option<WindowInfo>> {
 }
 
 async fn wait_for_focused_window(requested_window: &WindowInfo) -> Option<WindowInfo> {
+    wait_for_focused_window_with(requested_window, FOCUS_VERIFY_TIMEOUT, || {
+        registry::focused_window_for_backend(&requested_window.backend)
+    })
+    .await
+}
+
+async fn wait_for_focused_window_with<F, Fut>(
+    requested_window: &WindowInfo,
+    verify_timeout: Duration,
+    mut query: F,
+) -> Option<WindowInfo>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<Option<WindowInfo>>>,
+{
+    let deadline = Instant::now() + verify_timeout;
     let mut last_focused_window = None;
-    for attempt in 0..FOCUS_VERIFY_ATTEMPTS {
-        if let Ok(focused_window) = current_focused_window().await {
-            if focused_window
-                .as_ref()
-                .is_some_and(|window| window.window_id == requested_window.window_id)
-            {
-                return focused_window;
+    loop {
+        match timeout_at(deadline, query()).await {
+            Ok(Ok(focused_window)) => {
+                if focused_window
+                    .as_ref()
+                    .is_some_and(|window| window.window_id == requested_window.window_id)
+                {
+                    return focused_window;
+                }
+                if focused_window.is_some() {
+                    last_focused_window = focused_window;
+                }
             }
-            if focused_window.is_some() {
-                last_focused_window = focused_window;
-            }
+            Ok(Err(_)) => {}
+            Err(_) => break,
         }
 
-        if attempt + 1 < FOCUS_VERIFY_ATTEMPTS {
-            sleep(FOCUS_VERIFY_DELAY).await;
+        let now = Instant::now();
+        if now >= deadline {
+            break;
         }
+        sleep_until((now + FOCUS_VERIFY_DELAY).min(deadline)).await;
     }
     last_focused_window
 }
@@ -378,7 +401,35 @@ mod tests {
 
     #[test]
     fn focus_verification_allows_workspace_transition_latency() {
-        let verification_budget = FOCUS_VERIFY_DELAY * (FOCUS_VERIFY_ATTEMPTS - 1) as u32;
-        assert!(verification_budget >= Duration::from_secs(1));
+        assert!(FOCUS_VERIFY_TIMEOUT >= Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn slow_focus_query_cannot_exceed_verification_deadline() {
+        let requested_window = WindowInfo {
+            window_id: 1,
+            title: None,
+            app_id: None,
+            wm_class: None,
+            pid: None,
+            bounds: None,
+            workspace: None,
+            focused: false,
+            hidden: false,
+            client_type: None,
+            backend: "test".to_string(),
+            terminal: None,
+        };
+        let started = Instant::now();
+
+        let focused =
+            wait_for_focused_window_with(&requested_window, Duration::from_millis(20), || async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                Ok::<_, anyhow::Error>(None)
+            })
+            .await;
+
+        assert!(focused.is_none());
+        assert!(started.elapsed() < Duration::from_millis(500));
     }
 }

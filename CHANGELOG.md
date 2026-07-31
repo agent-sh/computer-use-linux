@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- KWin window listing and activation now support both Plasma 6
+  (`windowList`/`activeWindow`) and Plasma 5 (`clientList`/`activeClient`).
+- ydotool is now used only when its CLI, daemon, and socket support the raw
+  event semantics Computer Use emits. Compatibility probing works without
+  `XDG_RUNTIME_DIR`, uses an isolated private socket, and rejects CLI errors
+  that are returned with a successful exit status.
+- X11 `xdotool type` now disables per-character delay, and a command that
+  starts but fails is no longer replayed through ydotool. The ydotool fallback
+  is limited to failures to launch xdotool, avoiding duplicate partial input.
+
 ## [0.4.3] - 2026-07-31
 
 ### Fixed

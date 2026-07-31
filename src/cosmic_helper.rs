@@ -1,12 +1,16 @@
+use crate::command_runner;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     env,
     path::{Path, PathBuf},
-    process::Command,
+    process::Command as StdCommand,
+    time::Duration,
 };
+use tokio::process::Command;
 
 pub const COSMIC_HELPER_BINARY: &str = "computer-use-linux-cosmic";
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CosmicHelperProbe {
@@ -20,6 +24,15 @@ pub struct CosmicHelperProbe {
 pub struct CosmicHelperActivation {
     pub ok: bool,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CosmicMonitor {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub scale: f64,
 }
 
 pub fn resolve_helper_binary() -> Result<PathBuf> {
@@ -52,16 +65,20 @@ pub fn probe() -> Result<CosmicHelperProbe> {
     run_json_command(["probe"])
 }
 
-pub fn list_windows_json() -> Result<String> {
-    run_text_command(["list-windows"])
+pub async fn list_windows_json() -> Result<String> {
+    run_text_command_async(["list-windows"]).await
 }
 
-pub fn focused_window_json() -> Result<String> {
-    run_text_command(["focused-window"])
+pub async fn focused_window_json() -> Result<String> {
+    run_text_command_async(["focused-window"]).await
 }
 
-pub fn activate_window(window_id: u64) -> Result<CosmicHelperActivation> {
-    run_json_command(["activate-window", "--window-id", &window_id.to_string()])
+pub async fn monitor_layout() -> Result<Vec<CosmicMonitor>> {
+    run_json_command_async(["monitor-layout"]).await
+}
+
+pub async fn activate_window(window_id: u64) -> Result<CosmicHelperActivation> {
+    run_json_command_async(["activate-window", "--window-id", &window_id.to_string()]).await
 }
 
 fn run_json_command<T, I, S>(args: I) -> Result<T>
@@ -75,12 +92,23 @@ where
         .with_context(|| format!("failed to parse {COSMIC_HELPER_BINARY} JSON output"))
 }
 
-fn run_text_command<I, S>(args: I) -> Result<String>
+async fn run_json_command_async<T, I, S>(args: I) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let output = run_command_async(args).await?;
+    serde_json::from_str(&output)
+        .with_context(|| format!("failed to parse {COSMIC_HELPER_BINARY} JSON output"))
+}
+
+async fn run_text_command_async<I, S>(args: I) -> Result<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    run_command(args)
+    run_command_async(args).await
 }
 
 fn run_command<I, S>(args: I) -> Result<String>
@@ -93,10 +121,46 @@ where
         .into_iter()
         .map(|arg| arg.as_ref().to_string())
         .collect::<Vec<_>>();
-    let output = Command::new(&helper)
-        .args(&args)
-        .output()
-        .with_context(|| format!("failed to run {}", helper.display()))?;
+    let mut command = StdCommand::new(&helper);
+    command.args(&args);
+    let output = command_runner::output_blocking_with_timeout(
+        &mut command,
+        &format!("run {}", helper.display()),
+        PROBE_TIMEOUT,
+    )?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        bail!(
+            "{} {} failed{}",
+            helper.display(),
+            args.join(" "),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        );
+    }
+    String::from_utf8(output.stdout)
+        .map(|text| text.trim().to_string())
+        .context("helper output was not valid UTF-8")
+}
+
+async fn run_command_async<I, S>(args: I) -> Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let helper = resolve_helper_binary()?;
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_string())
+        .collect::<Vec<_>>();
+    let mut command = Command::new(&helper);
+    command.args(&args);
+    let output = command_runner::output(command, &format!("run {}", helper.display())).await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
