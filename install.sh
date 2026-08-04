@@ -17,6 +17,7 @@ IFS=$'\n\t'
 # -----------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+OS_RELEASE_FILE="${COMPUTER_USE_LINUX_OS_RELEASE_FILE:-/etc/os-release}"
 BIN_NAME="computer-use-linux"
 COSMIC_HELPER_NAME="computer-use-linux-cosmic"
 INSTALL_DIR="${HOME}/.local/bin"
@@ -64,6 +65,7 @@ SKIP_YDOTOOL=0
 SKIP_GNOME_EXT=0
 SKIP_DOCTOR=0
 FORCE_UNKNOWN_DISTRO=0
+PACKAGE_MANAGER_OVERRIDE=""
 
 usage() {
     cat <<EOF
@@ -77,7 +79,7 @@ Steps (run in order, each idempotent):
   3. Install rustup toolchain
   4. cargo build --release  →  ~/.local/bin/${BIN_NAME} and ${COSMIC_HELPER_NAME}
   5. Enable AT-SPI toolkit accessibility (GNOME)
-  6. Install + enable ydotoold systemd --user service
+  6. Install + enable ydotoold systemd --user service when available
   7. Pack/install/enable GNOME Shell extension (Wayland + GNOME)
   8. Run \`${BIN_NAME} doctor\` and report readiness
 
@@ -86,10 +88,11 @@ Flags:
   --skip-rust             skip rustup install
   --skip-build            skip cargo build (assumes target/release/${BIN_NAME} and ${COSMIC_HELPER_NAME} exist)
   --skip-atspi            skip toolkit-accessibility gsetting
-  --skip-ydotool          skip ydotoold systemd unit
+  --skip-ydotool          skip ydotoold user-service setup
   --skip-gnome-extension  skip GNOME Shell extension install
   --skip-doctor           skip the final readiness check
-  --force-unknown-distro  treat unrecognised distros as Debian-family (apt)
+  --force-unknown-distro  use the one supported package manager found on PATH
+  --package-manager NAME  force apt, dnf, or pacman for system packages
   -h, --help              show this help and exit
 EOF
 }
@@ -104,11 +107,22 @@ while [[ $# -gt 0 ]]; do
         --skip-gnome-extension) SKIP_GNOME_EXT=1 ;;
         --skip-doctor)          SKIP_DOCTOR=1 ;;
         --force-unknown-distro) FORCE_UNKNOWN_DISTRO=1 ;;
+        --package-manager)
+            [[ $# -ge 2 ]] || die "--package-manager requires apt, dnf, or pacman"
+            PACKAGE_MANAGER_OVERRIDE="$2"
+            shift
+            ;;
+        --package-manager=*)    PACKAGE_MANAGER_OVERRIDE="${1#*=}" ;;
         -h|--help)              usage; exit 0 ;;
         *)                      usage; die "unknown flag: $1" ;;
     esac
     shift
 done
+
+case "${PACKAGE_MANAGER_OVERRIDE}" in
+    ""|apt|dnf|pacman) ;;
+    *) die "unsupported package manager '${PACKAGE_MANAGER_OVERRIDE}' (expected apt, dnf, or pacman)" ;;
+esac
 
 # -----------------------------------------------------------------------------
 # Step 1: distro + display server detection
@@ -117,6 +131,33 @@ done
 DISTRO_FAMILY=""
 PKG_MANAGER=""
 
+set_package_manager() {
+    case "$1" in
+        apt)    DISTRO_FAMILY="debian"; PKG_MANAGER="apt" ;;
+        dnf)    DISTRO_FAMILY="fedora"; PKG_MANAGER="dnf" ;;
+        pacman) DISTRO_FAMILY="arch"; PKG_MANAGER="pacman" ;;
+        *) return 1 ;;
+    esac
+}
+
+package_manager_available() {
+    case "$1" in
+        apt)    command -v apt-get >/dev/null 2>&1 ;;
+        dnf)    command -v dnf >/dev/null 2>&1 ;;
+        pacman) command -v pacman >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+}
+
+available_package_managers() {
+    local manager
+    for manager in apt dnf pacman; do
+        if package_manager_available "${manager}"; then
+            printf '%s\n' "${manager}"
+        fi
+    done
+}
+
 detect_distro() {
     log_section "Step 1/9 — detect environment"
 
@@ -124,32 +165,50 @@ detect_distro() {
         die "this script only supports Linux (got $(uname -s)). macOS/*BSD are not supported."
     fi
 
-    if [[ ! -r /etc/os-release ]]; then
-        die "/etc/os-release missing — cannot detect distro."
+    if [[ ! -r "${OS_RELEASE_FILE}" ]]; then
+        die "${OS_RELEASE_FILE} missing — cannot detect distro."
     fi
 
+    local ID="" ID_LIKE="" PRETTY_NAME=""
     # shellcheck disable=SC1091
-    . /etc/os-release
+    . "${OS_RELEASE_FILE}"
     local id_like="${ID_LIKE:-} ${ID:-}"
 
-    case " ${id_like} " in
-        *" debian "*|*" ubuntu "*)
-            DISTRO_FAMILY="debian"; PKG_MANAGER="apt" ;;
-        *" fedora "*|*" rhel "*|*" centos "*)
-            DISTRO_FAMILY="fedora"; PKG_MANAGER="dnf" ;;
-        *" arch "*|*" archlinux "*|*" manjaro "*|*" endeavouros "*)
-            DISTRO_FAMILY="arch"; PKG_MANAGER="pacman" ;;
-        *)
-            if [[ ${FORCE_UNKNOWN_DISTRO} -eq 1 ]]; then
-                log_warn "unknown distro '${ID:-?}' — forcing debian/apt path"
-                DISTRO_FAMILY="debian"; PKG_MANAGER="apt"
-            else
-                log_fail "unsupported distro: ${ID:-unknown} (${PRETTY_NAME:-?})"
-                log_info "supported families: debian/ubuntu, fedora, arch"
-                log_info "re-run with --force-unknown-distro to attempt apt-based install"
-                exit 1
-            fi ;;
-    esac
+    if [[ -n "${PACKAGE_MANAGER_OVERRIDE}" ]]; then
+        set_package_manager "${PACKAGE_MANAGER_OVERRIDE}"
+        log_warn "using requested package manager: ${PACKAGE_MANAGER_OVERRIDE}"
+    else
+        case " ${id_like} " in
+            *" debian "*|*" ubuntu "*)
+                set_package_manager apt ;;
+            *" fedora "*|*" rhel "*|*" centos "*)
+                set_package_manager dnf ;;
+            *" arch "*|*" archlinux "*|*" manjaro "*|*" endeavouros "*|*" artix "*|*" artixlinux "*)
+                set_package_manager pacman ;;
+            *)
+                if [[ ${FORCE_UNKNOWN_DISTRO} -eq 1 ]]; then
+                    local available=()
+                    mapfile -t available < <(available_package_managers)
+                    if [[ ${#available[@]} -ne 1 ]]; then
+                        log_fail "cannot choose a package manager for '${ID:-unknown}'"
+                        log_info "found: ${available[*]:-none}; pass --package-manager apt|dnf|pacman"
+                        return 1
+                    fi
+                    set_package_manager "${available[0]}"
+                    log_warn "unknown distro '${ID:-?}' — using detected ${PKG_MANAGER}"
+                else
+                    log_fail "unsupported distro: ${ID:-unknown} (${PRETTY_NAME:-?})"
+                    log_info "supported families: debian/ubuntu, fedora, arch/artix"
+                    log_info "re-run with --force-unknown-distro or --package-manager apt|dnf|pacman"
+                    return 1
+                fi ;;
+        esac
+    fi
+
+    if ! package_manager_available "${PKG_MANAGER}"; then
+        log_fail "${PKG_MANAGER} was selected but its command is not on PATH"
+        return 1
+    fi
     log_ok "distro family: ${DISTRO_FAMILY} (pkg manager: ${PKG_MANAGER})"
 
     # Display server.
@@ -179,6 +238,37 @@ detect_distro() {
 # Step 2: system package install
 # -----------------------------------------------------------------------------
 
+ydotool_package_available() {
+    case "${PKG_MANAGER}" in
+        apt)    apt-cache show ydotool >/dev/null 2>&1 ;;
+        dnf)    dnf info -q ydotool >/dev/null 2>&1 ;;
+        pacman) pacman -Si ydotool >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+}
+
+install_optional_ydotool() {
+    if command -v ydotool >/dev/null 2>&1 && command -v ydotoold >/dev/null 2>&1; then
+        log_ok "optional ydotool fallback already installed"
+        return 0
+    fi
+    if ! ydotool_package_available; then
+        log_warn "optional ydotool package is unavailable from configured ${PKG_MANAGER} repositories"
+        log_info "the portal, direct uinput, or X11 xdotool backends may still satisfy doctor"
+        return 0
+    fi
+
+    log_info "installing optional ydotool fallback"
+    case "${PKG_MANAGER}" in
+        apt)    sudo apt-get install -y ydotool ;;
+        dnf)    sudo dnf install -y ydotool ;;
+        pacman) sudo pacman -S --needed --noconfirm ydotool ;;
+    esac || {
+        log_warn "optional ydotool install failed — continuing with the other input backends"
+        return 0
+    }
+}
+
 install_system_deps() {
     log_section "Step 2/9 — system packages"
     if [[ ${SKIP_SYSTEM_DEPS} -eq 1 ]]; then log_skip "--skip-system-deps"; return 0; fi
@@ -186,7 +276,7 @@ install_system_deps() {
     local desktop="${XDG_CURRENT_DESKTOP:-}"
     case "${PKG_MANAGER}" in
         apt)
-            local pkgs=(build-essential pkg-config libdbus-1-dev libssl-dev curl ydotool at-spi2-core)
+            local pkgs=(build-essential pkg-config libdbus-1-dev libssl-dev curl at-spi2-core)
             sudo apt-get update -qq
             if [[ "${desktop}" == *GNOME* ]] && ! command -v gnome-extensions >/dev/null 2>&1; then
                 if apt-cache show gnome-shell >/dev/null 2>&1; then
@@ -199,17 +289,18 @@ install_system_deps() {
             sudo apt-get install -y "${pkgs[@]}" || { log_fail "apt-get install failed"; return 1; }
             ;;
         dnf)
-            local pkgs=(gcc pkgconfig dbus-devel openssl-devel curl ydotool at-spi2-core)
+            local pkgs=(gcc pkgconfig dbus-devel openssl-devel curl at-spi2-core)
             log_info "sudo dnf install -y ${pkgs[*]}"
             sudo dnf install -y "${pkgs[@]}" || { log_fail "dnf install failed"; return 1; }
             ;;
         pacman)
-            local pkgs=(base-devel pkgconf dbus openssl curl ydotool at-spi2-core)
+            local pkgs=(base-devel pkgconf dbus openssl curl at-spi2-core)
             log_info "sudo pacman -S --needed --noconfirm ${pkgs[*]}"
             sudo pacman -S --needed --noconfirm "${pkgs[@]}" || { log_fail "pacman install failed"; return 1; }
             ;;
     esac
-    log_ok "system packages installed"
+    log_ok "required system packages installed"
+    install_optional_ydotool
 }
 
 # -----------------------------------------------------------------------------
@@ -306,14 +397,42 @@ enable_atspi() {
 }
 
 # -----------------------------------------------------------------------------
-# Step 6: ydotoold systemd --user service
+# Step 6: ydotoold user service
 # -----------------------------------------------------------------------------
+
+systemd_user_manager_available() {
+    command -v systemctl >/dev/null 2>&1 &&
+        systemctl --user show-environment >/dev/null 2>&1
+}
+
+show_manual_ydotoold_guidance() {
+    local ydotoold_path runtime_dir user_gid
+    ydotoold_path="$(command -v ydotoold 2>/dev/null || true)"
+    runtime_dir="${XDG_RUNTIME_DIR:-/run/user/${UID}}"
+    user_gid="$(id -g)"
+    if [[ -z "${ydotoold_path}" ]]; then
+        log_info "ydotool is optional; install it only if doctor needs that fallback"
+        return 0
+    fi
+    log_info "configure your per-user supervisor to run:"
+    log_info "  ${ydotoold_path} --socket-path=${runtime_dir}/.ydotool_socket --socket-own=${UID}:${user_gid}"
+    log_info "do not run ydotoold as root or expose its socket to other users"
+}
 
 setup_ydotoold() {
     log_section "Step 6/9 — ydotoold user service"
     if [[ ${SKIP_YDOTOOL} -eq 1 ]]; then log_skip "--skip-ydotool"; return 0; fi
 
-    command -v ydotoold >/dev/null 2>&1 || { log_fail "ydotoold not found in PATH (install via system deps step)"; return 1; }
+    if ! systemd_user_manager_available; then
+        log_warn "systemd --user is unavailable — skipping automatic ydotoold service setup"
+        show_manual_ydotoold_guidance
+        return 0
+    fi
+
+    if ! command -v ydotoold >/dev/null 2>&1; then
+        log_warn "optional ydotoold fallback is not installed — skipping its user service"
+        return 0
+    fi
 
     # /dev/uinput permissions check.
     if [[ ! -e /dev/uinput ]]; then
@@ -507,4 +626,6 @@ main() {
     fi
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

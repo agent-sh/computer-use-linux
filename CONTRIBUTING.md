@@ -28,6 +28,7 @@ cargo fmt --all -- --check
 cargo check --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --no-fail-fast
+scripts/install_sh_test.sh
 scripts/mcp_safety_check.py
 agnix .
 ```

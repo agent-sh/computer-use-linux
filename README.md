@@ -120,7 +120,7 @@ COSMIC users do not need a second package or a separate helper install when usin
 
 ### Option A — `./install.sh` from a clone
 
-Installs system packages on Debian/Ubuntu, Fedora/RHEL-like, or Arch-like distros; installs Rust if needed; builds both release binaries; installs them to `~/.local/bin`; enables `ydotoold` as a user service; enables GNOME AT-SPI settings when running under GNOME; and installs the bundled GNOME Shell extension on GNOME Wayland.
+Installs system packages on Debian/Ubuntu, Fedora/RHEL-like, Arch-like, or Artix systems; installs Rust if needed; builds both release binaries; installs them to `~/.local/bin`; configures `ydotoold` as a systemd user service when available; enables GNOME AT-SPI settings when running under GNOME; and installs the bundled GNOME Shell extension on GNOME Wayland.
 
 ```bash
 git clone https://github.com/agent-sh/computer-use-linux
@@ -129,6 +129,8 @@ cd computer-use-linux
 # log out and back in if the GNOME extension was newly installed
 computer-use-linux doctor | jq .readiness
 ```
+
+`ydotool` is an optional fallback. If it is unavailable from the configured repositories, the installer continues so the portal, direct uinput, or X11 xdotool backends can still satisfy `doctor`. On non-systemd hosts, automatic `ydotoold` service setup is skipped and the installer prints a command suitable for a per-user supervisor. For an unrecognized distro, pass `--package-manager apt|dnf|pacman`; `--force-unknown-distro` auto-selects only when exactly one of those managers is available.
 
 ### Option B — `cargo install` (Rust binaries, no system setup)
 
@@ -370,7 +372,7 @@ files.
 
 Computer-use tooling is, by definition, a privilege-escalation surface. The threat model:
 
-- **`ydotoold` runs as a per-user systemd service** with read/write access to `/dev/uinput`. Any process that can connect to its socket (`/run/user/$UID/.ydotool_socket`, mode `0600` by default) can synthesize arbitrary input — keypresses, clicks, anything. Keep the socket in the user runtime dir (the default), not in `/tmp` or any world-readable location. Do not run `ydotoold` as a system service.
+- **`ydotoold` runs as a per-user service** with read/write access to `/dev/uinput`. `install.sh` automates this for systemd user sessions and prints manual supervisor guidance elsewhere. Any process that can connect to its socket (`/run/user/$UID/.ydotool_socket`, mode `0600` by default) can synthesize arbitrary input — keypresses, clicks, anything. Keep the socket in the user runtime dir (the default), not in `/tmp` or any world-readable location. Do not run `ydotoold` as root or as a system service.
 - **The screencast portal asks for permission once per session.** Granting it lets the calling MCP host capture the screen for the rest of the session. If you don't want that, decline the portal dialog and use `get_app_state` with `include_screenshot: false`.
 - **AT-SPI exposes window contents to any client on your session bus.** Enabling the AT-SPI bridge (`setup_accessibility`) is a prerequisite for this binary; it's also what screen readers use, and it shares the same trust boundary.
 - **The GNOME Shell extension** is loaded only into your user's GNOME Shell, runs in the Shell's JS sandbox, and exposes a single DBus interface on the user session bus. It does not request any extra permissions.
@@ -385,7 +387,7 @@ If you're running this on a shared workstation, set `ydotoold`'s socket permissi
 
 - **`accessibility.at_spi_bus.ok = false`** — AT-SPI registry isn't running or the toolkit bridge is off. Fix: `computer-use-linux setup` (or call the `setup_accessibility` MCP tool). Restart the apps you want to drive.
 - **`windowing.gnome_shell_introspect.ok = false` and `gnome_shell_extension_dbus.ok = false`** — GNOME blocks introspection and the extension isn't installed. Fix: `computer-use-linux setup-window-targeting`, then log out and log back in.
-- **`input.ydotool_socket.ok = false` while ydotool is the selected fallback** — daemon isn't running. Fix: `systemctl --user enable --now ydotoold`. If the unit doesn't exist, install the `ydotool` package and rerun `./install.sh` (or copy the unit from `systemd/ydotoold.service` in this repo).
+- **`input.ydotool_socket.ok = false` while ydotool is the selected fallback** — daemon isn't running. On systemd, run `systemctl --user enable --now ydotoold`. On other init systems, rerun `./install.sh` and configure your per-user supervisor with the command it prints. If `ydotool` is not packaged for your distro, use another input backend or install a compatible ydotool release manually.
 - **`input.ydotool.ok = false` with an unsupported CLI message** — install ydotool 1.0.3 or newer. A running daemon or socket alone is not enough; `doctor` verifies the raw key, wheel, stdin typing, and absolute-movement command family before advertising the backend.
 - **`input.uinput.ok = false`** — `/dev/uinput` isn't accessible to your user. Fix: add yourself to the `input` group (`sudo usermod -aG input $USER`) and re-login. On distros that ship `uinput` as a kernel module without auto-loading it, add `uinput` to `/etc/modules-load.d/`.
 - **Portal calls hang or time out** — `xdg-desktop-portal` or its backend (`-gnome`, `-gtk`, `-kde`, `-wlr`) crashed. Fix: check `journalctl --user -u xdg-desktop-portal -u xdg-desktop-portal-gnome --since '5 min ago'` and restart the relevant unit.

@@ -65,6 +65,14 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - run: cargo test --locked --target ${{ matrix.target }} --no-fail-fast
 
+  installer-shell:
+    name: install.sh regressions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n install.sh scripts/install_sh_test.sh
+      - run: scripts/install_sh_test.sh
+
   rustdoc-and-package:
     name: rustdoc and cargo package
     runs-on: ubuntu-latest
@@ -159,6 +167,7 @@ jobs:
       - check
       - clippy
       - test
+      - installer-shell
       - rustdoc-and-package
       - supply-chain
       - mcp-safety

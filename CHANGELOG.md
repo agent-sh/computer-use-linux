@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `install.sh` now recognizes Artix as pacman-based, chooses an explicitly
+  requested or unambiguous package manager for unknown distros, treats
+  ydotool as an optional fallback, and skips automatic ydotoold setup when a
+  systemd user manager is unavailable.
 - Native X11 coordinate clicks now use one supervised
   `xdotool mousemove -- X Y click --repeat N BUTTON` command after the
   absolute pointer and eligible portal paths, with `ydotool` fallback only
