@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Native X11 coordinate clicks now use one supervised
+  `xdotool mousemove -- X Y click --repeat N BUTTON` command after the
+  absolute pointer and eligible portal paths, with `ydotool` fallback only
+  when `xdotool` cannot be spawned. Standard left, middle, and right buttons
+  are supported; extended buttons retain the existing fallback path. Set
+  `COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER=1` to skip xdotool.
+
 ## [0.4.5] - 2026-08-01
 
 ### Fixed
