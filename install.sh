@@ -132,6 +132,7 @@ esac
 DISTRO_FAMILY=""
 PKG_MANAGER=""
 SESSION_TYPE=""
+X11_KEYBOARD_BACKEND_REQUIRED=0
 
 set_package_manager() {
     case "$1" in
@@ -227,8 +228,29 @@ detect_distro() {
     if [[ -n "${XDG_SESSION_ID:-}" ]] && command -v loginctl >/dev/null 2>&1; then
         session_type="$(loginctl show-session "${XDG_SESSION_ID}" -p Type --value 2>/dev/null || true)"
     fi
-    session_type="${session_type:-${XDG_SESSION_TYPE:-unknown}}"
-    SESSION_TYPE="${session_type}"
+    session_type="${session_type:-${XDG_SESSION_TYPE:-}}"
+    local normalized_session_type="${session_type//[[:space:]]/}"
+    local wayland_display="${WAYLAND_DISPLAY:-}"
+    local display="${DISPLAY:-}"
+    local wayland_session=0
+    if [[ -n "${normalized_session_type}" ]]; then
+        if [[ "${normalized_session_type,,}" == "wayland" ]]; then wayland_session=1; fi
+    elif [[ -n "${wayland_display//[[:space:]]/}" ]]; then
+        wayland_session=1
+    fi
+
+    X11_KEYBOARD_BACKEND_REQUIRED=0
+    if [[ ${wayland_session} -eq 0 && -n "${display//[[:space:]]/}" ]]; then
+        X11_KEYBOARD_BACKEND_REQUIRED=1
+    fi
+
+    if [[ ${wayland_session} -eq 1 ]]; then
+        SESSION_TYPE="wayland"
+    elif [[ ${X11_KEYBOARD_BACKEND_REQUIRED} -eq 1 ]]; then
+        SESSION_TYPE="x11"
+    else
+        SESSION_TYPE="${normalized_session_type:-unknown}"
+    fi
 
     case "${SESSION_TYPE}" in
         wayland) log_ok "display server: Wayland" ;;
@@ -289,7 +311,7 @@ install_system_deps() {
     case "${PKG_MANAGER}" in
         apt)
             local pkgs=(build-essential pkg-config libdbus-1-dev libssl-dev curl at-spi2-core)
-            if [[ "${SESSION_TYPE}" == "x11" ]]; then pkgs+=(xdotool); fi
+            if [[ ${X11_KEYBOARD_BACKEND_REQUIRED} -eq 1 ]]; then pkgs+=(xdotool); fi
             sudo apt-get update -qq
             if [[ "${desktop}" == *GNOME* ]] && ! command -v gnome-extensions >/dev/null 2>&1; then
                 if apt-cache show gnome-shell >/dev/null 2>&1; then
@@ -303,13 +325,13 @@ install_system_deps() {
             ;;
         dnf)
             local pkgs=(gcc pkgconfig dbus-devel openssl-devel curl at-spi2-core)
-            if [[ "${SESSION_TYPE}" == "x11" ]]; then pkgs+=(xdotool); fi
+            if [[ ${X11_KEYBOARD_BACKEND_REQUIRED} -eq 1 ]]; then pkgs+=(xdotool); fi
             log_info "sudo dnf install -y ${pkgs[*]}"
             sudo dnf install -y "${pkgs[@]}" || { log_fail "dnf install failed"; return 1; }
             ;;
         pacman)
             local pkgs=(base-devel pkgconf dbus openssl curl at-spi2-core)
-            if [[ "${SESSION_TYPE}" == "x11" ]]; then pkgs+=(xdotool); fi
+            if [[ ${X11_KEYBOARD_BACKEND_REQUIRED} -eq 1 ]]; then pkgs+=(xdotool); fi
             log_info "sudo pacman -S --needed --noconfirm ${pkgs[*]}"
             sudo pacman -S --needed --noconfirm "${pkgs[@]}" || { log_fail "pacman install failed"; return 1; }
             ;;

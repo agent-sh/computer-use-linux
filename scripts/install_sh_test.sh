@@ -91,20 +91,46 @@ test_skip_system_deps_allows_missing_override() (
     assert_eq "${DISTRO_FAMILY}" "debian" || return 1
 )
 
-test_x11_system_deps_include_xdotool() (
+test_startx_system_deps_include_xdotool() (
+    export COMPUTER_USE_LINUX_OS_RELEASE_FILE="${FIXTURE_DIR}/os-release.artix"
+    export XDG_SESSION_TYPE=tty
+    export DISPLAY=:0
+    unset WAYLAND_DISPLAY XDG_SESSION_ID
     export XDG_CURRENT_DESKTOP=unknown
 
     # shellcheck source=../install.sh
     source "${INSTALLER}"
-    PKG_MANAGER=pacman
-    SESSION_TYPE=x11
+    package_manager_available() { [[ "$1" == "pacman" ]]; }
     sudo() { printf 'sudo %s\n' "$*"; }
     install_optional_ydotool() { :; }
 
     local output
+    detect_distro >/dev/null || return 1
     output="$(install_system_deps)" || return 1
+    assert_eq "${X11_KEYBOARD_BACKEND_REQUIRED}" "1" || return 1
     assert_contains "${output}" "pacman -S --needed --noconfirm" || return 1
     assert_contains "${output}" "xdotool" || return 1
+)
+
+test_wayland_system_deps_exclude_xdotool() (
+    export COMPUTER_USE_LINUX_OS_RELEASE_FILE="${FIXTURE_DIR}/os-release.artix"
+    export XDG_SESSION_TYPE=wayland
+    export WAYLAND_DISPLAY=wayland-0
+    export DISPLAY=:0
+    unset XDG_SESSION_ID
+    export XDG_CURRENT_DESKTOP=unknown
+
+    # shellcheck source=../install.sh
+    source "${INSTALLER}"
+    package_manager_available() { [[ "$1" == "pacman" ]]; }
+    sudo() { printf 'sudo %s\n' "$*"; }
+    install_optional_ydotool() { :; }
+
+    local output
+    detect_distro >/dev/null || return 1
+    output="$(install_system_deps)" || return 1
+    assert_eq "${X11_KEYBOARD_BACKEND_REQUIRED}" "0" || return 1
+    assert_not_contains "${output}" "xdotool" || return 1
 )
 
 test_non_systemd_host_gets_manual_guidance() (
@@ -159,6 +185,7 @@ run_test "Artix selects pacman" test_artix_selects_pacman
 run_test "unknown distro selects its only supported manager" test_unknown_distro_selects_only_available_manager
 run_test "--skip-system-deps needs no package manager" test_skip_system_deps_needs_no_package_manager
 run_test "--skip-system-deps allows a missing override" test_skip_system_deps_allows_missing_override
-run_test "X11 system dependencies include xdotool" test_x11_system_deps_include_xdotool
+run_test "startx system dependencies include xdotool" test_startx_system_deps_include_xdotool
+run_test "Wayland system dependencies exclude xdotool" test_wayland_system_deps_exclude_xdotool
 run_test "non-systemd host gets manual ydotoold guidance" test_non_systemd_host_gets_manual_guidance
 run_test "non-systemd host requires uinput access" test_non_systemd_host_requires_uinput_access
