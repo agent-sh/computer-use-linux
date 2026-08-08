@@ -18,6 +18,7 @@ IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 OS_RELEASE_FILE="${COMPUTER_USE_LINUX_OS_RELEASE_FILE:-/etc/os-release}"
+UINPUT_DEVICE="${COMPUTER_USE_LINUX_UINPUT_DEVICE:-/dev/uinput}"
 BIN_NAME="computer-use-linux"
 COSMIC_HELPER_NAME="computer-use-linux-cosmic"
 INSTALL_DIR="${HOME}/.local/bin"
@@ -187,15 +188,20 @@ detect_distro() {
                 set_package_manager pacman ;;
             *)
                 if [[ ${FORCE_UNKNOWN_DISTRO} -eq 1 ]]; then
-                    local available=()
-                    mapfile -t available < <(available_package_managers)
-                    if [[ ${#available[@]} -ne 1 ]]; then
-                        log_fail "cannot choose a package manager for '${ID:-unknown}'"
-                        log_info "found: ${available[*]:-none}; pass --package-manager apt|dnf|pacman"
-                        return 1
+                    if [[ ${SKIP_SYSTEM_DEPS} -eq 1 ]]; then
+                        DISTRO_FAMILY="unknown"
+                        log_warn "unknown distro '${ID:-?}' — system package installation is skipped"
+                    else
+                        local available=()
+                        mapfile -t available < <(available_package_managers)
+                        if [[ ${#available[@]} -ne 1 ]]; then
+                            log_fail "cannot choose a package manager for '${ID:-unknown}'"
+                            log_info "found: ${available[*]:-none}; pass --package-manager apt|dnf|pacman"
+                            return 1
+                        fi
+                        set_package_manager "${available[0]}"
+                        log_warn "unknown distro '${ID:-?}' — using detected ${PKG_MANAGER}"
                     fi
-                    set_package_manager "${available[0]}"
-                    log_warn "unknown distro '${ID:-?}' — using detected ${PKG_MANAGER}"
                 else
                     log_fail "unsupported distro: ${ID:-unknown} (${PRETTY_NAME:-?})"
                     log_info "supported families: debian/ubuntu, fedora, arch/artix"
@@ -205,11 +211,15 @@ detect_distro() {
         esac
     fi
 
-    if ! package_manager_available "${PKG_MANAGER}"; then
+    if [[ ${SKIP_SYSTEM_DEPS} -eq 0 ]] && ! package_manager_available "${PKG_MANAGER}"; then
         log_fail "${PKG_MANAGER} was selected but its command is not on PATH"
         return 1
     fi
-    log_ok "distro family: ${DISTRO_FAMILY} (pkg manager: ${PKG_MANAGER})"
+    if [[ -n "${PKG_MANAGER}" ]]; then
+        log_ok "distro family: ${DISTRO_FAMILY} (pkg manager: ${PKG_MANAGER})"
+    else
+        log_ok "distro family: ${DISTRO_FAMILY} (system packages skipped)"
+    fi
 
     # Display server.
     local session_type=""
@@ -423,29 +433,29 @@ setup_ydotoold() {
     log_section "Step 6/9 — ydotoold user service"
     if [[ ${SKIP_YDOTOOL} -eq 1 ]]; then log_skip "--skip-ydotool"; return 0; fi
 
-    if ! systemd_user_manager_available; then
-        log_warn "systemd --user is unavailable — skipping automatic ydotoold service setup"
-        show_manual_ydotoold_guidance
-        return 0
-    fi
-
     if ! command -v ydotoold >/dev/null 2>&1; then
         log_warn "optional ydotoold fallback is not installed — skipping its user service"
         return 0
     fi
 
     # /dev/uinput permissions check.
-    if [[ ! -e /dev/uinput ]]; then
-        log_warn "/dev/uinput does not exist — kernel module may need loading"
+    if [[ ! -e "${UINPUT_DEVICE}" ]]; then
+        log_warn "${UINPUT_DEVICE} does not exist — kernel module may need loading"
         log_info "  sudo modprobe uinput"
-    elif [[ ! -w /dev/uinput || ! -r /dev/uinput ]]; then
-        log_warn "/dev/uinput exists but is not user-accessible"
+    elif [[ ! -w "${UINPUT_DEVICE}" || ! -r "${UINPUT_DEVICE}" ]]; then
+        log_warn "${UINPUT_DEVICE} exists but is not user-accessible"
         log_info "Remediation (pick one, then log out/in):"
         log_info "  sudo usermod -aG input \$USER"
         log_info "OR write a udev rule:"
         log_info "  echo 'KERNEL==\"uinput\", MODE=\"0660\", GROUP=\"input\", OPTIONS+=\"static_node=uinput\"' | sudo tee /etc/udev/rules.d/60-uinput.rules"
         log_info "  sudo udevadm control --reload-rules && sudo udevadm trigger"
         log_warn "skipping systemd enable — fix uinput first then re-run"
+        return 0
+    fi
+
+    if ! systemd_user_manager_available; then
+        log_warn "systemd --user is unavailable — skipping automatic ydotoold service setup"
+        show_manual_ydotoold_guidance
         return 0
     fi
 
