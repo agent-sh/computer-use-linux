@@ -131,6 +131,7 @@ esac
 
 DISTRO_FAMILY=""
 PKG_MANAGER=""
+SESSION_TYPE=""
 
 set_package_manager() {
     case "$1" in
@@ -227,11 +228,12 @@ detect_distro() {
         session_type="$(loginctl show-session "${XDG_SESSION_ID}" -p Type --value 2>/dev/null || true)"
     fi
     session_type="${session_type:-${XDG_SESSION_TYPE:-unknown}}"
+    SESSION_TYPE="${session_type}"
 
-    case "${session_type}" in
+    case "${SESSION_TYPE}" in
         wayland) log_ok "display server: Wayland" ;;
         x11)     log_warn "display server: X11 — supported but degraded (some features need Wayland)" ;;
-        *)       log_warn "display server: ${session_type} (unrecognised — proceeding anyway)" ;;
+        *)       log_warn "display server: ${SESSION_TYPE} (unrecognised — proceeding anyway)" ;;
     esac
 
     local desktop="${XDG_CURRENT_DESKTOP:-unknown}"
@@ -287,6 +289,7 @@ install_system_deps() {
     case "${PKG_MANAGER}" in
         apt)
             local pkgs=(build-essential pkg-config libdbus-1-dev libssl-dev curl at-spi2-core)
+            if [[ "${SESSION_TYPE}" == "x11" ]]; then pkgs+=(xdotool); fi
             sudo apt-get update -qq
             if [[ "${desktop}" == *GNOME* ]] && ! command -v gnome-extensions >/dev/null 2>&1; then
                 if apt-cache show gnome-shell >/dev/null 2>&1; then
@@ -300,11 +303,13 @@ install_system_deps() {
             ;;
         dnf)
             local pkgs=(gcc pkgconfig dbus-devel openssl-devel curl at-spi2-core)
+            if [[ "${SESSION_TYPE}" == "x11" ]]; then pkgs+=(xdotool); fi
             log_info "sudo dnf install -y ${pkgs[*]}"
             sudo dnf install -y "${pkgs[@]}" || { log_fail "dnf install failed"; return 1; }
             ;;
         pacman)
             local pkgs=(base-devel pkgconf dbus openssl curl at-spi2-core)
+            if [[ "${SESSION_TYPE}" == "x11" ]]; then pkgs+=(xdotool); fi
             log_info "sudo pacman -S --needed --noconfirm ${pkgs[*]}"
             sudo pacman -S --needed --noconfirm "${pkgs[@]}" || { log_fail "pacman install failed"; return 1; }
             ;;

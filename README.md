@@ -130,7 +130,7 @@ cd computer-use-linux
 computer-use-linux doctor | jq .readiness
 ```
 
-`ydotool` is an optional fallback. If it is unavailable from the configured repositories, the installer continues so the portal, direct uinput, or X11 xdotool backends can still satisfy `doctor`. On non-systemd hosts, automatic `ydotoold` service setup is skipped and the installer prints a command suitable for a per-user supervisor. For an unrecognized distro, pass `--package-manager apt|dnf|pacman`; `--force-unknown-distro` auto-selects only when exactly one of those managers is available.
+`ydotool` is an optional fallback. On X11, the installer includes `xdotool` as the required keyboard backend. If ydotool is unavailable from the configured repositories, the installer continues so the portal, direct uinput, or X11 xdotool backends can still satisfy `doctor`. On non-systemd hosts, automatic `ydotoold` service setup is skipped and the installer prints a command suitable for a per-user supervisor. For an unrecognized distro, pass `--package-manager apt|dnf|pacman`; `--force-unknown-distro` auto-selects only when exactly one of those managers is available.
 
 ### Option B — `cargo install` (Rust binaries, no system setup)
 

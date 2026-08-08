@@ -91,6 +91,22 @@ test_skip_system_deps_allows_missing_override() (
     assert_eq "${DISTRO_FAMILY}" "debian" || return 1
 )
 
+test_x11_system_deps_include_xdotool() (
+    export XDG_CURRENT_DESKTOP=unknown
+
+    # shellcheck source=../install.sh
+    source "${INSTALLER}"
+    PKG_MANAGER=pacman
+    SESSION_TYPE=x11
+    sudo() { printf 'sudo %s\n' "$*"; }
+    install_optional_ydotool() { :; }
+
+    local output
+    output="$(install_system_deps)" || return 1
+    assert_contains "${output}" "pacman -S --needed --noconfirm" || return 1
+    assert_contains "${output}" "xdotool" || return 1
+)
+
 test_non_systemd_host_gets_manual_guidance() (
     export XDG_RUNTIME_DIR="/run/user/test"
     local uinput
@@ -143,5 +159,6 @@ run_test "Artix selects pacman" test_artix_selects_pacman
 run_test "unknown distro selects its only supported manager" test_unknown_distro_selects_only_available_manager
 run_test "--skip-system-deps needs no package manager" test_skip_system_deps_needs_no_package_manager
 run_test "--skip-system-deps allows a missing override" test_skip_system_deps_allows_missing_override
+run_test "X11 system dependencies include xdotool" test_x11_system_deps_include_xdotool
 run_test "non-systemd host gets manual ydotoold guidance" test_non_systemd_host_gets_manual_guidance
 run_test "non-systemd host requires uinput access" test_non_systemd_host_requires_uinput_access
