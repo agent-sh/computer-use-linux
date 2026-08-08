@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-08-05
+
 ### Fixed
 - `install.sh` now recognizes Artix as pacman-based, chooses an explicitly
   requested or unambiguous package manager for unknown distros, treats
@@ -409,7 +411,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.6...HEAD
+[0.4.6]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.2...v0.4.3

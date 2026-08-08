@@ -1,6 +1,6 @@
 {
   "name": "@agent-sh/computer-use-linux",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "Linux desktop-control MCP server: AT-SPI accessibility trees, Wayland/X11 input, screenshots, and compositor window targeting.",
   "license": "MIT",
   "type": "commonjs",
