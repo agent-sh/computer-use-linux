@@ -209,7 +209,14 @@ pub fn doctor_report() -> DoctorReport {
         &input,
     );
 
-    let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+    let capabilities = capability_map_with_portal_keyboard(
+        &platform,
+        &portals,
+        &remote_desktop_keyboard,
+        &accessibility,
+        &windowing,
+        &input,
+    );
 
     DoctorReport {
         platform,
@@ -224,9 +231,28 @@ pub fn doctor_report() -> DoctorReport {
 
 /// Derive the per-layer backend capability map from the individual checks. Lists
 /// are ordered best-first and mirror the order the tool actually tries them.
+#[cfg(test)]
 fn capability_map(
     platform: &PlatformReport,
     portals: &PortalReport,
+    accessibility: &AccessibilityReport,
+    windowing: &WindowingReport,
+    input: &InputReport,
+) -> CapabilityMap {
+    capability_map_with_portal_keyboard(
+        platform,
+        portals,
+        &portals.remote_desktop,
+        accessibility,
+        windowing,
+        input,
+    )
+}
+
+fn capability_map_with_portal_keyboard(
+    platform: &PlatformReport,
+    portals: &PortalReport,
+    remote_desktop_keyboard: &Check,
     accessibility: &AccessibilityReport,
     windowing: &WindowingReport,
     input: &InputReport,
@@ -238,13 +264,18 @@ fn capability_map(
     }
     let force_ydotool = env_flag_enabled_any(FORCE_YDOTOOL_KEYBOARD_ENV_KEYS);
     let force_xdotool = env_flag_enabled_any(FORCE_XDOTOOL_KEYBOARD_ENV_KEYS);
-    let portal_available = portal_input_available(platform, portals);
-    let portal_forced_for_all_input = force_portal_for_all_input(
-        env_flag_enabled_any(FORCE_PORTAL_POINTER_ENV_KEYS),
-        env_flag_enabled_any(FORCE_PORTAL_KEYBOARD_ENV_KEYS),
-        env_flag_enabled_any(FORCE_YDOTOOL_POINTER_ENV_KEYS),
-        force_ydotool,
-    );
+    let portal_pointer_available = portal_pointer_input_available(platform, portals);
+    let portal_keyboard_available =
+        portal_keyboard_input_available(platform, remote_desktop_keyboard);
+    let portal_available = portal_pointer_available || portal_keyboard_available;
+    let portal_forced_for_all_input = portal_pointer_available
+        && portal_keyboard_available
+        && force_portal_for_all_input(
+            env_flag_enabled_any(FORCE_PORTAL_POINTER_ENV_KEYS),
+            env_flag_enabled_any(FORCE_PORTAL_KEYBOARD_ENV_KEYS),
+            env_flag_enabled_any(FORCE_YDOTOOL_POINTER_ENV_KEYS),
+            force_ydotool,
+        );
     if should_advertise_xdotool(platform, input, force_ydotool, force_xdotool) {
         input_backends.push("xdotool".to_string());
     }
@@ -841,7 +872,7 @@ fn can_send_development_input(
         || input.ydotool.ok && input.ydotool_socket.ok
 }
 
-fn portal_input_available(platform: &PlatformReport, portals: &PortalReport) -> bool {
+fn portal_pointer_input_available(platform: &PlatformReport, portals: &PortalReport) -> bool {
     platform_is_wayland(platform) && portals.remote_desktop.ok
 }
 
@@ -1625,7 +1656,14 @@ mod tests {
         let portals = portal_report(pointer);
         let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
         let windowing = windowing_report(true, true);
-        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+        let capabilities = capability_map_with_portal_keyboard(
+            &platform,
+            &portals,
+            &keyboard,
+            &accessibility,
+            &windowing,
+            &input,
+        );
         let readiness = readiness_report_with_portal_keyboard(
             &platform,
             &keyboard,
@@ -1636,6 +1674,47 @@ mod tests {
 
         assert!(!capabilities.input.iter().any(|backend| backend == "portal"));
         assert!(!readiness.can_send_development_input);
+    }
+
+    #[test]
+    fn keyboard_only_portal_remains_advertised_without_pointer_capability() {
+        let platform = platform_report();
+        let keyboard = remote_desktop_keyboard_check_from(
+            &remote_desktop_runtime_introspection(),
+            &Check::ok("u 1"),
+        );
+        let portals = portal_report(Check::fail(
+            "ScreenCast AvailableSourceTypes=2 does not include monitor sources",
+        ));
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let input = input_report_parts(
+            Check::fail("missing ydotool"),
+            Check::fail("ydotoold not running"),
+            Check::fail("no connectable ydotool socket"),
+            Check::fail("/dev/uinput: Permission denied"),
+        );
+
+        let capabilities = capability_map_with_portal_keyboard(
+            &platform,
+            &portals,
+            &keyboard,
+            &accessibility,
+            &windowing,
+            &input,
+        );
+        let readiness = readiness_report_with_portal_keyboard(
+            &platform,
+            &keyboard,
+            &accessibility,
+            &windowing,
+            &input,
+        );
+
+        assert!(!portals.remote_desktop.ok);
+        assert_eq!(capabilities.input, ["portal"]);
+        assert_eq!(capabilities.preferred.input.as_deref(), Some("portal"));
+        assert!(readiness.can_send_development_input);
     }
 
     #[test]
@@ -1710,7 +1789,14 @@ mod tests {
             Check::fail("/dev/uinput: Permission denied"),
         );
 
-        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+        let capabilities = capability_map_with_portal_keyboard(
+            &platform,
+            &portals,
+            &keyboard,
+            &accessibility,
+            &windowing,
+            &input,
+        );
         let readiness = readiness_report_with_portal_keyboard(
             &platform,
             &keyboard,
