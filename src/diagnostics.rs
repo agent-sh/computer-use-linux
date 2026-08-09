@@ -32,6 +32,14 @@ const FORCE_YDOTOOL_POINTER_ENV_KEYS: &[&str] = &["COMPUTER_USE_LINUX_FORCE_YDOT
 const FORCE_XDOTOOL_KEYBOARD_ENV_KEYS: &[&str] = &["COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD"];
 const FORCE_PORTAL_KEYBOARD_ENV_KEYS: &[&str] = &["COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD"];
 const FORCE_PORTAL_POINTER_ENV_KEYS: &[&str] = &["COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER"];
+const PORTAL_DEVICE_KEYBOARD: u32 = 1;
+const REMOTE_DESKTOP_KEYBOARD_METHODS: &[&str] = &[
+    "CreateSession",
+    "SelectDevices",
+    "Start",
+    "NotifyKeyboardKeycode",
+    "NotifyKeyboardKeysym",
+];
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DoctorReport {
@@ -606,7 +614,7 @@ fn platform_report() -> PlatformReport {
 fn portal_report() -> PortalReport {
     PortalReport {
         desktop_portal: bus_name_check("org.freedesktop.portal.Desktop"),
-        remote_desktop: portal_interface_check("org.freedesktop.portal.RemoteDesktop"),
+        remote_desktop: remote_desktop_portal_check(),
         screencast: portal_interface_check("org.freedesktop.portal.ScreenCast"),
         screenshot: portal_interface_check("org.freedesktop.portal.Screenshot"),
         input_capture: portal_interface_check("org.freedesktop.portal.InputCapture"),
@@ -973,6 +981,91 @@ fn portal_interface_check(interface: &str) -> Check {
     )
 }
 
+fn remote_desktop_portal_check() -> Check {
+    let introspection = portal_interface_check("org.freedesktop.portal.RemoteDesktop");
+    if !introspection.ok {
+        return introspection;
+    }
+
+    let available_device_types = command_check_with_session_bus(
+        "busctl",
+        &[
+            "--user",
+            "get-property",
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.RemoteDesktop",
+            "AvailableDeviceTypes",
+        ],
+    );
+    remote_desktop_portal_check_from(&introspection, &available_device_types)
+}
+
+fn remote_desktop_portal_check_from(
+    introspection: &Check,
+    available_device_types: &Check,
+) -> Check {
+    if !introspection.ok {
+        return Check::fail(introspection.detail.clone());
+    }
+
+    let missing_methods = REMOTE_DESKTOP_KEYBOARD_METHODS
+        .iter()
+        .copied()
+        .filter(|method| !busctl_introspection_has_method(&introspection.detail, method))
+        .collect::<Vec<_>>();
+    if !missing_methods.is_empty() {
+        return Check::fail(format!(
+            "RemoteDesktop interface is missing required keyboard methods: {}",
+            missing_methods.join(", ")
+        ));
+    }
+
+    if !available_device_types.ok {
+        return Check::fail(format!(
+            "RemoteDesktop AvailableDeviceTypes is unavailable: {}",
+            available_device_types.detail
+        ));
+    }
+    let Some(device_types) = parse_busctl_u32_property(&available_device_types.detail) else {
+        return Check::fail(format!(
+            "RemoteDesktop AvailableDeviceTypes has an unexpected value: {}",
+            available_device_types.detail
+        ));
+    };
+    if device_types & PORTAL_DEVICE_KEYBOARD == 0 {
+        return Check::fail(format!(
+            "RemoteDesktop AvailableDeviceTypes={device_types} does not include keyboard input"
+        ));
+    }
+
+    Check::ok(format!(
+        "keyboard-capable RemoteDesktop portal (AvailableDeviceTypes={device_types})"
+    ))
+}
+
+fn busctl_introspection_has_method(detail: &str, method: &str) -> bool {
+    detail.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        fields
+            .next()
+            .is_some_and(|name| name.trim_start_matches('.') == method)
+            && fields.next() == Some("method")
+    })
+}
+
+fn parse_busctl_u32_property(detail: &str) -> Option<u32> {
+    let mut fields = detail.split_whitespace();
+    if fields.next()? != "u" {
+        return None;
+    }
+    let value = fields.next()?;
+    value
+        .strip_prefix("0x")
+        .map(|hex| u32::from_str_radix(hex, 16).ok())
+        .unwrap_or_else(|| value.parse().ok())
+}
+
 fn atspi_bus_address_check() -> Check {
     let busctl = command_check_with_session_bus(
         "busctl",
@@ -1333,6 +1426,68 @@ mod tests {
         assert!(!force_portal_for_all_input(true, false, false, false));
         assert!(!force_portal_for_all_input(true, true, true, false));
         assert!(!force_portal_for_all_input(true, true, false, true));
+    }
+
+    fn keyboard_capable_remote_desktop_introspection() -> Check {
+        Check::ok(
+            "NAME TYPE SIGNATURE RESULT/VALUE FLAGS\n\
+             .CreateSession method a{sv} o -\n\
+             .SelectDevices method oa{sv} o -\n\
+             .Start method osa{sv} o -\n\
+             .NotifyKeyboardKeycode method ouu - -\n\
+             .NotifyKeyboardKeysym method ouu - -\n\
+             .AvailableDeviceTypes property u 3 emits-change",
+        )
+    }
+
+    #[test]
+    fn remote_desktop_portal_rejects_header_only_introspection() {
+        let check = remote_desktop_portal_check_from(
+            &Check::ok("NAME TYPE SIGNATURE RESULT/VALUE FLAGS"),
+            &Check::ok("u 3"),
+        );
+
+        assert!(!check.ok);
+        assert!(check.detail.contains("CreateSession"));
+        assert!(check.detail.contains("NotifyKeyboardKeysym"));
+
+        let input = input_report_parts(
+            Check::ok("ydotool"),
+            Check::ok("ydotoold"),
+            Check::fail("no connectable ydotool socket"),
+            Check::ok("read/write: /dev/uinput"),
+        );
+        let readiness = readiness_report(
+            &platform_report(),
+            &portal_report(check),
+            &accessibility_report(Check::ok("bus"), Check::ok("true")),
+            &windowing_report(true, true),
+            &input,
+        );
+
+        assert!(!readiness.can_send_development_input);
+    }
+
+    #[test]
+    fn remote_desktop_portal_rejects_missing_keyboard_device_type() {
+        let check = remote_desktop_portal_check_from(
+            &keyboard_capable_remote_desktop_introspection(),
+            &Check::ok("u 2"),
+        );
+
+        assert!(!check.ok);
+        assert!(check.detail.contains("does not include keyboard input"));
+    }
+
+    #[test]
+    fn remote_desktop_portal_accepts_runtime_keyboard_contract() {
+        let check = remote_desktop_portal_check_from(
+            &keyboard_capable_remote_desktop_introspection(),
+            &Check::ok("u 3"),
+        );
+
+        assert!(check.ok);
+        assert!(check.detail.contains("AvailableDeviceTypes=3"));
     }
 
     #[test]

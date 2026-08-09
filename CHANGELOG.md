@@ -12,8 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   requested or unambiguous package manager for unknown distros, treats
   ydotool as an optional fallback, installs the required xdotool keyboard
   backend on X11, distinguishes pointer-only direct uinput from keyboard-ready
-  input in `doctor`, and skips automatic ydotoold setup when a systemd user
-  manager is unavailable.
+  input in `doctor`, verifies that a Wayland RemoteDesktop portal exposes the
+  required keyboard contract, and skips automatic ydotoold setup when a
+  systemd user manager is unavailable.
 
 ## [0.4.6] - 2026-08-05
 
