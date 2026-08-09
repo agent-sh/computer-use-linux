@@ -98,6 +98,7 @@ pub struct PlatformReport {
 pub struct PortalReport {
     pub desktop_portal: Check,
     pub remote_desktop: Check,
+    pub remote_desktop_keyboard: Check,
     pub screencast: Check,
     pub screenshot: Check,
     pub input_capture: Check,
@@ -612,9 +613,11 @@ fn platform_report() -> PlatformReport {
 }
 
 fn portal_report() -> PortalReport {
+    let (remote_desktop, remote_desktop_keyboard) = remote_desktop_portal_checks();
     PortalReport {
         desktop_portal: bus_name_check("org.freedesktop.portal.Desktop"),
-        remote_desktop: remote_desktop_portal_check(),
+        remote_desktop,
+        remote_desktop_keyboard,
         screencast: portal_interface_check("org.freedesktop.portal.ScreenCast"),
         screenshot: portal_interface_check("org.freedesktop.portal.Screenshot"),
         input_capture: portal_interface_check("org.freedesktop.portal.InputCapture"),
@@ -797,13 +800,17 @@ fn can_send_development_input(
 ) -> bool {
     let force_ydotool = env_flag_enabled_any(FORCE_YDOTOOL_KEYBOARD_ENV_KEYS);
     let force_xdotool = env_flag_enabled_any(FORCE_XDOTOOL_KEYBOARD_ENV_KEYS);
-    portal_input_available(platform, portals)
+    portal_keyboard_input_available(platform, portals)
         || should_advertise_xdotool(platform, input, force_ydotool, force_xdotool)
         || input.ydotool.ok && input.ydotool_socket.ok
 }
 
 fn portal_input_available(platform: &PlatformReport, portals: &PortalReport) -> bool {
     platform_is_wayland(platform) && portals.remote_desktop.ok
+}
+
+fn portal_keyboard_input_available(platform: &PlatformReport, portals: &PortalReport) -> bool {
+    platform_is_wayland(platform) && portals.remote_desktop_keyboard.ok
 }
 
 fn is_cosmic_wayland_platform(platform: &PlatformReport) -> bool {
@@ -981,10 +988,10 @@ fn portal_interface_check(interface: &str) -> Check {
     )
 }
 
-fn remote_desktop_portal_check() -> Check {
+fn remote_desktop_portal_checks() -> (Check, Check) {
     let introspection = portal_interface_check("org.freedesktop.portal.RemoteDesktop");
     if !introspection.ok {
-        return introspection;
+        return (introspection.clone(), introspection);
     }
 
     let available_device_types = command_check_with_session_bus(
@@ -998,10 +1005,11 @@ fn remote_desktop_portal_check() -> Check {
             "AvailableDeviceTypes",
         ],
     );
-    remote_desktop_portal_check_from(&introspection, &available_device_types)
+    let keyboard = remote_desktop_keyboard_check_from(&introspection, &available_device_types);
+    (introspection, keyboard)
 }
 
-fn remote_desktop_portal_check_from(
+fn remote_desktop_keyboard_check_from(
     introspection: &Check,
     available_device_types: &Check,
 ) -> Check {
@@ -1195,9 +1203,18 @@ mod tests {
     }
 
     fn portal_report(remote_desktop: Check) -> PortalReport {
+        let remote_desktop_keyboard = remote_desktop.clone();
+        portal_report_with_keyboard(remote_desktop, remote_desktop_keyboard)
+    }
+
+    fn portal_report_with_keyboard(
+        remote_desktop: Check,
+        remote_desktop_keyboard: Check,
+    ) -> PortalReport {
         PortalReport {
             desktop_portal: Check::ok("ok"),
             remote_desktop,
+            remote_desktop_keyboard,
             screencast: Check::fail("missing"),
             screenshot: Check::fail("missing"),
             input_capture: Check::fail("missing"),
@@ -1442,7 +1459,7 @@ mod tests {
 
     #[test]
     fn remote_desktop_portal_rejects_header_only_introspection() {
-        let check = remote_desktop_portal_check_from(
+        let check = remote_desktop_keyboard_check_from(
             &Check::ok("NAME TYPE SIGNATURE RESULT/VALUE FLAGS"),
             &Check::ok("u 3"),
         );
@@ -1459,7 +1476,7 @@ mod tests {
         );
         let readiness = readiness_report(
             &platform_report(),
-            &portal_report(check),
+            &portal_report_with_keyboard(Check::ok("org.freedesktop.portal.RemoteDesktop"), check),
             &accessibility_report(Check::ok("bus"), Check::ok("true")),
             &windowing_report(true, true),
             &input,
@@ -1470,7 +1487,7 @@ mod tests {
 
     #[test]
     fn remote_desktop_portal_rejects_missing_keyboard_device_type() {
-        let check = remote_desktop_portal_check_from(
+        let check = remote_desktop_keyboard_check_from(
             &keyboard_capable_remote_desktop_introspection(),
             &Check::ok("u 2"),
         );
@@ -1481,13 +1498,40 @@ mod tests {
 
     #[test]
     fn remote_desktop_portal_accepts_runtime_keyboard_contract() {
-        let check = remote_desktop_portal_check_from(
+        let check = remote_desktop_keyboard_check_from(
             &keyboard_capable_remote_desktop_introspection(),
             &Check::ok("u 3"),
         );
 
         assert!(check.ok);
         assert!(check.detail.contains("AvailableDeviceTypes=3"));
+    }
+
+    #[test]
+    fn pointer_only_portal_remains_advertised_without_keyboard_readiness() {
+        let platform = platform_report();
+        let keyboard = remote_desktop_keyboard_check_from(
+            &keyboard_capable_remote_desktop_introspection(),
+            &Check::ok("u 2"),
+        );
+        let portals = portal_report_with_keyboard(
+            Check::ok("org.freedesktop.portal.RemoteDesktop"),
+            keyboard,
+        );
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let input = input_report_parts(
+            Check::fail("missing ydotool"),
+            Check::fail("ydotoold not running"),
+            Check::fail("no connectable ydotool socket"),
+            Check::fail("/dev/uinput: Permission denied"),
+        );
+
+        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+        let readiness = readiness_report(&platform, &portals, &accessibility, &windowing, &input);
+
+        assert!(capabilities.input.iter().any(|backend| backend == "portal"));
+        assert!(!readiness.can_send_development_input);
     }
 
     #[test]
