@@ -288,7 +288,7 @@ install_optional_ydotool() {
     fi
     if ! ydotool_package_available; then
         log_warn "optional ydotool package is unavailable from configured ${PKG_MANAGER} repositories"
-        log_info "the portal, direct uinput, or X11 xdotool backends may still satisfy doctor"
+        log_info "a RemoteDesktop portal on Wayland or xdotool on X11 may still satisfy doctor"
         return 0
     fi
 
@@ -298,7 +298,7 @@ install_optional_ydotool() {
         dnf)    sudo dnf install -y ydotool ;;
         pacman) sudo pacman -S --needed --noconfirm ydotool ;;
     esac || {
-        log_warn "optional ydotool install failed — continuing with the other input backends"
+        log_warn "optional ydotool install failed — doctor will require a keyboard-capable portal or xdotool backend"
         return 0
     }
 }

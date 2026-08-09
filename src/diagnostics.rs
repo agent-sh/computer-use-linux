@@ -743,7 +743,7 @@ fn readiness_report(
 
     if !can_send_development_input {
         blockers.push(
-            "Development input is unavailable; enable read/write /dev/uinput, XDG RemoteDesktop portal input on Wayland, xdotool with DISPLAY on X11, or ydotool with a connectable ydotoold socket."
+            "Development keyboard input is unavailable; enable XDG RemoteDesktop portal input on Wayland, xdotool with DISPLAY on X11, or ydotool with a connectable ydotoold socket. Read/write /dev/uinput alone provides only absolute pointer input."
                 .to_string(),
         );
     }
@@ -763,7 +763,7 @@ fn readiness_report(
     } else if !can_focus_windows {
         "Enable an exact-focus window backend before using window_id, title, or terminal-targeted input.".to_string()
     } else if !can_send_development_input {
-        "Enable a supported input backend: grant read/write /dev/uinput, enable the XDG RemoteDesktop portal on Wayland, install xdotool for X11, or start ydotoold with a socket accessible to this desktop user."
+        "Enable a keyboard-capable input backend: enable the XDG RemoteDesktop portal on Wayland, install xdotool for X11, or start ydotoold with a socket accessible to this desktop user."
             .to_string()
     } else {
         "Computer Use is ready: AT-SPI tree support, window targeting, and a Linux input backend are available."
@@ -789,8 +789,7 @@ fn can_send_development_input(
 ) -> bool {
     let force_ydotool = env_flag_enabled_any(FORCE_YDOTOOL_KEYBOARD_ENV_KEYS);
     let force_xdotool = env_flag_enabled_any(FORCE_XDOTOOL_KEYBOARD_ENV_KEYS);
-    input.uinput.ok
-        || portal_input_available(platform, portals)
+    portal_input_available(platform, portals)
         || should_advertise_xdotool(platform, input, force_ydotool, force_xdotool)
         || input.ydotool.ok && input.ydotool_socket.ok
 }
@@ -1518,7 +1517,7 @@ mod tests {
     }
 
     #[test]
-    fn readiness_accepts_direct_uinput_without_connectable_ydotool_socket() {
+    fn wayland_readiness_rejects_pointer_only_uinput_without_keyboard_backend() {
         let platform = platform_report();
         let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
         let windowing = windowing_report(true, true);
@@ -1537,8 +1536,39 @@ mod tests {
             &input,
         );
 
-        assert!(readiness.can_send_development_input);
-        assert!(readiness.blockers.is_empty());
+        assert!(!readiness.can_send_development_input);
+        assert!(readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("absolute pointer input")));
+        assert!(readiness
+            .recommended_next_step
+            .contains("keyboard-capable input backend"));
+    }
+
+    #[test]
+    fn x11_readiness_rejects_pointer_only_uinput_without_keyboard_backend() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let input = input_report_parts(
+            Check::fail("missing ydotool"),
+            Check::fail("ydotoold not running"),
+            Check::fail("no connectable ydotool socket"),
+            Check::ok("read/write: /dev/uinput"),
+        );
+
+        let readiness = readiness_report(
+            &platform,
+            &portal_report(Check::fail("missing")),
+            &accessibility,
+            &windowing,
+            &input,
+        );
+
+        assert!(!readiness.can_send_development_input);
     }
 
     #[test]
@@ -1588,11 +1618,11 @@ mod tests {
         assert!(!readiness.can_send_development_input);
         assert!(readiness
             .recommended_next_step
-            .contains("Enable a supported input backend"));
+            .contains("Enable a keyboard-capable input backend"));
         assert!(readiness
             .blockers
             .iter()
-            .any(|blocker| blocker.contains("Development input is unavailable")));
+            .any(|blocker| blocker.contains("Development keyboard input is unavailable")));
     }
 
     #[test]
