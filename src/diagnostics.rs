@@ -34,6 +34,7 @@ const FORCE_PORTAL_KEYBOARD_ENV_KEYS: &[&str] = &["COMPUTER_USE_LINUX_FORCE_PORT
 const FORCE_PORTAL_POINTER_ENV_KEYS: &[&str] = &["COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER"];
 const PORTAL_DEVICE_KEYBOARD: u32 = 1;
 const PORTAL_DEVICE_POINTER: u32 = 2;
+const PORTAL_SOURCE_MONITOR: u32 = 1;
 const REMOTE_DESKTOP_KEYBOARD_METHODS: &[&str] = &[
     "CreateSession",
     "SelectDevices",
@@ -1044,8 +1045,23 @@ fn remote_desktop_portal_checks() -> (Check, Check, Check) {
             "AvailableDeviceTypes",
         ],
     );
-    let pointer =
-        remote_desktop_pointer_check_from(&introspection, &screencast, &available_device_types);
+    let available_source_types = command_check_with_session_bus(
+        "busctl",
+        &[
+            "--user",
+            "get-property",
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.ScreenCast",
+            "AvailableSourceTypes",
+        ],
+    );
+    let pointer = remote_desktop_pointer_check_from(
+        &introspection,
+        &screencast,
+        &available_device_types,
+        &available_source_types,
+    );
     let keyboard = remote_desktop_keyboard_check_from(&introspection, &available_device_types);
     (pointer, keyboard, screencast)
 }
@@ -1054,6 +1070,7 @@ fn remote_desktop_pointer_check_from(
     introspection: &Check,
     screencast: &Check,
     available_device_types: &Check,
+    available_source_types: &Check,
 ) -> Check {
     if !introspection.ok {
         return Check::fail(introspection.detail.clone());
@@ -1090,8 +1107,18 @@ fn remote_desktop_pointer_check_from(
         ));
     }
 
+    let source_types = match screencast_source_types(available_source_types) {
+        Ok(source_types) => source_types,
+        Err(detail) => return Check::fail(detail),
+    };
+    if source_types & PORTAL_SOURCE_MONITOR == 0 {
+        return Check::fail(format!(
+            "ScreenCast AvailableSourceTypes={source_types} does not include monitor sources"
+        ));
+    }
+
     Check::ok(format!(
-        "pointer-capable RemoteDesktop portal (AvailableDeviceTypes={device_types})"
+        "pointer-capable RemoteDesktop portal (AvailableDeviceTypes={device_types}, AvailableSourceTypes={source_types})"
     ))
 }
 
@@ -1145,6 +1172,21 @@ fn remote_desktop_device_types(available_device_types: &Check) -> Result<u32, St
         format!(
             "RemoteDesktop AvailableDeviceTypes has an unexpected value: {}",
             available_device_types.detail
+        )
+    })
+}
+
+fn screencast_source_types(available_source_types: &Check) -> Result<u32, String> {
+    if !available_source_types.ok {
+        return Err(format!(
+            "ScreenCast AvailableSourceTypes is unavailable: {}",
+            available_source_types.detail
+        ));
+    }
+    parse_busctl_u32_property(&available_source_types.detail).ok_or_else(|| {
+        format!(
+            "ScreenCast AvailableSourceTypes has an unexpected value: {}",
+            available_source_types.detail
         )
     })
 }
@@ -1563,6 +1605,7 @@ mod tests {
             &introspection,
             &screencast_runtime_introspection(),
             &available_device_types,
+            &Check::ok("u 1"),
         );
         let keyboard = remote_desktop_keyboard_check_from(&introspection, &available_device_types);
 
@@ -1601,10 +1644,24 @@ mod tests {
             &remote_desktop_runtime_introspection(),
             &Check::ok("NAME TYPE SIGNATURE RESULT/VALUE FLAGS"),
             &Check::ok("u 2"),
+            &Check::ok("u 1"),
         );
 
         assert!(!check.ok);
         assert!(check.detail.contains("SelectSources"));
+    }
+
+    #[test]
+    fn remote_desktop_pointer_rejects_missing_monitor_source_type() {
+        let check = remote_desktop_pointer_check_from(
+            &remote_desktop_runtime_introspection(),
+            &screencast_runtime_introspection(),
+            &Check::ok("u 2"),
+            &Check::ok("u 2"),
+        );
+
+        assert!(!check.ok);
+        assert!(check.detail.contains("does not include monitor sources"));
     }
 
     #[test]
@@ -1637,6 +1694,7 @@ mod tests {
             &remote_desktop_runtime_introspection(),
             &screencast_runtime_introspection(),
             &available_device_types,
+            &Check::ok("u 1"),
         );
         let keyboard = remote_desktop_keyboard_check_from(
             &remote_desktop_runtime_introspection(),
