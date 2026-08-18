@@ -142,11 +142,12 @@ pub enum PointerButton {
 }
 
 impl PointerButton {
-    pub fn from_name(name: Option<&str>) -> Self {
+    pub fn from_name(name: Option<&str>) -> Option<Self> {
         match name.unwrap_or("left").to_ascii_lowercase().as_str() {
-            "right" => Self::Right,
-            "middle" => Self::Middle,
-            _ => Self::Left,
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            "middle" => Some(Self::Middle),
+            _ => None,
         }
     }
 
@@ -161,7 +162,7 @@ impl PointerButton {
 
 #[cfg(test)]
 mod tests {
-    use super::AbsPointerGeometry;
+    use super::{AbsPointerGeometry, PointerButton};
 
     #[test]
     fn axis_range_ends_at_last_desktop_pixel() {
@@ -175,5 +176,28 @@ mod tests {
         let geometry = AbsPointerGeometry::from_dimensions(1920, 1080);
 
         assert_eq!(geometry.clamp_coordinates(1920, 1080), (1919, 1079));
+    }
+
+    #[test]
+    fn unsupported_buttons_fall_through_to_other_backends() {
+        assert!(matches!(
+            PointerButton::from_name(None),
+            Some(PointerButton::Left)
+        ));
+        assert!(matches!(
+            PointerButton::from_name(Some("right")),
+            Some(PointerButton::Right)
+        ));
+        assert!(matches!(
+            PointerButton::from_name(Some("middle")),
+            Some(PointerButton::Middle)
+        ));
+
+        for button in ["side", "extra", "forward", "back"] {
+            assert!(
+                PointerButton::from_name(Some(button)).is_none(),
+                "{button} must fall through instead of becoming a left click"
+            );
+        }
     }
 }

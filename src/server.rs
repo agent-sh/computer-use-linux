@@ -582,7 +582,7 @@ impl ComputerUseLinux {
         if !self.ensure_abs_pointer().await {
             return None;
         }
-        let btn = crate::abs_pointer::PointerButton::from_name(button);
+        let btn = crate::abs_pointer::PointerButton::from_name(button)?;
         let abs_pointer = Arc::clone(&self.abs_pointer);
         tokio::task::spawn_blocking(move || {
             let mut guard = abs_pointer.lock().ok()?;
