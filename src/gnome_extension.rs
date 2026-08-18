@@ -38,10 +38,15 @@ pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
     hydrate_session_bus_env();
 
     let extension_dir = extension_dir();
+    let extension_was_enabled = gnome_extension_enabled();
     let mut wrote_files = false;
+    let mut changed_files = false;
     let mut write_error = None;
     match write_extension_files(&extension_dir) {
-        Ok(()) => wrote_files = true,
+        Ok(report) => {
+            wrote_files = report.wrote_files;
+            changed_files = report.changed_files;
+        }
         Err(error) => write_error = Some(error),
     }
 
@@ -63,11 +68,15 @@ pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
         }
     };
 
-    let requires_shell_reload = windows_error.is_some();
+    let requires_shell_reload =
+        setup_requires_shell_reload(windows_error.as_ref(), extension_was_enabled, changed_files);
     let message = if !wrote_files {
         "Could not install the computer-use-linux GNOME Shell extension files.".to_string()
     } else if !enable_command.ok {
         "computer-use-linux GNOME Shell extension files were installed, but enabling the extension failed. Enable it with gnome-extensions after GNOME Shell sees the new extension."
+            .to_string()
+    } else if windows_error.is_none() && requires_shell_reload {
+        "computer-use-linux GNOME Shell extension files changed while the extension was already active. Window targeting is available, but GNOME Shell must reload before newly installed DBus methods are served."
             .to_string()
     } else if windows_error.is_none() {
         "computer-use-linux GNOME Shell extension is active and window targeting is available."
@@ -89,11 +98,18 @@ pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
     }
 }
 
-fn write_extension_files(extension_dir: &Path) -> Result<(), String> {
+struct ExtensionWriteReport {
+    wrote_files: bool,
+    changed_files: bool,
+}
+
+fn write_extension_files(extension_dir: &Path) -> Result<ExtensionWriteReport, String> {
     fs::create_dir_all(extension_dir)
         .map_err(|error| format!("failed to create {}: {error}", extension_dir.display()))?;
     let metadata_json = render_extension_asset(METADATA_JSON);
     let extension_js = render_extension_asset(EXTENSION_JS);
+    let changed_files = file_content_changed(&extension_dir.join("metadata.json"), &metadata_json)
+        || file_content_changed(&extension_dir.join("extension.js"), &extension_js);
 
     fs::write(extension_dir.join("metadata.json"), metadata_json).map_err(|error| {
         format!(
@@ -107,7 +123,25 @@ fn write_extension_files(extension_dir: &Path) -> Result<(), String> {
             extension_dir.join("extension.js").display()
         )
     })?;
-    Ok(())
+    Ok(ExtensionWriteReport {
+        wrote_files: true,
+        changed_files,
+    })
+}
+
+fn file_content_changed(path: &Path, expected: &str) -> bool {
+    match fs::read_to_string(path) {
+        Ok(current) => current != expected,
+        Err(_) => true,
+    }
+}
+
+fn setup_requires_shell_reload(
+    windows_error: Option<&String>,
+    extension_was_enabled: bool,
+    changed_files: bool,
+) -> bool {
+    windows_error.is_some() || extension_was_enabled && changed_files
 }
 
 fn render_extension_asset(asset: &str) -> String {
@@ -227,13 +261,32 @@ fn run_gsettings_enable_fallback() -> SetupCommandReport {
     }
 }
 
+fn gnome_extension_enabled() -> bool {
+    let mut command = Command::new("gsettings");
+    command.args(["get", "org.gnome.shell", "enabled-extensions"]);
+    add_session_env(&mut command);
+    let Ok(output) = command.output() else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let current = String::from_utf8_lossy(&output.stdout);
+    enabled_extensions_contains_uuid(&current)
+}
+
+fn enabled_extensions_contains_uuid(current: &str) -> bool {
+    let quoted = format!("'{UUID}'");
+    current.trim().contains(&quoted)
+}
+
 fn enabled_extensions_literal(current: &str) -> Option<String> {
     let trimmed = current.trim();
-    let quoted = format!("'{UUID}'");
-    if trimmed.contains(&quoted) {
+    if enabled_extensions_contains_uuid(trimmed) {
         return Some(trimmed.to_string());
     }
 
+    let quoted = format!("'{UUID}'");
     let list = if trimmed == "@as []" { "[]" } else { trimmed };
     if list == "[]" {
         return Some(format!("[{quoted}]"));
@@ -281,6 +334,25 @@ fn extension_dir() -> PathBuf {
 mod tests {
     use super::*;
 
+    struct TestExtensionDirectory(PathBuf);
+
+    impl TestExtensionDirectory {
+        fn new() -> Self {
+            let path = env::temp_dir().join(format!(
+                "computer-use-linux-extension-test-{}-{}",
+                std::process::id(),
+                getrandom::u64().unwrap()
+            ));
+            Self(path)
+        }
+    }
+
+    impl Drop for TestExtensionDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn enabled_extensions_literal_adds_uuid_to_existing_list() {
         assert_eq!(
@@ -302,6 +374,36 @@ mod tests {
         let value = format!("['{UUID}']");
 
         assert_eq!(enabled_extensions_literal(&value).unwrap(), value);
+    }
+
+    #[test]
+    fn extension_file_write_reports_content_changes() {
+        let extension_dir = TestExtensionDirectory::new();
+
+        let first = write_extension_files(&extension_dir.0).unwrap();
+        assert!(first.wrote_files);
+        assert!(first.changed_files);
+
+        let second = write_extension_files(&extension_dir.0).unwrap();
+        assert!(second.wrote_files);
+        assert!(!second.changed_files);
+
+        fs::write(extension_dir.0.join("extension.js"), "// stale extension").unwrap();
+        let third = write_extension_files(&extension_dir.0).unwrap();
+        assert!(third.wrote_files);
+        assert!(third.changed_files);
+    }
+
+    #[test]
+    fn enabled_stale_extension_requires_shell_reload() {
+        assert!(setup_requires_shell_reload(None, true, true));
+        assert!(setup_requires_shell_reload(
+            Some(&"window API unavailable".to_string()),
+            false,
+            false
+        ));
+        assert!(!setup_requires_shell_reload(None, true, false));
+        assert!(!setup_requires_shell_reload(None, false, true));
     }
 
     #[test]
