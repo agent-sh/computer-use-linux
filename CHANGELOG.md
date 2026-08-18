@@ -10,8 +10,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Absolute uinput pointer axes now end at the final logical desktop pixel, so
   edge coordinates are advertised and clamped consistently.
-- AT-SPI diagnostics now verify that the discovered accessibility bus can
-  reach `org.a11y.atspi.Registry` before reporting tree support as ready.
 
 ## [0.4.9] - 2026-08-12
 
