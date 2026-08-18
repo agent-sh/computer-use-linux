@@ -21,10 +21,32 @@ use evdev::{
     PropType, UinputAbsSetup,
 };
 
+#[derive(Clone, Copy)]
+struct AbsPointerGeometry {
+    max_x: i32,
+    max_y: i32,
+}
+
+impl AbsPointerGeometry {
+    fn from_dimensions(width: i32, height: i32) -> Self {
+        Self {
+            max_x: width.max(1).saturating_sub(1),
+            max_y: height.max(1).saturating_sub(1),
+        }
+    }
+
+    fn axis_maxima(self) -> (i32, i32) {
+        (self.max_x, self.max_y)
+    }
+
+    fn clamp_coordinates(self, x: i32, y: i32) -> (i32, i32) {
+        (x.clamp(0, self.max_x), y.clamp(0, self.max_y))
+    }
+}
+
 pub struct AbsPointer {
     device: VirtualDevice,
-    width: i32,
-    height: i32,
+    geometry: AbsPointerGeometry,
 }
 
 impl AbsPointer {
@@ -32,13 +54,13 @@ impl AbsPointer {
     /// (the portal screenshot dimensions). Blocks ~`settle` ms so libinput picks
     /// the device up before the first event.
     pub fn create(width: i32, height: i32) -> Result<Self> {
-        let width = width.max(1);
-        let height = height.max(1);
+        let geometry = AbsPointerGeometry::from_dimensions(width, height);
+        let (max_x, max_y) = geometry.axis_maxima();
         // value, min, max, fuzz, flat, resolution. resolution=1 unit/px.
         let abs_x =
-            UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, AbsInfo::new(0, 0, width, 0, 0, 1));
+            UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, AbsInfo::new(0, 0, max_x, 0, 0, 1));
         let abs_y =
-            UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, AbsInfo::new(0, 0, height, 0, 0, 1));
+            UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, AbsInfo::new(0, 0, max_y, 0, 0, 1));
         let keys =
             AttributeSet::from_iter([KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE]);
         // INPUT_PROP_DIRECT marks the device as a direct (absolute) pointer so
@@ -59,17 +81,12 @@ impl AbsPointer {
         // Give udev/libinput time to enumerate the new device.
         sleep(Duration::from_millis(500));
 
-        Ok(Self {
-            device,
-            width,
-            height,
-        })
+        Ok(Self { device, geometry })
     }
 
     /// Move the pointer to absolute logical coordinates `(x, y)`.
     pub fn move_to(&mut self, x: i32, y: i32) -> Result<()> {
-        let x = x.clamp(0, self.width);
-        let y = y.clamp(0, self.height);
+        let (x, y) = self.geometry.clamp_coordinates(x, y);
         self.device
             .emit(&[
                 InputEvent::new_now(EventType::ABSOLUTE.0, AbsoluteAxisCode::ABS_X.0, x),
@@ -139,5 +156,24 @@ impl PointerButton {
             Self::Right => KeyCode::BTN_RIGHT.0,
             Self::Middle => KeyCode::BTN_MIDDLE.0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AbsPointerGeometry;
+
+    #[test]
+    fn axis_range_ends_at_last_desktop_pixel() {
+        let geometry = AbsPointerGeometry::from_dimensions(1920, 1080);
+
+        assert_eq!(geometry.axis_maxima(), (1919, 1079));
+    }
+
+    #[test]
+    fn pointer_coordinates_clamp_to_last_desktop_pixel() {
+        let geometry = AbsPointerGeometry::from_dimensions(1920, 1080);
+
+        assert_eq!(geometry.clamp_coordinates(1920, 1080), (1919, 1079));
     }
 }

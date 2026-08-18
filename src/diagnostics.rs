@@ -1256,16 +1256,95 @@ fn atspi_bus_address_check() -> Check {
             "GetAddress",
         ],
     );
+    let discovery = if busctl.ok {
+        busctl
+    } else {
+        gdbus_call_check(
+            "org.a11y.Bus",
+            "/org/a11y/bus",
+            "org.a11y.Bus.GetAddress",
+            &[],
+        )
+    };
+
+    validate_atspi_bus_address(discovery, atspi_registry_check)
+}
+
+fn validate_atspi_bus_address(
+    discovery: Check,
+    probe_registry: impl FnOnce(&str) -> Check,
+) -> Check {
+    if !discovery.ok {
+        return discovery;
+    }
+
+    let Some(address) = parse_atspi_bus_address(&discovery.detail) else {
+        return Check::fail(format!(
+            "org.a11y.Bus.GetAddress returned an invalid address: {}",
+            discovery.detail
+        ));
+    };
+    let registry = probe_registry(&address);
+    if registry.ok {
+        discovery
+    } else {
+        Check::fail(format!(
+            "AT-SPI bus was discovered, but org.a11y.atspi.Registry is unreachable: {}",
+            registry.detail
+        ))
+    }
+}
+
+fn parse_atspi_bus_address(detail: &str) -> Option<String> {
+    let start = detail.find(['\'', '"'])?;
+    let quote = detail.as_bytes()[start];
+    let value = &detail[start + 1..];
+    let end = value.as_bytes().iter().position(|byte| *byte == quote)?;
+    let address = &value[..end];
+    (!address.is_empty() && !address.chars().any(char::is_control)).then(|| address.to_string())
+}
+
+fn atspi_registry_check(address: &str) -> Check {
+    atspi_registry_check_with(address, command_check)
+}
+
+fn atspi_registry_check_with(address: &str, mut run: impl FnMut(&str, &[&str]) -> Check) -> Check {
+    let busctl_address = format!("--address={address}");
+    let busctl = run(
+        "busctl",
+        &[
+            &busctl_address,
+            "call",
+            "org.a11y.atspi.Registry",
+            "/org/a11y/atspi/registry",
+            "org.freedesktop.DBus.Peer",
+            "Ping",
+        ],
+    );
     if busctl.ok {
         return busctl;
     }
 
-    gdbus_call_check(
-        "org.a11y.Bus",
-        "/org/a11y/bus",
-        "org.a11y.Bus.GetAddress",
-        &[],
-    )
+    let gdbus = run(
+        "gdbus",
+        &[
+            "introspect",
+            "--address",
+            address,
+            "--dest",
+            "org.a11y.atspi.Registry",
+            "--object-path",
+            "/org/a11y/atspi/registry",
+        ],
+    );
+    if gdbus.ok {
+        gdbus
+    } else {
+        Check::fail(format!(
+            "busctl: {}; gdbus: {}",
+            busctl.detail, gdbus.detail
+        ))
+    }
 }
 
 fn atspi_status_property_check(property: &str) -> Check {
@@ -1458,6 +1537,99 @@ mod tests {
         );
 
         assert!(can_build_accessibility_tree(&report));
+    }
+
+    #[test]
+    fn at_spi_bus_check_rejects_discovered_but_unreachable_registry() {
+        let check = validate_atspi_bus_address(
+            Check::ok("s \"unix:path=/run/user/1000/at-spi/bus\""),
+            |_| Check::fail("org.a11y.atspi.Registry is unreachable"),
+        );
+
+        assert!(!check.ok);
+        assert!(check.detail.contains("unreachable"));
+    }
+
+    #[test]
+    fn at_spi_bus_check_accepts_a_reachable_discovered_registry() {
+        let check = validate_atspi_bus_address(
+            Check::ok("('unix:path=/run/user/1000/at-spi/bus',)"),
+            |address| {
+                assert_eq!(address, "unix:path=/run/user/1000/at-spi/bus");
+                Check::ok("registry reachable")
+            },
+        );
+
+        assert!(check.ok);
+        assert_eq!(check.detail, "('unix:path=/run/user/1000/at-spi/bus',)");
+    }
+
+    #[test]
+    fn at_spi_bus_check_rejects_a_malformed_discovery_result() {
+        let check = validate_atspi_bus_address(Check::ok("s \"\""), |_| {
+            panic!("a malformed address must not be probed")
+        });
+
+        assert!(!check.ok);
+        assert!(check.detail.contains("invalid address"));
+    }
+
+    #[test]
+    fn at_spi_registry_busctl_probe_pings_the_registry_object() {
+        let mut commands = Vec::new();
+        let check =
+            atspi_registry_check_with("unix:path=/run/user/1000/at-spi/bus", |command, args| {
+                commands.push((
+                    command.to_string(),
+                    args.iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<String>>(),
+                ));
+                Check::ok("pong")
+            });
+
+        assert!(check.ok);
+        assert_eq!(
+            commands,
+            vec![(
+                "busctl".to_string(),
+                vec![
+                    "--address=unix:path=/run/user/1000/at-spi/bus".to_string(),
+                    "call".to_string(),
+                    "org.a11y.atspi.Registry".to_string(),
+                    "/org/a11y/atspi/registry".to_string(),
+                    "org.freedesktop.DBus.Peer".to_string(),
+                    "Ping".to_string(),
+                ],
+            )]
+        );
+    }
+
+    #[test]
+    fn at_spi_registry_probe_falls_back_to_gdbus_introspection() {
+        let mut commands = Vec::new();
+        let check =
+            atspi_registry_check_with("unix:path=/run/user/1000/at-spi/bus", |command, args| {
+                commands.push((
+                    command.to_string(),
+                    args.iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<String>>(),
+                ));
+                if command == "busctl" {
+                    Check::fail("busctl unavailable")
+                } else {
+                    Check::ok("registry introspection")
+                }
+            });
+
+        assert!(check.ok);
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[1].0, "gdbus");
+        assert_eq!(commands[1].1[0], "introspect");
+        assert_eq!(commands[1].1[2], "unix:path=/run/user/1000/at-spi/bus");
+        assert_eq!(commands[1].1[4], "org.a11y.atspi.Registry");
+        assert_eq!(commands[1].1[6], "/org/a11y/atspi/registry");
     }
 
     #[test]
