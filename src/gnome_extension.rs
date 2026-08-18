@@ -76,8 +76,7 @@ pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
         "computer-use-linux GNOME Shell extension files were installed, but enabling the extension failed. Enable it with gnome-extensions after GNOME Shell sees the new extension."
             .to_string()
     } else if windows_error.is_none() && requires_shell_reload {
-        "computer-use-linux GNOME Shell extension files changed while the extension was already active. Window targeting is available, but GNOME Shell must reload before newly installed DBus methods are served."
-            .to_string()
+        shell_reload_message(extension_was_enabled).to_string()
     } else if windows_error.is_none() {
         "computer-use-linux GNOME Shell extension is active and window targeting is available."
             .to_string()
@@ -138,10 +137,18 @@ fn file_content_changed(path: &Path, expected: &str) -> bool {
 
 fn setup_requires_shell_reload(
     windows_error: Option<&String>,
-    extension_was_enabled: bool,
+    extension_was_enabled: Option<bool>,
     changed_files: bool,
 ) -> bool {
-    windows_error.is_some() || extension_was_enabled && changed_files
+    windows_error.is_some() || extension_was_enabled != Some(false) && changed_files
+}
+
+fn shell_reload_message(extension_was_enabled: Option<bool>) -> &'static str {
+    if extension_was_enabled == Some(true) {
+        "computer-use-linux GNOME Shell extension files changed while the extension was already active. Window targeting is available, but GNOME Shell must reload before newly installed DBus methods are served."
+    } else {
+        "computer-use-linux GNOME Shell extension files changed, but the previous extension state could not be determined. GNOME Shell must reload before newly installed DBus methods can be relied on."
+    }
 }
 
 fn render_extension_asset(asset: &str) -> String {
@@ -261,18 +268,18 @@ fn run_gsettings_enable_fallback() -> SetupCommandReport {
     }
 }
 
-fn gnome_extension_enabled() -> bool {
+fn gnome_extension_enabled() -> Option<bool> {
     let mut command = Command::new("gsettings");
     command.args(["get", "org.gnome.shell", "enabled-extensions"]);
     add_session_env(&mut command);
     let Ok(output) = command.output() else {
-        return false;
+        return None;
     };
     if !output.status.success() {
-        return false;
+        return None;
     }
     let current = String::from_utf8_lossy(&output.stdout);
-    enabled_extensions_contains_uuid(&current)
+    Some(enabled_extensions_contains_uuid(&current))
 }
 
 fn enabled_extensions_contains_uuid(current: &str) -> bool {
@@ -396,14 +403,23 @@ mod tests {
 
     #[test]
     fn enabled_stale_extension_requires_shell_reload() {
-        assert!(setup_requires_shell_reload(None, true, true));
+        assert!(setup_requires_shell_reload(None, Some(true), true));
         assert!(setup_requires_shell_reload(
             Some(&"window API unavailable".to_string()),
-            false,
+            Some(false),
             false
         ));
-        assert!(!setup_requires_shell_reload(None, true, false));
-        assert!(!setup_requires_shell_reload(None, false, true));
+        assert!(!setup_requires_shell_reload(None, Some(true), false));
+        assert!(!setup_requires_shell_reload(None, Some(false), true));
+        assert!(setup_requires_shell_reload(None, None, true));
+    }
+
+    #[test]
+    fn unknown_extension_state_uses_neutral_reload_guidance() {
+        assert_eq!(
+            shell_reload_message(None),
+            "computer-use-linux GNOME Shell extension files changed, but the previous extension state could not be determined. GNOME Shell must reload before newly installed DBus methods can be relied on."
+        );
     }
 
     #[test]

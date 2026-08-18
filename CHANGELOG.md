@@ -23,7 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time out the complete script transaction before cleaning up owned temporary
   state without disturbing a colliding callback registration.
 - GNOME extension setup now reports when changed files require an already-active
-  Shell extension to reload before its newly installed DBus methods are served.
+  Shell extension to reload before its newly installed DBus methods are served,
+  and requires that reload when the previous extension state cannot be read.
 
 ## [0.4.9] - 2026-08-12
 
