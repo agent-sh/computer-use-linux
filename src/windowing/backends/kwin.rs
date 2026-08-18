@@ -114,44 +114,60 @@ where
 {
     hydrate_session_bus_env();
 
-    let connection = zbus::Connection::session()
+    let connection = timeout(KWIN_SCRIPT_TIMEOUT, zbus::Connection::session())
         .await
+        .context("timed out while connecting to the session bus for KWin scripting")?
         .context("failed to connect to session bus")?;
+
+    call_kwin_script_on_connection(connection, expected_kind, write_script, KWIN_SCRIPT_TIMEOUT)
+        .await
+}
+
+async fn call_kwin_script_on_connection<F>(
+    connection: zbus::Connection,
+    expected_kind: KwinCallbackKind,
+    write_script: F,
+    transaction_timeout: Duration,
+) -> Result<String>
+where
+    F: FnOnce(&str, &str, &str) -> Result<std::path::PathBuf>,
+{
     let unique_name = connection
         .unique_name()
         .context("session bus did not assign a unique name")?
         .to_string();
-    let dbus_proxy = zbus::fdo::DBusProxy::new(&connection)
-        .await
-        .context("failed to create session-bus identity proxy")?;
-    let expected_sender = dbus_proxy
-        .get_name_owner(BusName::try_from(KWIN_SCRIPTING_SERVICE)?)
-        .await
-        .context("failed to resolve the KWin session-bus owner")?;
     let plugin_name = temporary_kwin_plugin_name();
     let callback_object_path = format!("{KWIN_CALLBACK_OBJECT_PATH_PREFIX}/{plugin_name}");
-    let (sender, receiver) = mpsc::channel();
     let mut cleanup = KwinScriptCleanup::new(
         connection.clone(),
         plugin_name.clone(),
         callback_object_path.clone(),
     );
-    connection
-        .object_server()
-        .at(
-            callback_object_path.as_str(),
-            KwinWindowCallback {
-                sender,
-                expected_sender,
-                expected_kind,
-                plugin_name: plugin_name.clone(),
-                delivered: AtomicBool::new(false),
-            },
-        )
-        .await
-        .context("failed to register temporary KWin callback object")?;
 
-    let result = async {
+    let transaction = async {
+        let dbus_proxy = zbus::fdo::DBusProxy::new(&connection)
+            .await
+            .context("failed to create session-bus identity proxy")?;
+        let expected_sender = dbus_proxy
+            .get_name_owner(BusName::try_from(KWIN_SCRIPTING_SERVICE)?)
+            .await
+            .context("failed to resolve the KWin session-bus owner")?;
+        let (sender, receiver) = mpsc::channel();
+        connection
+            .object_server()
+            .at(
+                callback_object_path.as_str(),
+                KwinWindowCallback {
+                    sender,
+                    expected_sender,
+                    expected_kind,
+                    plugin_name: plugin_name.clone(),
+                    delivered: AtomicBool::new(false),
+                },
+            )
+            .await
+            .context("failed to register temporary KWin callback object")?;
+
         let path = write_script(&unique_name, &callback_object_path, &plugin_name)?;
         cleanup.script_path = Some(path.clone());
         let scripting_proxy = Proxy::new(
@@ -178,21 +194,22 @@ where
             .await
             .context("KWin start failed after loading the temporary script")?;
 
-        timeout(KWIN_SCRIPT_TIMEOUT, async move {
-            loop {
-                match receiver.try_recv() {
-                    Ok(json) => return Ok(json),
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        bail!("KWin temporary script callback disconnected before returning data");
-                    }
-                    Err(mpsc::TryRecvError::Empty) => sleep(Duration::from_millis(20)).await,
+        loop {
+            match receiver.try_recv() {
+                Ok(json) => return Ok(json),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    bail!("KWin temporary script callback disconnected before returning data");
                 }
+                Err(mpsc::TryRecvError::Empty) => sleep(Duration::from_millis(20)).await,
             }
-        })
-        .await
-        .context("KWin temporary script did not return data before timeout")?
-    }
-    .await;
+        }
+    };
+    let result = match timeout(transaction_timeout, transaction).await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow::anyhow!(
+            "KWin temporary script transaction timed out"
+        )),
+    };
     cleanup.run().await;
     result
 }
@@ -1064,5 +1081,164 @@ mod callback_tests {
             .accept(Some(":1.42"), KwinCallbackKind::Windows, valid)
             .is_err());
         assert!(receiver.try_recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+    use std::{
+        future::pending,
+        io::{BufRead, BufReader},
+        process::{Child, Command, Stdio},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
+        time::Instant,
+    };
+
+    #[derive(Clone, Copy)]
+    enum FakeKwinBehavior {
+        HangLoad,
+        HangStart,
+        NoCallback,
+    }
+
+    struct FakeKwinScripting {
+        behavior: FakeKwinBehavior,
+        unload_calls: Arc<AtomicUsize>,
+    }
+
+    #[zbus::interface(name = "org.kde.kwin.Scripting")]
+    impl FakeKwinScripting {
+        #[zbus(name = "loadScript")]
+        async fn load_script(&self, _path: &str, _plugin_name: &str) -> i32 {
+            if matches!(self.behavior, FakeKwinBehavior::HangLoad) {
+                pending::<()>().await;
+            }
+            1
+        }
+
+        #[zbus(name = "start")]
+        async fn start(&self) {
+            if matches!(self.behavior, FakeKwinBehavior::HangStart) {
+                pending::<()>().await;
+            }
+        }
+
+        #[zbus(name = "unloadScript")]
+        fn unload_script(&self, _plugin_name: &str) -> bool {
+            self.unload_calls.fetch_add(1, Ordering::SeqCst);
+            true
+        }
+    }
+
+    struct TestSessionBus {
+        child: Child,
+        address: String,
+    }
+
+    impl TestSessionBus {
+        fn start() -> Self {
+            let mut child = Command::new("dbus-daemon")
+                .args(["--session", "--nofork", "--nopidfile", "--print-address=1"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("start private dbus-daemon");
+            let mut address = String::new();
+            BufReader::new(child.stdout.take().expect("private bus stdout"))
+                .read_line(&mut address)
+                .expect("read private bus address");
+            assert!(!address.trim().is_empty(), "private bus emitted no address");
+            Self {
+                child,
+                address: address.trim().to_string(),
+            }
+        }
+    }
+
+    impl Drop for TestSessionBus {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    async fn assert_transaction_timeout_cleans_up(behavior: FakeKwinBehavior) {
+        let bus = TestSessionBus::start();
+        let unload_calls = Arc::new(AtomicUsize::new(0));
+        let service_connection = zbus::connection::Builder::address(bus.address.as_str())
+            .unwrap()
+            .name(KWIN_SCRIPTING_SERVICE)
+            .unwrap()
+            .serve_at(
+                KWIN_SCRIPTING_OBJECT_PATH,
+                FakeKwinScripting {
+                    behavior,
+                    unload_calls: Arc::clone(&unload_calls),
+                },
+            )
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let client_connection = zbus::connection::Builder::address(bus.address.as_str())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let callback_path = Arc::new(Mutex::new(None::<String>));
+        let script_path = Arc::new(Mutex::new(None::<std::path::PathBuf>));
+        let callback_path_for_writer = Arc::clone(&callback_path);
+        let script_path_for_writer = Arc::clone(&script_path);
+        let started = Instant::now();
+
+        let error = call_kwin_script_on_connection(
+            client_connection.clone(),
+            KwinCallbackKind::Windows,
+            move |service_name, object_path, plugin_name| {
+                let path = write_kwin_window_script(service_name, object_path, plugin_name)?;
+                *callback_path_for_writer.lock().unwrap() = Some(object_path.to_string());
+                *script_path_for_writer.lock().unwrap() = Some(path.clone());
+                Ok(path)
+            },
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(unload_calls.load(Ordering::SeqCst) >= 1);
+
+        let path = script_path.lock().unwrap().clone().unwrap();
+        assert!(!path.exists(), "temporary KWin script was not removed");
+        let object_path = callback_path.lock().unwrap().clone().unwrap();
+        assert!(client_connection
+            .object_server()
+            .interface::<_, KwinWindowCallback>(object_path.as_str())
+            .await
+            .is_err());
+
+        drop(service_connection);
+        drop(client_connection);
+        drop(bus);
+    }
+
+    #[tokio::test]
+    async fn transaction_times_out_and_cleans_up_when_load_script_never_replies() {
+        assert_transaction_timeout_cleans_up(FakeKwinBehavior::HangLoad).await;
+    }
+
+    #[tokio::test]
+    async fn transaction_times_out_and_cleans_up_when_start_never_replies() {
+        assert_transaction_timeout_cleans_up(FakeKwinBehavior::HangStart).await;
+    }
+
+    #[tokio::test]
+    async fn transaction_times_out_and_cleans_up_when_callback_never_arrives() {
+        assert_transaction_timeout_cleans_up(FakeKwinBehavior::NoCallback).await;
     }
 }
