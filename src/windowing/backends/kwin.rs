@@ -7,9 +7,9 @@ use serde::Deserialize;
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::mpsc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tokio::time::{sleep, timeout};
 use zbus::{
@@ -25,6 +25,7 @@ const KWIN_SCRIPTING_OBJECT_PATH: &str = "/Scripting";
 const KWIN_SCRIPTING_INTERFACE: &str = "org.kde.kwin.Scripting";
 const KWIN_CALLBACK_OBJECT_PATH_PREFIX: &str = "/dev/avifenesh/ComputerUseLinux/KWinWindowQuery";
 const KWIN_CALLBACK_INTERFACE: &str = "dev.avifenesh.ComputerUseLinux.KWinWindowQuery";
+static KWIN_PLUGIN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn probe() -> BackendProbe {
     let check = gdbus_introspect_contains(
@@ -132,11 +133,30 @@ async fn call_kwin_script_on_connection<F>(
 where
     F: FnOnce(&str, &str, &str) -> Result<std::path::PathBuf>,
 {
+    call_kwin_script_on_connection_with_plugin_name(
+        connection,
+        expected_kind,
+        write_script,
+        transaction_timeout,
+        temporary_kwin_plugin_name()?,
+    )
+    .await
+}
+
+async fn call_kwin_script_on_connection_with_plugin_name<F>(
+    connection: zbus::Connection,
+    expected_kind: KwinCallbackKind,
+    write_script: F,
+    transaction_timeout: Duration,
+    plugin_name: String,
+) -> Result<String>
+where
+    F: FnOnce(&str, &str, &str) -> Result<std::path::PathBuf>,
+{
     let unique_name = connection
         .unique_name()
         .context("session bus did not assign a unique name")?
         .to_string();
-    let plugin_name = temporary_kwin_plugin_name();
     let callback_object_path = format!("{KWIN_CALLBACK_OBJECT_PATH_PREFIX}/{plugin_name}");
     let mut cleanup = KwinScriptCleanup::new(
         connection.clone(),
@@ -153,7 +173,7 @@ where
             .await
             .context("failed to resolve the KWin session-bus owner")?;
         let (sender, receiver) = mpsc::channel();
-        connection
+        let callback_registered = connection
             .object_server()
             .at(
                 callback_object_path.as_str(),
@@ -167,6 +187,10 @@ where
             )
             .await
             .context("failed to register temporary KWin callback object")?;
+        if !callback_registered {
+            bail!("temporary KWin callback object path was already registered");
+        }
+        cleanup.owns_callback = true;
 
         let path = write_script(&unique_name, &callback_object_path, &plugin_name)?;
         cleanup.script_path = Some(path.clone());
@@ -219,6 +243,7 @@ struct KwinScriptCleanup {
     plugin_name: String,
     callback_object_path: String,
     script_path: Option<std::path::PathBuf>,
+    owns_callback: bool,
     armed: bool,
 }
 
@@ -233,6 +258,7 @@ impl KwinScriptCleanup {
             plugin_name,
             callback_object_path,
             script_path: None,
+            owns_callback: false,
             armed: true,
         }
     }
@@ -243,9 +269,11 @@ impl KwinScriptCleanup {
             self.plugin_name.clone(),
             self.callback_object_path.clone(),
             self.script_path.clone(),
+            self.owns_callback,
         )
         .await;
         self.script_path = None;
+        self.owns_callback = false;
         self.armed = false;
     }
 }
@@ -259,12 +287,14 @@ impl Drop for KwinScriptCleanup {
         let plugin_name = self.plugin_name.clone();
         let callback_object_path = self.callback_object_path.clone();
         let script_path = self.script_path.take();
+        let owns_callback = self.owns_callback;
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(cleanup_kwin_script(
                 connection,
                 plugin_name,
                 callback_object_path,
                 script_path,
+                owns_callback,
             ));
         }
     }
@@ -275,26 +305,29 @@ async fn cleanup_kwin_script(
     plugin_name: String,
     callback_object_path: String,
     script_path: Option<std::path::PathBuf>,
+    owns_callback: bool,
 ) {
-    let _ = timeout(Duration::from_secs(1), async {
-        if let Ok(scripting_proxy) = Proxy::new(
-            &connection,
-            KWIN_SCRIPTING_SERVICE,
-            KWIN_SCRIPTING_OBJECT_PATH,
-            KWIN_SCRIPTING_INTERFACE,
-        )
-        .await
-        {
-            let _: Result<bool, _> = scripting_proxy
-                .call("unloadScript", &(plugin_name.as_str()))
-                .await;
-        }
-    })
-    .await;
-    let _: Result<bool, _> = connection
-        .object_server()
-        .remove::<KwinWindowCallback, _>(callback_object_path.as_str())
+    if owns_callback {
+        let _ = timeout(Duration::from_secs(1), async {
+            if let Ok(scripting_proxy) = Proxy::new(
+                &connection,
+                KWIN_SCRIPTING_SERVICE,
+                KWIN_SCRIPTING_OBJECT_PATH,
+                KWIN_SCRIPTING_INTERFACE,
+            )
+            .await
+            {
+                let _: Result<bool, _> = scripting_proxy
+                    .call("unloadScript", &(plugin_name.as_str()))
+                    .await;
+            }
+        })
         .await;
+        let _: Result<bool, _> = connection
+            .object_server()
+            .remove::<KwinWindowCallback, _>(callback_object_path.as_str())
+            .await;
+    }
     if let Some(script_path) = script_path {
         let _ = fs::remove_file(script_path);
     }
@@ -388,13 +421,24 @@ impl KwinWindowCallback {
     }
 }
 
-fn temporary_kwin_plugin_name() -> String {
+fn temporary_kwin_plugin_name() -> Result<String> {
     let pid = std::process::id();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    format!("computer_use_linux_kwin_window_query_{pid}_{nanos}")
+    let sequence = KWIN_PLUGIN_SEQUENCE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .map_err(|_| anyhow::anyhow!("temporary KWin plugin sequence exhausted"))?;
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce).map_err(|error| {
+        anyhow::anyhow!("failed to generate temporary KWin plugin nonce: {error}")
+    })?;
+    let nonce = nonce
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!(
+        "computer_use_linux_kwin_window_query_{pid}_{sequence}_{nonce}"
+    ))
 }
 
 fn write_kwin_window_script(
@@ -1107,6 +1151,8 @@ mod transaction_tests {
 
     struct FakeKwinScripting {
         behavior: FakeKwinBehavior,
+        load_calls: Arc<AtomicUsize>,
+        start_calls: Arc<AtomicUsize>,
         unload_calls: Arc<AtomicUsize>,
     }
 
@@ -1114,6 +1160,7 @@ mod transaction_tests {
     impl FakeKwinScripting {
         #[zbus(name = "loadScript")]
         async fn load_script(&self, _path: &str, _plugin_name: &str) -> i32 {
+            self.load_calls.fetch_add(1, Ordering::SeqCst);
             if matches!(self.behavior, FakeKwinBehavior::HangLoad) {
                 pending::<()>().await;
             }
@@ -1122,6 +1169,7 @@ mod transaction_tests {
 
         #[zbus(name = "start")]
         async fn start(&self) {
+            self.start_calls.fetch_add(1, Ordering::SeqCst);
             if matches!(self.behavior, FakeKwinBehavior::HangStart) {
                 pending::<()>().await;
             }
@@ -1168,6 +1216,8 @@ mod transaction_tests {
 
     async fn assert_transaction_timeout_cleans_up(behavior: FakeKwinBehavior) {
         let bus = TestSessionBus::start();
+        let load_calls = Arc::new(AtomicUsize::new(0));
+        let start_calls = Arc::new(AtomicUsize::new(0));
         let unload_calls = Arc::new(AtomicUsize::new(0));
         let service_connection = zbus::connection::Builder::address(bus.address.as_str())
             .unwrap()
@@ -1177,6 +1227,8 @@ mod transaction_tests {
                 KWIN_SCRIPTING_OBJECT_PATH,
                 FakeKwinScripting {
                     behavior,
+                    load_calls: Arc::clone(&load_calls),
+                    start_calls: Arc::clone(&start_calls),
                     unload_calls: Arc::clone(&unload_calls),
                 },
             )
@@ -1240,5 +1292,90 @@ mod transaction_tests {
     #[tokio::test]
     async fn transaction_times_out_and_cleans_up_when_callback_never_arrives() {
         assert_transaction_timeout_cleans_up(FakeKwinBehavior::NoCallback).await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_callback_path_fails_without_disturbing_its_owner() {
+        let bus = TestSessionBus::start();
+        let load_calls = Arc::new(AtomicUsize::new(0));
+        let start_calls = Arc::new(AtomicUsize::new(0));
+        let unload_calls = Arc::new(AtomicUsize::new(0));
+        let service_connection = zbus::connection::Builder::address(bus.address.as_str())
+            .unwrap()
+            .name(KWIN_SCRIPTING_SERVICE)
+            .unwrap()
+            .serve_at(
+                KWIN_SCRIPTING_OBJECT_PATH,
+                FakeKwinScripting {
+                    behavior: FakeKwinBehavior::NoCallback,
+                    load_calls: Arc::clone(&load_calls),
+                    start_calls: Arc::clone(&start_calls),
+                    unload_calls: Arc::clone(&unload_calls),
+                },
+            )
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let client_connection = zbus::connection::Builder::address(bus.address.as_str())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let plugin_name = "computer_use_linux_kwin_window_query_duplicate";
+        let callback_path = format!("{KWIN_CALLBACK_OBJECT_PATH_PREFIX}/{plugin_name}");
+        let expected_sender = service_connection.unique_name().unwrap().to_owned();
+        let expected_sender_name = expected_sender.to_string();
+        let (sender, receiver) = mpsc::channel();
+        assert!(client_connection
+            .object_server()
+            .at(
+                callback_path.as_str(),
+                KwinWindowCallback {
+                    sender,
+                    expected_sender,
+                    expected_kind: KwinCallbackKind::Windows,
+                    plugin_name: plugin_name.to_string(),
+                    delivered: AtomicBool::new(false),
+                },
+            )
+            .await
+            .unwrap());
+
+        let error = call_kwin_script_on_connection_with_plugin_name(
+            client_connection.clone(),
+            KwinCallbackKind::Windows,
+            |_, _, _| bail!("script writer must not run after a callback collision"),
+            Duration::from_millis(100),
+            plugin_name.to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("already registered"));
+        assert_eq!(load_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(start_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(unload_calls.load(Ordering::SeqCst), 0);
+
+        let callback = client_connection
+            .object_server()
+            .interface::<_, KwinWindowCallback>(callback_path.as_str())
+            .await
+            .expect("the original callback must remain registered");
+        let payload = format!(r#"{{"backend":"kwin","pluginName":"{plugin_name}","windows":[]}}"#);
+        callback
+            .get()
+            .await
+            .accept(
+                Some(expected_sender_name.as_str()),
+                KwinCallbackKind::Windows,
+                &payload,
+            )
+            .unwrap();
+        assert_eq!(receiver.try_recv().unwrap(), payload);
+
+        drop(service_connection);
+        drop(client_connection);
+        drop(bus);
     }
 }

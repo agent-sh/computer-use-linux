@@ -20,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fall through to a backend that can synthesize them instead of becoming left clicks.
 - Temporary KWin script callbacks now accept one matching response from the
   current `org.kde.KWin` bus owner, reject spoofed or replayed responses, and
-  time out the complete script transaction before cleaning up temporary state.
+  time out the complete script transaction before cleaning up owned temporary
+  state without disturbing a colliding callback registration.
 - GNOME extension setup now reports when changed files require an already-active
   Shell extension to reload before its newly installed DBus methods are served.
 
