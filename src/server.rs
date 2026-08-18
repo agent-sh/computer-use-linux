@@ -579,10 +579,10 @@ impl ComputerUseLinux {
         button: Option<&str>,
         count: u32,
     ) -> Option<bool> {
+        let btn = crate::abs_pointer::PointerButton::from_name(button)?;
         if !self.ensure_abs_pointer().await {
             return None;
         }
-        let btn = crate::abs_pointer::PointerButton::from_name(button)?;
         let abs_pointer = Arc::clone(&self.abs_pointer);
         tokio::task::spawn_blocking(move || {
             let mut guard = abs_pointer.lock().ok()?;
