@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Absolute uinput pointer axes now end at the final logical desktop pixel, so
   edge coordinates are advertised and clamped consistently.
+- Buttons outside the absolute uinput device's left, middle, and right set now
+  fall through to a backend that can synthesize them instead of becoming left clicks.
+- Temporary KWin script callbacks now accept one matching response from the
+  current `org.kde.KWin` bus owner and reject spoofed or replayed responses.
 
 ## [0.4.9] - 2026-08-12
 
