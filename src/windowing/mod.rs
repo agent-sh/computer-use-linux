@@ -81,6 +81,7 @@ mod tests {
             "is_floating": false,
             "unknown_future_field": "ignored",
             "layout": {
+              "tile_size": [1202.5, 802.25],
               "window_size": [1200, 800],
               "tile_pos_in_workspace_view": null,
               "window_offset_in_tile": [0.0, 0.0]
@@ -105,8 +106,8 @@ mod tests {
         let bounds = window.bounds.as_ref().unwrap();
         assert_eq!(bounds.x, None);
         assert_eq!(bounds.y, None);
-        assert_eq!(bounds.width, 1200);
-        assert_eq!(bounds.height, 800);
+        assert_eq!(bounds.width, 1203);
+        assert_eq!(bounds.height, 803);
     }
 
     #[test]
@@ -131,6 +132,30 @@ mod tests {
         assert_eq!(window.pid, None);
         assert_eq!(window.workspace, None);
         assert!(window.bounds.is_none());
+    }
+
+    #[test]
+    fn niri_uses_window_size_when_tile_size_is_absent_or_invalid() {
+        for layout in [
+            r#""window_size": [640, 480]"#,
+            r#""tile_size": [-1.0, 482.0], "window_size": [640, 480]"#,
+        ] {
+            let json = format!(
+                r#"[{{
+                  "id": 11,
+                  "title": "Compatibility fallback",
+                  "app_id": "example",
+                  "pid": 1234,
+                  "workspace_id": 1,
+                  "is_focused": false,
+                  "layout": {{{layout}}}
+                }}]"#
+            );
+
+            let windows = parse_niri_windows(&json).unwrap();
+            let bounds = windows[0].bounds.as_ref().unwrap();
+            assert_eq!((bounds.width, bounds.height), (640, 480));
+        }
     }
 
     #[test]

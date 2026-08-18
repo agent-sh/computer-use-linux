@@ -149,15 +149,26 @@ struct NiriWindow {
 
 #[derive(Debug, Deserialize)]
 struct NiriWindowLayout {
+    tile_size: Option<[f64; 2]>,
     window_size: Option<[i64; 2]>,
 }
 
 impl From<NiriWindow> for WindowInfo {
     fn from(window: NiriWindow) -> Self {
         let bounds = window.layout.and_then(|layout| {
-            let [width, height] = layout.window_size?;
-            let width = u32::try_from(width).ok().filter(|value| *value > 0)?;
-            let height = u32::try_from(height).ok().filter(|value| *value > 0)?;
+            let tile_dimensions = layout.tile_size.and_then(|[width, height]| {
+                Some((
+                    positive_finite_dimension(width)?,
+                    positive_finite_dimension(height)?,
+                ))
+            });
+            let window_dimensions = layout.window_size.and_then(|[width, height]| {
+                Some((
+                    u32::try_from(width).ok().filter(|value| *value > 0)?,
+                    u32::try_from(height).ok().filter(|value| *value > 0)?,
+                ))
+            });
+            let (width, height) = tile_dimensions.or(window_dimensions)?;
             Some(WindowBounds {
                 x: None,
                 y: None,
@@ -183,4 +194,8 @@ impl From<NiriWindow> for WindowInfo {
             terminal: None,
         }
     }
+}
+
+fn positive_finite_dimension(value: f64) -> Option<u32> {
+    (value.is_finite() && value > 0.0 && value <= f64::from(u32::MAX)).then(|| value.ceil() as u32)
 }
