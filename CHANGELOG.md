@@ -7,11 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- Niri sessions now support window listing, focused-window queries, and exact
-  window activation through the compositor's local IPC command. Reported sizes
-  prefer visual tile bounds, including compositor decorations.
-
 ### Fixed
 - Absolute uinput pointer axes now end at the final logical desktop pixel, so
   edge coordinates are advertised and clamped consistently.
