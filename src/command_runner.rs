@@ -604,8 +604,8 @@ mod tests {
         assert!(output.stderr.len() >= 200_000);
     }
 
-    #[test]
-    fn default_blocking_timeout_kills_the_process_group() {
+    #[tokio::test]
+    async fn default_blocking_timeout_kills_the_process_group() {
         let leader_path = temporary_pid_path("blocking-default-leader");
         let descendant_path = temporary_pid_path("blocking-default-descendant");
         let mut command = StdCommand::new("sh");
@@ -633,8 +633,8 @@ mod tests {
             .expect("descendant should record its pid")
             .parse()
             .expect("descendant pid should be numeric");
-        wait_for_process_exit_blocking(leader);
-        wait_for_process_exit_blocking(descendant);
+        wait_for_process_exit(leader).await;
+        wait_for_process_exit(descendant).await;
         let _ = fs::remove_file(leader_path);
         let _ = fs::remove_file(descendant_path);
     }
@@ -668,19 +668,6 @@ mod tests {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        unsafe {
-            libc::kill(pid as i32, libc::SIGKILL);
-        }
-        panic!("process {pid} was not killed and reaped")
-    }
-
-    fn wait_for_process_exit_blocking(pid: u32) {
-        for _ in 0..100 {
-            if !PathBuf::from(format!("/proc/{pid}")).exists() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
         }
         unsafe {
             libc::kill(pid as i32, libc::SIGKILL);
