@@ -62,11 +62,8 @@ pub(crate) async fn run_from_env() -> Result<()> {
             let cap = screenshot::capture_screenshot_raw().await?;
             eprintln!("desktop logical size: {}x{}", cap.width, cap.height);
             let mut p = abs_pointer::AbsPointer::create(cap.width as i32, cap.height as i32)?;
-            let emitted = p.click(x, y, abs_pointer::PointerButton::Left, 1)?;
-            println!(
-                "{}",
-                abs_test_report((x, y), emitted, (cap.width, cap.height))
-            );
+            let landing = p.click(x, y, abs_pointer::PointerButton::Left, 1)?;
+            println!("{}", abs_test_report(landing, (cap.width, cap.height)));
             Ok(())
         }
         Some("screenshot") => {
@@ -146,16 +143,15 @@ pub(crate) async fn run_from_env() -> Result<()> {
 }
 
 fn abs_test_report(
-    requested: (i32, i32),
-    emitted: (i32, i32),
+    landing: abs_pointer::PointerLanding,
     dimensions: (u32, u32),
 ) -> serde_json::Value {
     serde_json::json!({
         "ok": true,
-        "requested_x": requested.0,
-        "requested_y": requested.1,
-        "x": emitted.0,
-        "y": emitted.1,
+        "requested_x": landing.requested.0,
+        "requested_y": landing.requested.1,
+        "x": landing.emitted.0,
+        "y": landing.emitted.1,
         "w": dimensions.0,
         "h": dimensions.1
     })
@@ -169,12 +165,18 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::abs_test_report;
+    use super::{abs_pointer, abs_test_report};
 
     #[test]
     fn abs_test_report_distinguishes_requested_and_emitted_coordinates() {
         assert_eq!(
-            abs_test_report((1920, 1080), (1919, 1079), (1920, 1080)),
+            abs_test_report(
+                abs_pointer::PointerLanding {
+                    requested: (1920, 1080),
+                    emitted: (1919, 1079),
+                },
+                (1920, 1080)
+            ),
             serde_json::json!({
                 "ok": true,
                 "requested_x": 1920,

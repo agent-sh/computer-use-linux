@@ -571,14 +571,15 @@ impl ComputerUseLinux {
     }
 
     /// Try a coordinate click through the absolute uinput pointer. Returns the
-    /// coordinates emitted by that backend, or `None` to fall through.
+    /// requested and emitted coordinates from that backend, or `None` to fall
+    /// through.
     async fn try_abs_click(
         &self,
         x: i32,
         y: i32,
         button: Option<&str>,
         count: u32,
-    ) -> Option<(i32, i32)> {
+    ) -> Option<crate::abs_pointer::PointerLanding> {
         let btn = crate::abs_pointer::PointerButton::from_name(button)?;
         if !self.ensure_abs_pointer().await {
             return None;
@@ -742,7 +743,7 @@ impl ComputerUseLinux {
         // portal (per-monitor coordinate scaling + an approval dialog), the
         // absolute pointer uses screenshot-pixel coordinates directly and
         // reports the point it emitted after desktop-edge clamping.
-        if let Some(emitted_point) = self
+        if let Some(landing) = self
             .try_abs_click(
                 x,
                 y,
@@ -759,7 +760,7 @@ impl ComputerUseLinux {
                     message: "Action sent through the uinput absolute pointer.".to_string(),
                     received,
                 },
-                abs_pointer_clamp_note((x, y), emitted_point),
+                abs_pointer_clamp_note(landing),
             ));
         }
         let off_screen_note = self.off_screen_note_for_point(x, y).await;
@@ -4033,11 +4034,11 @@ fn with_notes(mut output: ActionOutput, notes: impl IntoIterator<Item = String>)
     output
 }
 
-fn abs_pointer_clamp_note(requested: (i32, i32), emitted: (i32, i32)) -> Option<String> {
-    (requested != emitted).then(|| {
+fn abs_pointer_clamp_note(landing: crate::abs_pointer::PointerLanding) -> Option<String> {
+    (landing.requested != landing.emitted).then(|| {
         format!(
             "Requested coordinate {},{} was clamped to {},{} by the uinput absolute pointer.",
-            requested.0, requested.1, emitted.0, emitted.1
+            landing.requested.0, landing.requested.1, landing.emitted.0, landing.emitted.1
         )
     })
 }
@@ -5301,13 +5302,22 @@ mod tests {
     #[test]
     fn absolute_pointer_note_reports_the_emitted_coordinate() {
         assert_eq!(
-            abs_pointer_clamp_note((1920, 1080), (1919, 1079)),
+            abs_pointer_clamp_note(crate::abs_pointer::PointerLanding {
+                requested: (1920, 1080),
+                emitted: (1919, 1079),
+            }),
             Some(
                 "Requested coordinate 1920,1080 was clamped to 1919,1079 by the uinput absolute pointer."
                     .to_string()
             )
         );
-        assert_eq!(abs_pointer_clamp_note((640, 480), (640, 480)), None);
+        assert_eq!(
+            abs_pointer_clamp_note(crate::abs_pointer::PointerLanding {
+                requested: (640, 480),
+                emitted: (640, 480),
+            }),
+            None
+        );
     }
 
     #[test]
