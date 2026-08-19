@@ -62,10 +62,10 @@ pub(crate) async fn run_from_env() -> Result<()> {
             let cap = screenshot::capture_screenshot_raw().await?;
             eprintln!("desktop logical size: {}x{}", cap.width, cap.height);
             let mut p = abs_pointer::AbsPointer::create(cap.width as i32, cap.height as i32)?;
-            p.click(x, y, abs_pointer::PointerButton::Left, 1)?;
+            let emitted = p.click(x, y, abs_pointer::PointerButton::Left, 1)?;
             println!(
                 "{}",
-                serde_json::json!({"ok": true, "x": x, "y": y, "w": cap.width, "h": cap.height})
+                abs_test_report((x, y), emitted, (cap.width, cap.height))
             );
             Ok(())
         }
@@ -145,8 +145,45 @@ pub(crate) async fn run_from_env() -> Result<()> {
     }
 }
 
+fn abs_test_report(
+    requested: (i32, i32),
+    emitted: (i32, i32),
+    dimensions: (u32, u32),
+) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "requested_x": requested.0,
+        "requested_y": requested.1,
+        "x": emitted.0,
+        "y": emitted.1,
+        "w": dimensions.0,
+        "h": dimensions.1
+    })
+}
+
 fn print_help() {
     println!(
         "computer-use-linux\n\nUsage:\n  computer-use-linux mcp\n  computer-use-linux doctor\n  computer-use-linux setup\n  computer-use-linux setup-window-targeting\n  computer-use-linux apps\n  computer-use-linux state [APP_NAME]\n  computer-use-linux screenshot\n  computer-use-linux windows"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::abs_test_report;
+
+    #[test]
+    fn abs_test_report_distinguishes_requested_and_emitted_coordinates() {
+        assert_eq!(
+            abs_test_report((1920, 1080), (1919, 1079), (1920, 1080)),
+            serde_json::json!({
+                "ok": true,
+                "requested_x": 1920,
+                "requested_y": 1080,
+                "x": 1919,
+                "y": 1079,
+                "w": 1920,
+                "h": 1080
+            })
+        );
+    }
 }
