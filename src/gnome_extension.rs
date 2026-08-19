@@ -1,3 +1,4 @@
+use crate::command_runner;
 use crate::diagnostics::hydrate_session_bus_env;
 use crate::identity;
 use crate::windowing::backends::gnome::list_extension_windows;
@@ -167,25 +168,13 @@ fn render_extension_asset(asset: &str) -> String {
 fn run_gnome_extensions_enable() -> SetupCommandReport {
     let mut command = Command::new("gnome-extensions");
     command.args(["enable", UUID]);
-    add_session_env(&mut command);
 
-    let primary = match command.output() {
-        Ok(output) if output.status.success() => SetupCommandReport {
+    let primary = match run_session_command(&mut command, "enable the GNOME Shell extension") {
+        Ok(output) => SetupCommandReport {
             ok: true,
             detail: output_detail(&output.stdout, &output.stderr, "gnome-extensions enable ok"),
         },
-        Ok(output) => SetupCommandReport {
-            ok: false,
-            detail: output_detail(
-                &output.stdout,
-                &output.stderr,
-                &format!("gnome-extensions exited with {}", output.status),
-            ),
-        },
-        Err(error) => SetupCommandReport {
-            ok: false,
-            detail: format!("failed to run gnome-extensions: {error}"),
-        },
+        Err(detail) => SetupCommandReport { ok: false, detail },
     };
     if primary.ok {
         return primary;
@@ -213,25 +202,9 @@ fn run_gnome_extensions_enable() -> SetupCommandReport {
 }
 
 fn run_gsettings_enable_fallback() -> SetupCommandReport {
-    let mut get_command = Command::new("gsettings");
-    get_command.args(["get", "org.gnome.shell", "enabled-extensions"]);
-    add_session_env(&mut get_command);
-    let current = match get_command.output() {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        }
-        Ok(output) => {
-            return SetupCommandReport {
-                ok: false,
-                detail: output_detail(&output.stdout, &output.stderr, "gsettings get failed"),
-            }
-        }
-        Err(error) => {
-            return SetupCommandReport {
-                ok: false,
-                detail: format!("failed to run gsettings get: {error}"),
-            }
-        }
+    let current = match enabled_extensions_value() {
+        Ok(current) => current,
+        Err(detail) => return SetupCommandReport { ok: false, detail },
     };
 
     let Some(updated) = enabled_extensions_literal(&current) else {
@@ -249,37 +222,31 @@ fn run_gsettings_enable_fallback() -> SetupCommandReport {
 
     let mut set_command = Command::new("gsettings");
     set_command.args(["set", "org.gnome.shell", "enabled-extensions", &updated]);
-    add_session_env(&mut set_command);
-    match set_command.output() {
-        Ok(output) if output.status.success() => SetupCommandReport {
+    match run_session_command(
+        &mut set_command,
+        "update org.gnome.shell enabled-extensions",
+    ) {
+        Ok(_) => SetupCommandReport {
             ok: true,
             detail: format!(
                 "added {UUID} to org.gnome.shell enabled-extensions for the next GNOME Shell load"
             ),
         },
-        Ok(output) => SetupCommandReport {
-            ok: false,
-            detail: output_detail(&output.stdout, &output.stderr, "gsettings set failed"),
-        },
-        Err(error) => SetupCommandReport {
-            ok: false,
-            detail: format!("failed to run gsettings set: {error}"),
-        },
+        Err(detail) => SetupCommandReport { ok: false, detail },
     }
 }
 
 fn gnome_extension_enabled() -> Option<bool> {
+    enabled_extensions_value()
+        .ok()
+        .map(|current| enabled_extensions_contains_uuid(&current))
+}
+
+fn enabled_extensions_value() -> Result<String, String> {
     let mut command = Command::new("gsettings");
     command.args(["get", "org.gnome.shell", "enabled-extensions"]);
-    add_session_env(&mut command);
-    let Ok(output) = command.output() else {
-        return None;
-    };
-    if !output.status.success() {
-        return None;
-    }
-    let current = String::from_utf8_lossy(&output.stdout);
-    Some(enabled_extensions_contains_uuid(&current))
+    let output = run_session_command(&mut command, "read org.gnome.shell enabled-extensions")?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn enabled_extensions_contains_uuid(current: &str) -> bool {
@@ -315,6 +282,24 @@ fn add_session_env(command: &mut Command) {
         .filter(|value| !value.trim().is_empty())
     {
         command.env("XDG_RUNTIME_DIR", runtime);
+    }
+}
+
+fn run_session_command(
+    command: &mut Command,
+    action: &str,
+) -> Result<std::process::Output, String> {
+    add_session_env(command);
+    let output =
+        command_runner::output_blocking(command, action).map_err(|error| format!("{error:#}"))?;
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(output_detail(
+            &output.stdout,
+            &output.stderr,
+            &format!("{action} failed with {}", output.status),
+        ))
     }
 }
 
@@ -381,6 +366,16 @@ mod tests {
         let value = format!("['{UUID}']");
 
         assert_eq!(enabled_extensions_literal(&value).unwrap(), value);
+    }
+
+    #[test]
+    fn session_command_failure_reports_command_stderr() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf 'settings rejected' >&2; exit 23"]);
+
+        let error = run_session_command(&mut command, "update GNOME settings").unwrap_err();
+
+        assert_eq!(error, "settings rejected");
     }
 
     #[test]
