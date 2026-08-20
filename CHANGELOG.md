@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   current `org.kde.KWin` bus owner, reject spoofed or replayed responses, and
   time out the complete script transaction before cleaning up owned temporary
   state without disturbing a colliding callback registration.
+- KWin window listings now classify Plasma 6 native Wayland and Xwayland
+  clients when the legacy client flags are unavailable.
 - GNOME extension setup now reports when changed files require an already-active
   Shell extension to reload before its newly installed DBus methods are served,
   and requires that reload when the previous extension state cannot be read.
