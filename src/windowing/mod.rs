@@ -21,10 +21,6 @@ mod tests {
     use super::backends::gnome::window_from_properties;
     use super::backends::hyprland::{parse_hyprland_clients, HYPRLAND_BACKEND};
     use super::backends::i3::{parse_i3_tree, parse_xprop_pid, I3_BACKEND};
-    use super::backends::kwin::{
-        kwin_activate_script_source, kwin_window_id_from_uuid, kwin_window_script_source,
-        parse_kwin_logical_desktop_rect, parse_kwin_windows, KWIN_BACKEND,
-    };
     use super::registry::{
         descriptors, list_note, COSMIC_WAYLAND_BACKEND, GNOME_SHELL_EXTENSION_BACKEND,
         GNOME_SHELL_INTROSPECT_BACKEND,
@@ -637,113 +633,6 @@ mod tests {
             Some(19313)
         );
         assert_eq!(parse_xprop_pid("_NET_WM_PID:  not found.\n"), None);
-    }
-
-    #[test]
-    fn parses_kwin_windows_as_window_info() {
-        let uuid = "b4dfacf8-a559-43c9-8b1f-ecd5cfd78359";
-        let windows_json = r#"{
-          "backend": "kwin",
-          "desktopGeometry": {"x": 100, "y": -50, "width": 3840, "height": "2160"},
-          "windows": [
-            {
-              "uuid": "{b4dfacf8-a559-43c9-8b1f-ecd5cfd78359}",
-              "caption": "Codex",
-              "desktopFile": "codex-desktop",
-              "resourceClass": "codex-desktop",
-              "resourceName": "codex",
-              "pid": 68986,
-              "x": 10,
-              "y": 48,
-              "width": 1200,
-              "height": 800,
-              "workspace": 1,
-              "minimized": false,
-              "active": true,
-              "clientType": "wayland",
-              "normalWindow": true,
-              "desktopWindow": false,
-              "dock": false
-            },
-            {
-              "uuid": "{11111111-2222-3333-4444-555555555555}",
-              "caption": "Desktop",
-              "desktopWindow": true
-            }
-          ]
-        }"#;
-
-        let windows = parse_kwin_windows(windows_json).unwrap();
-
-        assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0].window_id, kwin_window_id_from_uuid(uuid));
-        assert_eq!(windows[0].title.as_deref(), Some("Codex"));
-        assert_eq!(windows[0].app_id.as_deref(), Some("codex-desktop"));
-        assert_eq!(windows[0].wm_class.as_deref(), Some("codex-desktop"));
-        assert_eq!(windows[0].pid, Some(68986));
-        assert_eq!(windows[0].bounds.as_ref().unwrap().x, Some(10));
-        assert_eq!(windows[0].bounds.as_ref().unwrap().height, 800);
-        assert_eq!(windows[0].workspace, Some(1));
-        assert!(windows[0].focused);
-        assert!(!windows[0].hidden);
-        assert_eq!(windows[0].client_type.as_deref(), Some("wayland"));
-        assert_eq!(windows[0].backend, KWIN_BACKEND);
-        assert_eq!(
-            parse_kwin_logical_desktop_rect(windows_json).unwrap(),
-            (100, -50, 3840, 2160)
-        );
-    }
-
-    #[test]
-    fn kwin_window_ids_are_stable_across_uuid_formats() {
-        let bare = "b4dfacf8-a559-43c9-8b1f-ecd5cfd78359";
-        let braced_upper = "{B4DFACF8-A559-43C9-8B1F-ECD5CFD78359}";
-
-        assert_eq!(
-            kwin_window_id_from_uuid(bare),
-            kwin_window_id_from_uuid(braced_upper)
-        );
-    }
-
-    #[test]
-    fn kwin_window_script_supports_plasma5_and_plasma6_window_apis() {
-        let script = kwin_window_script_source(
-            ":1.234",
-            "/dev/avifenesh/ComputerUseLinux/KWinWindowQuery/test",
-            "computer_use_linux_kwin_window_query_test",
-        )
-        .unwrap();
-
-        assert!(script.contains(r#"typeof workspace.windowList === "function""#));
-        assert!(script.contains("workspace.windowList()"));
-        assert!(script.contains(r#"typeof workspace.clientList === "function""#));
-        assert!(script.contains("workspace.clientList()"));
-        assert!(script.contains(
-            r#"activeWindow = "activeWindow" in workspace ? workspace.activeWindow : workspace.activeClient;"#
-        ));
-        assert!(script.contains("workspace.virtualScreenGeometry"));
-        assert!(script.contains("desktopGeometry: workspaceGeometry()"));
-    }
-
-    #[test]
-    fn kwin_activation_script_focuses_window_directly() {
-        let script = kwin_activate_script_source(
-            ":1.234",
-            "/dev/avifenesh/ComputerUseLinux/KWinWindowQuery/test",
-            "computer_use_linux_kwin_window_query_test",
-            "{B4DFACF8-A559-43C9-8B1F-ECD5CFD78359}",
-        )
-        .unwrap();
-
-        assert!(script.contains(r#"var targetUuid = "b4dfacf8-a559-43c9-8b1f-ecd5cfd78359";"#));
-        assert!(script.contains("targetWindow.minimized = false;"));
-        assert!(script.contains("workspace.activeWindow = targetWindow;"));
-        assert!(script.contains(r#"typeof workspace.clientList === "function""#));
-        assert!(script.contains("workspace.clientList()"));
-        assert!(script.contains(r#""activeWindow" in workspace"#));
-        assert!(script.contains("workspace.activeClient = targetWindow;"));
-        assert!(script.contains(r#""ReceiveResult""#));
-        assert!(!script.contains("WindowsRunner"));
     }
 
     #[test]

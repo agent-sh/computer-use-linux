@@ -450,7 +450,7 @@ fn write_kwin_window_script(
     write_kwin_script_file(plugin_name, &script)
 }
 
-pub(crate) fn kwin_window_script_source(
+fn kwin_window_script_source(
     service_name: &str,
     callback_object_path: &str,
     plugin_name: &str,
@@ -549,6 +549,19 @@ pub(crate) fn kwin_window_script_source(
         if (read(window, "x11Client")) {{
             return "x11";
         }}
+        var objectDescription = serialize(window);
+        if (typeof objectDescription === "string") {{
+            var separator = objectDescription.indexOf("(");
+            var objectClass = (separator >= 0
+                ? objectDescription.slice(0, separator)
+                : objectDescription).trim();
+            if (objectClass === "KWin::XdgToplevelWindow") {{
+                return "wayland";
+            }}
+            if (objectClass === "KWin::X11Window") {{
+                return "x11";
+            }}
+        }}
         return null;
     }}
 
@@ -623,7 +636,7 @@ fn write_kwin_activate_script(
     write_kwin_script_file(plugin_name, &script)
 }
 
-pub(crate) fn kwin_activate_script_source(
+fn kwin_activate_script_source(
     service_name: &str,
     callback_object_path: &str,
     plugin_name: &str,
@@ -828,7 +841,7 @@ fn write_kwin_script_file(plugin_name: &str, script: &str) -> Result<std::path::
     bail!("failed to create a unique temporary KWin script path for {plugin_name}")
 }
 
-pub(crate) fn parse_kwin_windows(json: &str) -> Result<Vec<WindowInfo>> {
+fn parse_kwin_windows(json: &str) -> Result<Vec<WindowInfo>> {
     let snapshot = parse_kwin_snapshot(json)?;
     let mut windows = snapshot
         .windows
@@ -843,7 +856,7 @@ pub(crate) fn parse_kwin_windows(json: &str) -> Result<Vec<WindowInfo>> {
     Ok(windows)
 }
 
-pub(crate) fn parse_kwin_logical_desktop_rect(json: &str) -> Result<(i32, i32, i32, i32)> {
+fn parse_kwin_logical_desktop_rect(json: &str) -> Result<(i32, i32, i32, i32)> {
     parse_kwin_snapshot(json)?.logical_desktop_rect()
 }
 
@@ -959,7 +972,7 @@ impl TryFrom<KwinRawWindow> for WindowInfo {
     }
 }
 
-pub(crate) fn kwin_window_id_from_uuid(uuid: &str) -> u64 {
+fn kwin_window_id_from_uuid(uuid: &str) -> u64 {
     let normalized = normalize_kwin_uuid(uuid).unwrap_or_else(|| uuid.trim().to_ascii_lowercase());
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in normalized.as_bytes() {
@@ -1069,6 +1082,122 @@ fn gdbus_introspect_contains(
             ok: false,
             detail: error.to_string(),
         },
+    }
+}
+
+#[cfg(test)]
+mod adapter_tests {
+    use super::*;
+
+    #[test]
+    fn parses_kwin_windows_as_window_info() {
+        let uuid = "b4dfacf8-a559-43c9-8b1f-ecd5cfd78359";
+        let windows_json = r#"{
+          "backend": "kwin",
+          "desktopGeometry": {"x": 100, "y": -50, "width": 3840, "height": "2160"},
+          "windows": [
+            {
+              "uuid": "{b4dfacf8-a559-43c9-8b1f-ecd5cfd78359}",
+              "caption": "Codex",
+              "desktopFile": "codex-desktop",
+              "resourceClass": "codex-desktop",
+              "resourceName": "codex",
+              "pid": 68986,
+              "x": 10,
+              "y": 48,
+              "width": 1200,
+              "height": 800,
+              "workspace": 1,
+              "minimized": false,
+              "active": true,
+              "clientType": "wayland",
+              "normalWindow": true,
+              "desktopWindow": false,
+              "dock": false
+            },
+            {
+              "uuid": "{11111111-2222-3333-4444-555555555555}",
+              "caption": "Desktop",
+              "desktopWindow": true
+            }
+          ]
+        }"#;
+
+        let windows = parse_kwin_windows(windows_json).unwrap();
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].window_id, kwin_window_id_from_uuid(uuid));
+        assert_eq!(windows[0].title.as_deref(), Some("Codex"));
+        assert_eq!(windows[0].app_id.as_deref(), Some("codex-desktop"));
+        assert_eq!(windows[0].wm_class.as_deref(), Some("codex-desktop"));
+        assert_eq!(windows[0].pid, Some(68986));
+        assert_eq!(windows[0].bounds.as_ref().unwrap().x, Some(10));
+        assert_eq!(windows[0].bounds.as_ref().unwrap().height, 800);
+        assert_eq!(windows[0].workspace, Some(1));
+        assert!(windows[0].focused);
+        assert!(!windows[0].hidden);
+        assert_eq!(windows[0].client_type.as_deref(), Some("wayland"));
+        assert_eq!(windows[0].backend, KWIN_BACKEND);
+        assert_eq!(
+            parse_kwin_logical_desktop_rect(windows_json).unwrap(),
+            (100, -50, 3840, 2160)
+        );
+    }
+
+    #[test]
+    fn kwin_window_ids_are_stable_across_uuid_formats() {
+        let bare = "b4dfacf8-a559-43c9-8b1f-ecd5cfd78359";
+        let braced_upper = "{B4DFACF8-A559-43C9-8B1F-ECD5CFD78359}";
+
+        assert_eq!(
+            kwin_window_id_from_uuid(bare),
+            kwin_window_id_from_uuid(braced_upper)
+        );
+    }
+
+    #[test]
+    fn kwin_window_script_supports_plasma5_and_plasma6_window_apis() {
+        let script = kwin_window_script_source(
+            ":1.234",
+            "/dev/avifenesh/ComputerUseLinux/KWinWindowQuery/test",
+            "computer_use_linux_kwin_window_query_test",
+        )
+        .unwrap();
+
+        assert!(script.contains(r#"typeof workspace.windowList === "function""#));
+        assert!(script.contains("workspace.windowList()"));
+        assert!(script.contains(r#"typeof workspace.clientList === "function""#));
+        assert!(script.contains("workspace.clientList()"));
+        assert!(script.contains(
+            r#"activeWindow = "activeWindow" in workspace ? workspace.activeWindow : workspace.activeClient;"#
+        ));
+        assert!(script.contains("workspace.virtualScreenGeometry"));
+        assert!(script.contains("desktopGeometry: workspaceGeometry()"));
+        assert!(script.contains("var objectDescription = serialize(window)"));
+        assert!(script.contains(r#"objectClass === "KWin::XdgToplevelWindow""#));
+        assert!(script.contains(r#"objectClass === "KWin::X11Window""#));
+        assert!(!script.contains("objectClass: objectClass(window)"));
+    }
+
+    #[test]
+    fn kwin_activation_script_focuses_window_directly() {
+        let script = kwin_activate_script_source(
+            ":1.234",
+            "/dev/avifenesh/ComputerUseLinux/KWinWindowQuery/test",
+            "computer_use_linux_kwin_window_query_test",
+            "{B4DFACF8-A559-43C9-8B1F-ECD5CFD78359}",
+        )
+        .unwrap();
+
+        assert!(script.contains(r#"var targetUuid = "b4dfacf8-a559-43c9-8b1f-ecd5cfd78359";"#));
+        assert!(script.contains("targetWindow.minimized = false;"));
+        assert!(script.contains("workspace.activeWindow = targetWindow;"));
+        assert!(script.contains(r#"typeof workspace.clientList === "function""#));
+        assert!(script.contains("workspace.clientList()"));
+        assert!(script.contains(r#""activeWindow" in workspace"#));
+        assert!(script.contains("workspace.activeClient = targetWindow;"));
+        assert!(script.contains(r#""ReceiveResult""#));
+        assert!(!script.contains("WindowsRunner"));
     }
 }
 
