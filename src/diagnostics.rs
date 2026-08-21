@@ -327,9 +327,9 @@ fn capability_map_with_portal_keyboard(
     if windowing.hyprland.ok {
         window_backends.push("hyprland".to_string());
     }
-    // i3 and the generic X11/EWMH backend have no dedicated WindowingReport
-    // field; read them from the probe map (tried last) so the capability list
-    // matches the backends the registry will actually use.
+    // i3 and the generic X11/EWMH backend have no dedicated
+    // WindowingReport field; read them from the probe map so the capability
+    // list matches the registry order.
     if windowing
         .backends
         .get(I3_BACKEND)
@@ -342,7 +342,7 @@ fn capability_map_with_portal_keyboard(
     }
 
     let mut accessibility_backends = Vec::new();
-    if accessibility.at_spi_enabled.ok || accessibility.toolkit_accessibility.ok {
+    if can_build_accessibility_tree(accessibility) {
         accessibility_backends.push("at_spi".to_string());
     }
 
@@ -1458,6 +1458,26 @@ mod tests {
         );
 
         assert!(can_build_accessibility_tree(&report));
+    }
+
+    #[test]
+    fn capability_map_advertises_only_a_buildable_accessibility_tree() {
+        let platform = platform_report();
+        let portals = portal_report(Check::fail("missing"));
+        let windowing = windowing_report(false, false);
+        let input = input_report(false);
+
+        for accessibility in [
+            accessibility_report(Check::fail("permission denied"), Check::ok("true")),
+            accessibility_report(
+                Check::ok("('unix:path=/run/user/1000/at-spi/bus',)"),
+                Check::ok("false"),
+            ),
+        ] {
+            let capabilities =
+                capability_map(&platform, &portals, &accessibility, &windowing, &input);
+            assert!(capabilities.accessibility.is_empty());
+        }
     }
 
     #[test]

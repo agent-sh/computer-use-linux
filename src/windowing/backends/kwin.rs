@@ -7,11 +7,16 @@ use serde::Deserialize;
 use std::{
     fs::{self, OpenOptions},
     io::Write,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::mpsc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tokio::time::{sleep, timeout};
-use zbus::Proxy;
+use zbus::{
+    message::Header,
+    names::{BusName, OwnedUniqueName},
+    Proxy,
+};
 
 pub const KWIN_BACKEND: &str = "kwin";
 const KWIN_SCRIPT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -20,6 +25,7 @@ const KWIN_SCRIPTING_OBJECT_PATH: &str = "/Scripting";
 const KWIN_SCRIPTING_INTERFACE: &str = "org.kde.kwin.Scripting";
 const KWIN_CALLBACK_OBJECT_PATH_PREFIX: &str = "/dev/avifenesh/ComputerUseLinux/KWinWindowQuery";
 const KWIN_CALLBACK_INTERFACE: &str = "dev.avifenesh.ComputerUseLinux.KWinWindowQuery";
+static KWIN_PLUGIN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn probe() -> BackendProbe {
     let check = gdbus_introspect_contains(
@@ -79,9 +85,12 @@ struct KwinScriptResult {
 
 async fn call_kwin_activate_script(uuid: &str) -> Result<()> {
     let uuid = uuid.to_string();
-    let json = call_kwin_script(move |service_name, callback_object_path, plugin_name| {
-        write_kwin_activate_script(service_name, callback_object_path, plugin_name, &uuid)
-    })
+    let json = call_kwin_script(
+        KwinCallbackKind::Result,
+        move |service_name, callback_object_path, plugin_name| {
+            write_kwin_activate_script(service_name, callback_object_path, plugin_name, &uuid)
+        },
+    )
     .await?;
     let result: KwinScriptResult =
         serde_json::from_str(&json).context("failed to parse KWin activation script output")?;
@@ -97,37 +106,92 @@ async fn call_kwin_activate_script(uuid: &str) -> Result<()> {
 }
 
 async fn call_kwin_window_script() -> Result<String> {
-    call_kwin_script(write_kwin_window_script).await
+    call_kwin_script(KwinCallbackKind::Windows, write_kwin_window_script).await
 }
 
-async fn call_kwin_script<F>(write_script: F) -> Result<String>
+async fn call_kwin_script<F>(expected_kind: KwinCallbackKind, write_script: F) -> Result<String>
 where
     F: FnOnce(&str, &str, &str) -> Result<std::path::PathBuf>,
 {
     hydrate_session_bus_env();
 
-    let connection = zbus::Connection::session()
+    let connection = timeout(KWIN_SCRIPT_TIMEOUT, zbus::Connection::session())
         .await
+        .context("timed out while connecting to the session bus for KWin scripting")?
         .context("failed to connect to session bus")?;
+
+    call_kwin_script_on_connection(connection, expected_kind, write_script, KWIN_SCRIPT_TIMEOUT)
+        .await
+}
+
+async fn call_kwin_script_on_connection<F>(
+    connection: zbus::Connection,
+    expected_kind: KwinCallbackKind,
+    write_script: F,
+    transaction_timeout: Duration,
+) -> Result<String>
+where
+    F: FnOnce(&str, &str, &str) -> Result<std::path::PathBuf>,
+{
+    call_kwin_script_on_connection_with_plugin_name(
+        connection,
+        expected_kind,
+        write_script,
+        transaction_timeout,
+        temporary_kwin_plugin_name()?,
+    )
+    .await
+}
+
+async fn call_kwin_script_on_connection_with_plugin_name<F>(
+    connection: zbus::Connection,
+    expected_kind: KwinCallbackKind,
+    write_script: F,
+    transaction_timeout: Duration,
+    plugin_name: String,
+) -> Result<String>
+where
+    F: FnOnce(&str, &str, &str) -> Result<std::path::PathBuf>,
+{
     let unique_name = connection
         .unique_name()
         .context("session bus did not assign a unique name")?
         .to_string();
-    let plugin_name = temporary_kwin_plugin_name();
     let callback_object_path = format!("{KWIN_CALLBACK_OBJECT_PATH_PREFIX}/{plugin_name}");
-    let (sender, receiver) = mpsc::channel();
     let mut cleanup = KwinScriptCleanup::new(
         connection.clone(),
         plugin_name.clone(),
         callback_object_path.clone(),
     );
-    connection
-        .object_server()
-        .at(callback_object_path.as_str(), KwinWindowCallback { sender })
-        .await
-        .context("failed to register temporary KWin callback object")?;
 
-    let result = async {
+    let transaction = async {
+        let dbus_proxy = zbus::fdo::DBusProxy::new(&connection)
+            .await
+            .context("failed to create session-bus identity proxy")?;
+        let expected_sender = dbus_proxy
+            .get_name_owner(BusName::try_from(KWIN_SCRIPTING_SERVICE)?)
+            .await
+            .context("failed to resolve the KWin session-bus owner")?;
+        let (sender, receiver) = mpsc::channel();
+        let callback_registered = connection
+            .object_server()
+            .at(
+                callback_object_path.as_str(),
+                KwinWindowCallback {
+                    sender,
+                    expected_sender,
+                    expected_kind,
+                    plugin_name: plugin_name.clone(),
+                    delivered: AtomicBool::new(false),
+                },
+            )
+            .await
+            .context("failed to register temporary KWin callback object")?;
+        if !callback_registered {
+            bail!("temporary KWin callback object path was already registered");
+        }
+        cleanup.owns_callback = true;
+
         let path = write_script(&unique_name, &callback_object_path, &plugin_name)?;
         cleanup.script_path = Some(path.clone());
         let scripting_proxy = Proxy::new(
@@ -154,21 +218,22 @@ where
             .await
             .context("KWin start failed after loading the temporary script")?;
 
-        timeout(KWIN_SCRIPT_TIMEOUT, async move {
-            loop {
-                match receiver.try_recv() {
-                    Ok(json) => return Ok(json),
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        bail!("KWin temporary script callback disconnected before returning data");
-                    }
-                    Err(mpsc::TryRecvError::Empty) => sleep(Duration::from_millis(20)).await,
+        loop {
+            match receiver.try_recv() {
+                Ok(json) => return Ok(json),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    bail!("KWin temporary script callback disconnected before returning data");
                 }
+                Err(mpsc::TryRecvError::Empty) => sleep(Duration::from_millis(20)).await,
             }
-        })
-        .await
-        .context("KWin temporary script did not return data before timeout")?
-    }
-    .await;
+        }
+    };
+    let result = match timeout(transaction_timeout, transaction).await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow::anyhow!(
+            "KWin temporary script transaction timed out"
+        )),
+    };
     cleanup.run().await;
     result
 }
@@ -178,6 +243,7 @@ struct KwinScriptCleanup {
     plugin_name: String,
     callback_object_path: String,
     script_path: Option<std::path::PathBuf>,
+    owns_callback: bool,
     armed: bool,
 }
 
@@ -192,6 +258,7 @@ impl KwinScriptCleanup {
             plugin_name,
             callback_object_path,
             script_path: None,
+            owns_callback: false,
             armed: true,
         }
     }
@@ -202,9 +269,11 @@ impl KwinScriptCleanup {
             self.plugin_name.clone(),
             self.callback_object_path.clone(),
             self.script_path.clone(),
+            self.owns_callback,
         )
         .await;
         self.script_path = None;
+        self.owns_callback = false;
         self.armed = false;
     }
 }
@@ -218,12 +287,14 @@ impl Drop for KwinScriptCleanup {
         let plugin_name = self.plugin_name.clone();
         let callback_object_path = self.callback_object_path.clone();
         let script_path = self.script_path.take();
+        let owns_callback = self.owns_callback;
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(cleanup_kwin_script(
                 connection,
                 plugin_name,
                 callback_object_path,
                 script_path,
+                owns_callback,
             ));
         }
     }
@@ -234,57 +305,140 @@ async fn cleanup_kwin_script(
     plugin_name: String,
     callback_object_path: String,
     script_path: Option<std::path::PathBuf>,
+    owns_callback: bool,
 ) {
-    let _ = timeout(Duration::from_secs(1), async {
-        if let Ok(scripting_proxy) = Proxy::new(
-            &connection,
-            KWIN_SCRIPTING_SERVICE,
-            KWIN_SCRIPTING_OBJECT_PATH,
-            KWIN_SCRIPTING_INTERFACE,
-        )
-        .await
-        {
-            let _: Result<bool, _> = scripting_proxy
-                .call("unloadScript", &(plugin_name.as_str()))
-                .await;
-        }
-    })
-    .await;
-    let _: Result<bool, _> = connection
-        .object_server()
-        .remove::<KwinWindowCallback, _>(callback_object_path.as_str())
+    if owns_callback {
+        let _ = timeout(Duration::from_secs(1), async {
+            if let Ok(scripting_proxy) = Proxy::new(
+                &connection,
+                KWIN_SCRIPTING_SERVICE,
+                KWIN_SCRIPTING_OBJECT_PATH,
+                KWIN_SCRIPTING_INTERFACE,
+            )
+            .await
+            {
+                let _: Result<bool, _> = scripting_proxy
+                    .call("unloadScript", &(plugin_name.as_str()))
+                    .await;
+            }
+        })
         .await;
+        let _: Result<bool, _> = connection
+            .object_server()
+            .remove::<KwinWindowCallback, _>(callback_object_path.as_str())
+            .await;
+    }
     if let Some(script_path) = script_path {
         let _ = fs::remove_file(script_path);
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KwinCallbackKind {
+    Windows,
+    Result,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KwinCallbackEnvelope {
+    backend: String,
+    plugin_name: String,
+}
+
 struct KwinWindowCallback {
     sender: mpsc::Sender<String>,
+    expected_sender: OwnedUniqueName,
+    expected_kind: KwinCallbackKind,
+    plugin_name: String,
+    delivered: AtomicBool,
+}
+
+impl KwinWindowCallback {
+    fn accept(
+        &self,
+        actual_sender: Option<&str>,
+        kind: KwinCallbackKind,
+        json: &str,
+    ) -> zbus::fdo::Result<()> {
+        if actual_sender != Some(self.expected_sender.as_str()) {
+            return Err(zbus::fdo::Error::AccessDenied(
+                "KWin callback sender did not own org.kde.KWin".to_string(),
+            ));
+        }
+        if kind != self.expected_kind {
+            return Err(zbus::fdo::Error::AccessDenied(
+                "KWin callback method did not match the requested operation".to_string(),
+            ));
+        }
+        let envelope: KwinCallbackEnvelope = serde_json::from_str(json).map_err(|error| {
+            zbus::fdo::Error::InvalidArgs(format!("invalid KWin callback payload: {error}"))
+        })?;
+        if envelope.backend != KWIN_BACKEND || envelope.plugin_name != self.plugin_name {
+            return Err(zbus::fdo::Error::AccessDenied(
+                "KWin callback payload did not match the active script".to_string(),
+            ));
+        }
+        if self
+            .delivered
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(zbus::fdo::Error::AccessDenied(
+                "KWin callback response was already delivered".to_string(),
+            ));
+        }
+        self.sender
+            .send(json.to_string())
+            .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))
+    }
 }
 
 #[zbus::interface(name = "dev.avifenesh.ComputerUseLinux.KWinWindowQuery")]
 impl KwinWindowCallback {
-    fn receive_windows(&self, json: &str) -> zbus::fdo::Result<()> {
-        self.sender
-            .send(json.to_string())
-            .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))
+    fn receive_windows(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        json: &str,
+    ) -> zbus::fdo::Result<()> {
+        self.accept(
+            header.sender().map(|sender| sender.as_str()),
+            KwinCallbackKind::Windows,
+            json,
+        )
     }
 
-    fn receive_result(&self, json: &str) -> zbus::fdo::Result<()> {
-        self.sender
-            .send(json.to_string())
-            .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))
+    fn receive_result(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        json: &str,
+    ) -> zbus::fdo::Result<()> {
+        self.accept(
+            header.sender().map(|sender| sender.as_str()),
+            KwinCallbackKind::Result,
+            json,
+        )
     }
 }
 
-fn temporary_kwin_plugin_name() -> String {
+fn temporary_kwin_plugin_name() -> Result<String> {
     let pid = std::process::id();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    format!("computer_use_linux_kwin_window_query_{pid}_{nanos}")
+    let sequence = KWIN_PLUGIN_SEQUENCE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .map_err(|_| anyhow::anyhow!("temporary KWin plugin sequence exhausted"))?;
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce).map_err(|error| {
+        anyhow::anyhow!("failed to generate temporary KWin plugin nonce: {error}")
+    })?;
+    let nonce = nonce
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!(
+        "computer_use_linux_kwin_window_query_{pid}_{sequence}_{nonce}"
+    ))
 }
 
 fn write_kwin_window_script(
@@ -296,7 +450,7 @@ fn write_kwin_window_script(
     write_kwin_script_file(plugin_name, &script)
 }
 
-pub(crate) fn kwin_window_script_source(
+fn kwin_window_script_source(
     service_name: &str,
     callback_object_path: &str,
     plugin_name: &str,
@@ -395,6 +549,19 @@ pub(crate) fn kwin_window_script_source(
         if (read(window, "x11Client")) {{
             return "x11";
         }}
+        var objectDescription = serialize(window);
+        if (typeof objectDescription === "string") {{
+            var separator = objectDescription.indexOf("(");
+            var objectClass = (separator >= 0
+                ? objectDescription.slice(0, separator)
+                : objectDescription).trim();
+            if (objectClass === "KWin::XdgToplevelWindow") {{
+                return "wayland";
+            }}
+            if (objectClass === "KWin::X11Window") {{
+                return "x11";
+            }}
+        }}
         return null;
     }}
 
@@ -469,7 +636,7 @@ fn write_kwin_activate_script(
     write_kwin_script_file(plugin_name, &script)
 }
 
-pub(crate) fn kwin_activate_script_source(
+fn kwin_activate_script_source(
     service_name: &str,
     callback_object_path: &str,
     plugin_name: &str,
@@ -674,7 +841,7 @@ fn write_kwin_script_file(plugin_name: &str, script: &str) -> Result<std::path::
     bail!("failed to create a unique temporary KWin script path for {plugin_name}")
 }
 
-pub(crate) fn parse_kwin_windows(json: &str) -> Result<Vec<WindowInfo>> {
+fn parse_kwin_windows(json: &str) -> Result<Vec<WindowInfo>> {
     let snapshot = parse_kwin_snapshot(json)?;
     let mut windows = snapshot
         .windows
@@ -689,7 +856,7 @@ pub(crate) fn parse_kwin_windows(json: &str) -> Result<Vec<WindowInfo>> {
     Ok(windows)
 }
 
-pub(crate) fn parse_kwin_logical_desktop_rect(json: &str) -> Result<(i32, i32, i32, i32)> {
+fn parse_kwin_logical_desktop_rect(json: &str) -> Result<(i32, i32, i32, i32)> {
     parse_kwin_snapshot(json)?.logical_desktop_rect()
 }
 
@@ -805,7 +972,7 @@ impl TryFrom<KwinRawWindow> for WindowInfo {
     }
 }
 
-pub(crate) fn kwin_window_id_from_uuid(uuid: &str) -> u64 {
+fn kwin_window_id_from_uuid(uuid: &str) -> u64 {
     let normalized = normalize_kwin_uuid(uuid).unwrap_or_else(|| uuid.trim().to_ascii_lowercase());
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in normalized.as_bytes() {
@@ -915,5 +1082,429 @@ fn gdbus_introspect_contains(
             ok: false,
             detail: error.to_string(),
         },
+    }
+}
+
+#[cfg(test)]
+mod adapter_tests {
+    use super::*;
+
+    #[test]
+    fn parses_kwin_windows_as_window_info() {
+        let uuid = "b4dfacf8-a559-43c9-8b1f-ecd5cfd78359";
+        let windows_json = r#"{
+          "backend": "kwin",
+          "desktopGeometry": {"x": 100, "y": -50, "width": 3840, "height": "2160"},
+          "windows": [
+            {
+              "uuid": "{b4dfacf8-a559-43c9-8b1f-ecd5cfd78359}",
+              "caption": "Codex",
+              "desktopFile": "codex-desktop",
+              "resourceClass": "codex-desktop",
+              "resourceName": "codex",
+              "pid": 68986,
+              "x": 10,
+              "y": 48,
+              "width": 1200,
+              "height": 800,
+              "workspace": 1,
+              "minimized": false,
+              "active": true,
+              "clientType": "wayland",
+              "normalWindow": true,
+              "desktopWindow": false,
+              "dock": false
+            },
+            {
+              "uuid": "{11111111-2222-3333-4444-555555555555}",
+              "caption": "Desktop",
+              "desktopWindow": true
+            }
+          ]
+        }"#;
+
+        let windows = parse_kwin_windows(windows_json).unwrap();
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].window_id, kwin_window_id_from_uuid(uuid));
+        assert_eq!(windows[0].title.as_deref(), Some("Codex"));
+        assert_eq!(windows[0].app_id.as_deref(), Some("codex-desktop"));
+        assert_eq!(windows[0].wm_class.as_deref(), Some("codex-desktop"));
+        assert_eq!(windows[0].pid, Some(68986));
+        assert_eq!(windows[0].bounds.as_ref().unwrap().x, Some(10));
+        assert_eq!(windows[0].bounds.as_ref().unwrap().height, 800);
+        assert_eq!(windows[0].workspace, Some(1));
+        assert!(windows[0].focused);
+        assert!(!windows[0].hidden);
+        assert_eq!(windows[0].client_type.as_deref(), Some("wayland"));
+        assert_eq!(windows[0].backend, KWIN_BACKEND);
+        assert_eq!(
+            parse_kwin_logical_desktop_rect(windows_json).unwrap(),
+            (100, -50, 3840, 2160)
+        );
+    }
+
+    #[test]
+    fn kwin_window_ids_are_stable_across_uuid_formats() {
+        let bare = "b4dfacf8-a559-43c9-8b1f-ecd5cfd78359";
+        let braced_upper = "{B4DFACF8-A559-43C9-8B1F-ECD5CFD78359}";
+
+        assert_eq!(
+            kwin_window_id_from_uuid(bare),
+            kwin_window_id_from_uuid(braced_upper)
+        );
+    }
+
+    #[test]
+    fn kwin_window_script_supports_plasma5_and_plasma6_window_apis() {
+        let script = kwin_window_script_source(
+            ":1.234",
+            "/dev/avifenesh/ComputerUseLinux/KWinWindowQuery/test",
+            "computer_use_linux_kwin_window_query_test",
+        )
+        .unwrap();
+
+        assert!(script.contains(r#"typeof workspace.windowList === "function""#));
+        assert!(script.contains("workspace.windowList()"));
+        assert!(script.contains(r#"typeof workspace.clientList === "function""#));
+        assert!(script.contains("workspace.clientList()"));
+        assert!(script.contains(
+            r#"activeWindow = "activeWindow" in workspace ? workspace.activeWindow : workspace.activeClient;"#
+        ));
+        assert!(script.contains("workspace.virtualScreenGeometry"));
+        assert!(script.contains("desktopGeometry: workspaceGeometry()"));
+        assert!(script.contains("var objectDescription = serialize(window)"));
+        assert!(script.contains(r#"objectClass === "KWin::XdgToplevelWindow""#));
+        assert!(script.contains(r#"objectClass === "KWin::X11Window""#));
+        assert!(!script.contains("objectClass: objectClass(window)"));
+    }
+
+    #[test]
+    fn kwin_activation_script_focuses_window_directly() {
+        let script = kwin_activate_script_source(
+            ":1.234",
+            "/dev/avifenesh/ComputerUseLinux/KWinWindowQuery/test",
+            "computer_use_linux_kwin_window_query_test",
+            "{B4DFACF8-A559-43C9-8B1F-ECD5CFD78359}",
+        )
+        .unwrap();
+
+        assert!(script.contains(r#"var targetUuid = "b4dfacf8-a559-43c9-8b1f-ecd5cfd78359";"#));
+        assert!(script.contains("targetWindow.minimized = false;"));
+        assert!(script.contains("workspace.activeWindow = targetWindow;"));
+        assert!(script.contains(r#"typeof workspace.clientList === "function""#));
+        assert!(script.contains("workspace.clientList()"));
+        assert!(script.contains(r#""activeWindow" in workspace"#));
+        assert!(script.contains("workspace.activeClient = targetWindow;"));
+        assert!(script.contains(r#""ReceiveResult""#));
+        assert!(!script.contains("WindowsRunner"));
+    }
+}
+
+#[cfg(test)]
+mod callback_tests {
+    use super::*;
+
+    fn callback() -> (KwinWindowCallback, mpsc::Receiver<String>) {
+        let (sender, receiver) = mpsc::channel();
+        (
+            KwinWindowCallback {
+                sender,
+                expected_sender: OwnedUniqueName::try_from(":1.42").unwrap(),
+                expected_kind: KwinCallbackKind::Windows,
+                plugin_name: "computer_use_linux_kwin_window_query_test".to_string(),
+                delivered: AtomicBool::new(false),
+            },
+            receiver,
+        )
+    }
+
+    #[test]
+    fn callback_accepts_only_the_kwin_owner_requested_method_nonce_and_first_response() {
+        let (callback, receiver) = callback();
+        let valid = r#"{"backend":"kwin","pluginName":"computer_use_linux_kwin_window_query_test","windows":[]}"#;
+
+        assert!(callback
+            .accept(Some(":1.99"), KwinCallbackKind::Windows, valid)
+            .is_err());
+        assert!(receiver.try_recv().is_err());
+
+        assert!(callback
+            .accept(Some(":1.42"), KwinCallbackKind::Result, valid)
+            .is_err());
+        assert!(receiver.try_recv().is_err());
+
+        for payload in [
+            "not-json",
+            r#"{"backend":"other","pluginName":"computer_use_linux_kwin_window_query_test","windows":[]}"#,
+            r#"{"backend":"kwin","pluginName":"wrong","windows":[]}"#,
+        ] {
+            assert!(callback
+                .accept(Some(":1.42"), KwinCallbackKind::Windows, payload)
+                .is_err());
+            assert!(receiver.try_recv().is_err());
+        }
+
+        callback
+            .accept(Some(":1.42"), KwinCallbackKind::Windows, valid)
+            .unwrap();
+        assert_eq!(receiver.try_recv().unwrap(), valid);
+
+        assert!(callback
+            .accept(Some(":1.42"), KwinCallbackKind::Windows, valid)
+            .is_err());
+        assert!(receiver.try_recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+    use std::{
+        future::pending,
+        io::{BufRead, BufReader},
+        process::{Child, Command, Stdio},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
+        time::Instant,
+    };
+
+    #[derive(Clone, Copy)]
+    enum FakeKwinBehavior {
+        HangLoad,
+        HangStart,
+        NoCallback,
+    }
+
+    struct FakeKwinScripting {
+        behavior: FakeKwinBehavior,
+        load_calls: Arc<AtomicUsize>,
+        start_calls: Arc<AtomicUsize>,
+        unload_calls: Arc<AtomicUsize>,
+    }
+
+    #[zbus::interface(name = "org.kde.kwin.Scripting")]
+    impl FakeKwinScripting {
+        #[zbus(name = "loadScript")]
+        async fn load_script(&self, _path: &str, _plugin_name: &str) -> i32 {
+            self.load_calls.fetch_add(1, Ordering::SeqCst);
+            if matches!(self.behavior, FakeKwinBehavior::HangLoad) {
+                pending::<()>().await;
+            }
+            1
+        }
+
+        #[zbus(name = "start")]
+        async fn start(&self) {
+            self.start_calls.fetch_add(1, Ordering::SeqCst);
+            if matches!(self.behavior, FakeKwinBehavior::HangStart) {
+                pending::<()>().await;
+            }
+        }
+
+        #[zbus(name = "unloadScript")]
+        fn unload_script(&self, _plugin_name: &str) -> bool {
+            self.unload_calls.fetch_add(1, Ordering::SeqCst);
+            true
+        }
+    }
+
+    struct TestSessionBus {
+        child: Child,
+        address: String,
+    }
+
+    impl TestSessionBus {
+        fn start() -> Self {
+            let mut child = Command::new("dbus-daemon")
+                .args(["--session", "--nofork", "--nopidfile", "--print-address=1"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("start private dbus-daemon");
+            let mut address = String::new();
+            BufReader::new(child.stdout.take().expect("private bus stdout"))
+                .read_line(&mut address)
+                .expect("read private bus address");
+            assert!(!address.trim().is_empty(), "private bus emitted no address");
+            Self {
+                child,
+                address: address.trim().to_string(),
+            }
+        }
+    }
+
+    impl Drop for TestSessionBus {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    async fn assert_transaction_timeout_cleans_up(behavior: FakeKwinBehavior) {
+        let bus = TestSessionBus::start();
+        let load_calls = Arc::new(AtomicUsize::new(0));
+        let start_calls = Arc::new(AtomicUsize::new(0));
+        let unload_calls = Arc::new(AtomicUsize::new(0));
+        let service_connection = zbus::connection::Builder::address(bus.address.as_str())
+            .unwrap()
+            .name(KWIN_SCRIPTING_SERVICE)
+            .unwrap()
+            .serve_at(
+                KWIN_SCRIPTING_OBJECT_PATH,
+                FakeKwinScripting {
+                    behavior,
+                    load_calls: Arc::clone(&load_calls),
+                    start_calls: Arc::clone(&start_calls),
+                    unload_calls: Arc::clone(&unload_calls),
+                },
+            )
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let client_connection = zbus::connection::Builder::address(bus.address.as_str())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let callback_path = Arc::new(Mutex::new(None::<String>));
+        let script_path = Arc::new(Mutex::new(None::<std::path::PathBuf>));
+        let callback_path_for_writer = Arc::clone(&callback_path);
+        let script_path_for_writer = Arc::clone(&script_path);
+        let started = Instant::now();
+
+        let error = call_kwin_script_on_connection(
+            client_connection.clone(),
+            KwinCallbackKind::Windows,
+            move |service_name, object_path, plugin_name| {
+                let path = write_kwin_window_script(service_name, object_path, plugin_name)?;
+                *callback_path_for_writer.lock().unwrap() = Some(object_path.to_string());
+                *script_path_for_writer.lock().unwrap() = Some(path.clone());
+                Ok(path)
+            },
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(unload_calls.load(Ordering::SeqCst) >= 1);
+
+        let path = script_path.lock().unwrap().clone().unwrap();
+        assert!(!path.exists(), "temporary KWin script was not removed");
+        let object_path = callback_path.lock().unwrap().clone().unwrap();
+        assert!(client_connection
+            .object_server()
+            .interface::<_, KwinWindowCallback>(object_path.as_str())
+            .await
+            .is_err());
+
+        drop(service_connection);
+        drop(client_connection);
+        drop(bus);
+    }
+
+    #[tokio::test]
+    async fn transaction_times_out_and_cleans_up_when_load_script_never_replies() {
+        assert_transaction_timeout_cleans_up(FakeKwinBehavior::HangLoad).await;
+    }
+
+    #[tokio::test]
+    async fn transaction_times_out_and_cleans_up_when_start_never_replies() {
+        assert_transaction_timeout_cleans_up(FakeKwinBehavior::HangStart).await;
+    }
+
+    #[tokio::test]
+    async fn transaction_times_out_and_cleans_up_when_callback_never_arrives() {
+        assert_transaction_timeout_cleans_up(FakeKwinBehavior::NoCallback).await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_callback_path_fails_without_disturbing_its_owner() {
+        let bus = TestSessionBus::start();
+        let load_calls = Arc::new(AtomicUsize::new(0));
+        let start_calls = Arc::new(AtomicUsize::new(0));
+        let unload_calls = Arc::new(AtomicUsize::new(0));
+        let service_connection = zbus::connection::Builder::address(bus.address.as_str())
+            .unwrap()
+            .name(KWIN_SCRIPTING_SERVICE)
+            .unwrap()
+            .serve_at(
+                KWIN_SCRIPTING_OBJECT_PATH,
+                FakeKwinScripting {
+                    behavior: FakeKwinBehavior::NoCallback,
+                    load_calls: Arc::clone(&load_calls),
+                    start_calls: Arc::clone(&start_calls),
+                    unload_calls: Arc::clone(&unload_calls),
+                },
+            )
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let client_connection = zbus::connection::Builder::address(bus.address.as_str())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let plugin_name = "computer_use_linux_kwin_window_query_duplicate";
+        let callback_path = format!("{KWIN_CALLBACK_OBJECT_PATH_PREFIX}/{plugin_name}");
+        let expected_sender = service_connection.unique_name().unwrap().to_owned();
+        let expected_sender_name = expected_sender.to_string();
+        let (sender, receiver) = mpsc::channel();
+        assert!(client_connection
+            .object_server()
+            .at(
+                callback_path.as_str(),
+                KwinWindowCallback {
+                    sender,
+                    expected_sender,
+                    expected_kind: KwinCallbackKind::Windows,
+                    plugin_name: plugin_name.to_string(),
+                    delivered: AtomicBool::new(false),
+                },
+            )
+            .await
+            .unwrap());
+
+        let error = call_kwin_script_on_connection_with_plugin_name(
+            client_connection.clone(),
+            KwinCallbackKind::Windows,
+            |_, _, _| bail!("script writer must not run after a callback collision"),
+            Duration::from_millis(100),
+            plugin_name.to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("already registered"));
+        assert_eq!(load_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(start_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(unload_calls.load(Ordering::SeqCst), 0);
+
+        let callback = client_connection
+            .object_server()
+            .interface::<_, KwinWindowCallback>(callback_path.as_str())
+            .await
+            .expect("the original callback must remain registered");
+        let payload = format!(r#"{{"backend":"kwin","pluginName":"{plugin_name}","windows":[]}}"#);
+        callback
+            .get()
+            .await
+            .accept(
+                Some(expected_sender_name.as_str()),
+                KwinCallbackKind::Windows,
+                &payload,
+            )
+            .unwrap();
+        assert_eq!(receiver.try_recv().unwrap(), payload);
+
+        drop(service_connection);
+        drop(client_connection);
+        drop(bus);
     }
 }

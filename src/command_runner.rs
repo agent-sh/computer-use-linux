@@ -42,6 +42,10 @@ pub(crate) async fn output_with_stdin(
     output_with_input(command, action, timeout, Some(input)).await
 }
 
+pub(crate) fn output_blocking(command: &mut StdCommand, action: &str) -> Result<Output> {
+    output_blocking_with_timeout(command, action, COMMAND_TIMEOUT)
+}
+
 pub(crate) fn output_blocking_with_timeout(
     command: &mut StdCommand,
     action: &str,
@@ -598,6 +602,41 @@ mod tests {
         assert!(output.status.success());
         assert!(output.stdout.len() >= 200_000);
         assert!(output.stderr.len() >= 200_000);
+    }
+
+    #[tokio::test]
+    async fn default_blocking_timeout_kills_the_process_group() {
+        let leader_path = temporary_pid_path("blocking-default-leader");
+        let descendant_path = temporary_pid_path("blocking-default-descendant");
+        let mut command = StdCommand::new("sh");
+        command.args([
+            "-c",
+            &format!(
+                "printf %s $$ > '{}'; sleep 60 & printf %s $! > '{}'; wait",
+                leader_path.display(),
+                descendant_path.display()
+            ),
+        ]);
+        let started = Instant::now();
+
+        let error = output_blocking(&mut command, "run blocking process tree").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("timed out after 2000 ms while trying to run blocking process tree"));
+        assert!(started.elapsed() < Duration::from_secs(4));
+        let leader = fs::read_to_string(&leader_path)
+            .expect("leader should record its pid")
+            .parse()
+            .expect("leader pid should be numeric");
+        let descendant = fs::read_to_string(&descendant_path)
+            .expect("descendant should record its pid")
+            .parse()
+            .expect("descendant pid should be numeric");
+        wait_for_process_exit(leader).await;
+        wait_for_process_exit(descendant).await;
+        let _ = fs::remove_file(leader_path);
+        let _ = fs::remove_file(descendant_path);
     }
 
     fn temporary_pid_path(label: &str) -> PathBuf {

@@ -570,24 +570,25 @@ impl ComputerUseLinux {
         }
     }
 
-    /// Try a coordinate click through the absolute uinput pointer. `Some(ok)` if
-    /// the backend was used; `None` to fall through to portal / ydotool.
+    /// Try a coordinate click through the absolute uinput pointer. Returns the
+    /// requested and emitted coordinates from that backend, or `None` to fall
+    /// through.
     async fn try_abs_click(
         &self,
         x: i32,
         y: i32,
         button: Option<&str>,
         count: u32,
-    ) -> Option<bool> {
+    ) -> Option<crate::abs_pointer::PointerLanding> {
+        let btn = crate::abs_pointer::PointerButton::from_name(button)?;
         if !self.ensure_abs_pointer().await {
             return None;
         }
-        let btn = crate::abs_pointer::PointerButton::from_name(button);
         let abs_pointer = Arc::clone(&self.abs_pointer);
         tokio::task::spawn_blocking(move || {
             let mut guard = abs_pointer.lock().ok()?;
             let pointer = guard.as_mut()?;
-            Some(pointer.click(x, y, btn, count).is_ok())
+            pointer.click(x, y, btn, count).ok()
         })
         .await
         .ok()
@@ -740,11 +741,9 @@ impl ComputerUseLinux {
         // relative-only device (faked `--absolute` via pin-to-corner + relative
         // move, which acceleration + fractional scaling distort) and unlike the
         // portal (per-monitor coordinate scaling + an approval dialog), the
-        // absolute pointer lands exactly at the screenshot pixel.
-        // Off-screen coordinates "succeed" at the uinput layer while landing on
-        // no visible pixel — surface that instead of a silent no-op.
-        let off_screen_note = self.off_screen_note_for_point(x, y).await;
-        if self
+        // absolute pointer uses screenshot-pixel coordinates directly and
+        // reports the point it emitted after desktop-edge clamping.
+        if let Some(landing) = self
             .try_abs_click(
                 x,
                 y,
@@ -752,7 +751,6 @@ impl ComputerUseLinux {
                 params.click_count.unwrap_or(1).clamp(1, 10),
             )
             .await
-            == Some(true)
         {
             return Json(with_notes(
                 ActionOutput {
@@ -762,9 +760,10 @@ impl ComputerUseLinux {
                     message: "Action sent through the uinput absolute pointer.".to_string(),
                     received,
                 },
-                off_screen_note.clone(),
+                abs_pointer_clamp_note(landing),
             ));
         }
+        let off_screen_note = self.off_screen_note_for_point(x, y).await;
         if let Some(session) = self.cached_portal_pointer_session() {
             let Some((portal_x, portal_y)) =
                 portal_target_point.or_else(|| self.logical_portal_point(&session, x, y))
@@ -4035,6 +4034,15 @@ fn with_notes(mut output: ActionOutput, notes: impl IntoIterator<Item = String>)
     output
 }
 
+fn abs_pointer_clamp_note(landing: crate::abs_pointer::PointerLanding) -> Option<String> {
+    (landing.requested != landing.emitted).then(|| {
+        format!(
+            "Requested coordinate {},{} was clamped to {},{} by the uinput absolute pointer.",
+            landing.requested.0, landing.requested.1, landing.emitted.0, landing.emitted.1
+        )
+    })
+}
+
 fn focus_satisfies_target(focus: &WindowFocusResult, target: &WindowTarget) -> bool {
     if target.requires_exact_focus() {
         focus.exact_window_focused
@@ -5289,6 +5297,27 @@ mod tests {
             assert!(error.contains("inside target-window bounds"));
             assert_eq!((params.x, params.y), (Some(x), Some(y)));
         }
+    }
+
+    #[test]
+    fn absolute_pointer_note_reports_the_emitted_coordinate() {
+        assert_eq!(
+            abs_pointer_clamp_note(crate::abs_pointer::PointerLanding {
+                requested: (1920, 1080),
+                emitted: (1919, 1079),
+            }),
+            Some(
+                "Requested coordinate 1920,1080 was clamped to 1919,1079 by the uinput absolute pointer."
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            abs_pointer_clamp_note(crate::abs_pointer::PointerLanding {
+                requested: (640, 480),
+                emitted: (640, 480),
+            }),
+            None
+        );
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use crate::command_runner;
 use crate::diagnostics::hydrate_session_bus_env;
 use crate::identity;
 use crate::windowing::backends::gnome::list_extension_windows;
@@ -38,10 +39,15 @@ pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
     hydrate_session_bus_env();
 
     let extension_dir = extension_dir();
+    let extension_was_enabled = gnome_extension_enabled();
     let mut wrote_files = false;
+    let mut changed_files = false;
     let mut write_error = None;
     match write_extension_files(&extension_dir) {
-        Ok(()) => wrote_files = true,
+        Ok(report) => {
+            wrote_files = report.wrote_files;
+            changed_files = report.changed_files;
+        }
         Err(error) => write_error = Some(error),
     }
 
@@ -63,12 +69,15 @@ pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
         }
     };
 
-    let requires_shell_reload = windows_error.is_some();
+    let requires_shell_reload =
+        setup_requires_shell_reload(windows_error.as_ref(), extension_was_enabled, changed_files);
     let message = if !wrote_files {
         "Could not install the computer-use-linux GNOME Shell extension files.".to_string()
     } else if !enable_command.ok {
         "computer-use-linux GNOME Shell extension files were installed, but enabling the extension failed. Enable it with gnome-extensions after GNOME Shell sees the new extension."
             .to_string()
+    } else if windows_error.is_none() && requires_shell_reload {
+        shell_reload_message(extension_was_enabled).to_string()
     } else if windows_error.is_none() {
         "computer-use-linux GNOME Shell extension is active and window targeting is available."
             .to_string()
@@ -89,11 +98,18 @@ pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
     }
 }
 
-fn write_extension_files(extension_dir: &Path) -> Result<(), String> {
+struct ExtensionWriteReport {
+    wrote_files: bool,
+    changed_files: bool,
+}
+
+fn write_extension_files(extension_dir: &Path) -> Result<ExtensionWriteReport, String> {
     fs::create_dir_all(extension_dir)
         .map_err(|error| format!("failed to create {}: {error}", extension_dir.display()))?;
     let metadata_json = render_extension_asset(METADATA_JSON);
     let extension_js = render_extension_asset(EXTENSION_JS);
+    let changed_files = file_content_changed(&extension_dir.join("metadata.json"), &metadata_json)
+        || file_content_changed(&extension_dir.join("extension.js"), &extension_js);
 
     fs::write(extension_dir.join("metadata.json"), metadata_json).map_err(|error| {
         format!(
@@ -107,7 +123,33 @@ fn write_extension_files(extension_dir: &Path) -> Result<(), String> {
             extension_dir.join("extension.js").display()
         )
     })?;
-    Ok(())
+    Ok(ExtensionWriteReport {
+        wrote_files: true,
+        changed_files,
+    })
+}
+
+fn file_content_changed(path: &Path, expected: &str) -> bool {
+    match fs::read_to_string(path) {
+        Ok(current) => current != expected,
+        Err(_) => true,
+    }
+}
+
+fn setup_requires_shell_reload(
+    windows_error: Option<&String>,
+    extension_was_enabled: Option<bool>,
+    changed_files: bool,
+) -> bool {
+    windows_error.is_some() || extension_was_enabled != Some(false) && changed_files
+}
+
+fn shell_reload_message(extension_was_enabled: Option<bool>) -> &'static str {
+    if extension_was_enabled == Some(true) {
+        "computer-use-linux GNOME Shell extension files changed while the extension was already active. Window targeting is available, but GNOME Shell must reload before newly installed DBus methods are served."
+    } else {
+        "computer-use-linux GNOME Shell extension files changed, but the previous extension state could not be determined. GNOME Shell must reload before newly installed DBus methods can be relied on."
+    }
 }
 
 fn render_extension_asset(asset: &str) -> String {
@@ -126,25 +168,13 @@ fn render_extension_asset(asset: &str) -> String {
 fn run_gnome_extensions_enable() -> SetupCommandReport {
     let mut command = Command::new("gnome-extensions");
     command.args(["enable", UUID]);
-    add_session_env(&mut command);
 
-    let primary = match command.output() {
-        Ok(output) if output.status.success() => SetupCommandReport {
+    let primary = match run_session_command(&mut command, "enable the GNOME Shell extension") {
+        Ok(output) => SetupCommandReport {
             ok: true,
             detail: output_detail(&output.stdout, &output.stderr, "gnome-extensions enable ok"),
         },
-        Ok(output) => SetupCommandReport {
-            ok: false,
-            detail: output_detail(
-                &output.stdout,
-                &output.stderr,
-                &format!("gnome-extensions exited with {}", output.status),
-            ),
-        },
-        Err(error) => SetupCommandReport {
-            ok: false,
-            detail: format!("failed to run gnome-extensions: {error}"),
-        },
+        Err(detail) => SetupCommandReport { ok: false, detail },
     };
     if primary.ok {
         return primary;
@@ -172,25 +202,9 @@ fn run_gnome_extensions_enable() -> SetupCommandReport {
 }
 
 fn run_gsettings_enable_fallback() -> SetupCommandReport {
-    let mut get_command = Command::new("gsettings");
-    get_command.args(["get", "org.gnome.shell", "enabled-extensions"]);
-    add_session_env(&mut get_command);
-    let current = match get_command.output() {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        }
-        Ok(output) => {
-            return SetupCommandReport {
-                ok: false,
-                detail: output_detail(&output.stdout, &output.stderr, "gsettings get failed"),
-            }
-        }
-        Err(error) => {
-            return SetupCommandReport {
-                ok: false,
-                detail: format!("failed to run gsettings get: {error}"),
-            }
-        }
+    let current = match enabled_extensions_value() {
+        Ok(current) => current,
+        Err(detail) => return SetupCommandReport { ok: false, detail },
     };
 
     let Some(updated) = enabled_extensions_literal(&current) else {
@@ -208,32 +222,45 @@ fn run_gsettings_enable_fallback() -> SetupCommandReport {
 
     let mut set_command = Command::new("gsettings");
     set_command.args(["set", "org.gnome.shell", "enabled-extensions", &updated]);
-    add_session_env(&mut set_command);
-    match set_command.output() {
-        Ok(output) if output.status.success() => SetupCommandReport {
+    match run_session_command(
+        &mut set_command,
+        "update org.gnome.shell enabled-extensions",
+    ) {
+        Ok(_) => SetupCommandReport {
             ok: true,
             detail: format!(
                 "added {UUID} to org.gnome.shell enabled-extensions for the next GNOME Shell load"
             ),
         },
-        Ok(output) => SetupCommandReport {
-            ok: false,
-            detail: output_detail(&output.stdout, &output.stderr, "gsettings set failed"),
-        },
-        Err(error) => SetupCommandReport {
-            ok: false,
-            detail: format!("failed to run gsettings set: {error}"),
-        },
+        Err(detail) => SetupCommandReport { ok: false, detail },
     }
+}
+
+fn gnome_extension_enabled() -> Option<bool> {
+    enabled_extensions_value()
+        .ok()
+        .map(|current| enabled_extensions_contains_uuid(&current))
+}
+
+fn enabled_extensions_value() -> Result<String, String> {
+    let mut command = Command::new("gsettings");
+    command.args(["get", "org.gnome.shell", "enabled-extensions"]);
+    let output = run_session_command(&mut command, "read org.gnome.shell enabled-extensions")?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn enabled_extensions_contains_uuid(current: &str) -> bool {
+    let quoted = format!("'{UUID}'");
+    current.trim().contains(&quoted)
 }
 
 fn enabled_extensions_literal(current: &str) -> Option<String> {
     let trimmed = current.trim();
-    let quoted = format!("'{UUID}'");
-    if trimmed.contains(&quoted) {
+    if enabled_extensions_contains_uuid(trimmed) {
         return Some(trimmed.to_string());
     }
 
+    let quoted = format!("'{UUID}'");
     let list = if trimmed == "@as []" { "[]" } else { trimmed };
     if list == "[]" {
         return Some(format!("[{quoted}]"));
@@ -255,6 +282,24 @@ fn add_session_env(command: &mut Command) {
         .filter(|value| !value.trim().is_empty())
     {
         command.env("XDG_RUNTIME_DIR", runtime);
+    }
+}
+
+fn run_session_command(
+    command: &mut Command,
+    action: &str,
+) -> Result<std::process::Output, String> {
+    add_session_env(command);
+    let output =
+        command_runner::output_blocking(command, action).map_err(|error| format!("{error:#}"))?;
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(output_detail(
+            &output.stdout,
+            &output.stderr,
+            &format!("{action} failed with {}", output.status),
+        ))
     }
 }
 
@@ -281,6 +326,25 @@ fn extension_dir() -> PathBuf {
 mod tests {
     use super::*;
 
+    struct TestExtensionDirectory(PathBuf);
+
+    impl TestExtensionDirectory {
+        fn new() -> Self {
+            let path = env::temp_dir().join(format!(
+                "computer-use-linux-extension-test-{}-{}",
+                std::process::id(),
+                getrandom::u64().unwrap()
+            ));
+            Self(path)
+        }
+    }
+
+    impl Drop for TestExtensionDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn enabled_extensions_literal_adds_uuid_to_existing_list() {
         assert_eq!(
@@ -302,6 +366,55 @@ mod tests {
         let value = format!("['{UUID}']");
 
         assert_eq!(enabled_extensions_literal(&value).unwrap(), value);
+    }
+
+    #[test]
+    fn session_command_failure_reports_command_stderr() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf 'settings rejected' >&2; exit 23"]);
+
+        let error = run_session_command(&mut command, "update GNOME settings").unwrap_err();
+
+        assert_eq!(error, "settings rejected");
+    }
+
+    #[test]
+    fn extension_file_write_reports_content_changes() {
+        let extension_dir = TestExtensionDirectory::new();
+
+        let first = write_extension_files(&extension_dir.0).unwrap();
+        assert!(first.wrote_files);
+        assert!(first.changed_files);
+
+        let second = write_extension_files(&extension_dir.0).unwrap();
+        assert!(second.wrote_files);
+        assert!(!second.changed_files);
+
+        fs::write(extension_dir.0.join("extension.js"), "// stale extension").unwrap();
+        let third = write_extension_files(&extension_dir.0).unwrap();
+        assert!(third.wrote_files);
+        assert!(third.changed_files);
+    }
+
+    #[test]
+    fn enabled_stale_extension_requires_shell_reload() {
+        assert!(setup_requires_shell_reload(None, Some(true), true));
+        assert!(setup_requires_shell_reload(
+            Some(&"window API unavailable".to_string()),
+            Some(false),
+            false
+        ));
+        assert!(!setup_requires_shell_reload(None, Some(true), false));
+        assert!(!setup_requires_shell_reload(None, Some(false), true));
+        assert!(setup_requires_shell_reload(None, None, true));
+    }
+
+    #[test]
+    fn unknown_extension_state_uses_neutral_reload_guidance() {
+        assert_eq!(
+            shell_reload_message(None),
+            "computer-use-linux GNOME Shell extension files changed, but the previous extension state could not be determined. GNOME Shell must reload before newly installed DBus methods can be relied on."
+        );
     }
 
     #[test]
