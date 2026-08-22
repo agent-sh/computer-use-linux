@@ -463,9 +463,9 @@ fn desktop_env_hydration_updates(
         && current_env
             .get("DISPLAY")
             .is_some_and(|value| !value.trim().is_empty())
-        && !current_env
+        && current_env
             .get("WAYLAND_DISPLAY")
-            .is_some_and(|value| !value.trim().is_empty());
+            .is_none_or(|value| value.trim().is_empty());
 
     DESKTOP_ENV_KEYS
         .iter()

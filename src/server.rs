@@ -3612,7 +3612,7 @@ fn native_x11_xdotool_pointer_session(
     wayland_display: Option<&str>,
 ) -> bool {
     session_type.is_some_and(|value| value.trim().eq_ignore_ascii_case("x11"))
-        && !wayland_display.is_some_and(|value| !value.trim().is_empty())
+        && wayland_display.is_none_or(|value| value.trim().is_empty())
 }
 
 fn prefer_xdotool_pointer(
