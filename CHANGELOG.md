@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.10] - 2026-08-22
+
 ### Fixed
 - Absolute uinput pointer axes now end at the final logical desktop pixel, so
   edge coordinates are advertised and clamped consistently.
@@ -454,7 +456,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.9...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.10...HEAD
+[0.4.10]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.9...v0.4.10
 [0.4.9]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.6...v0.4.7
