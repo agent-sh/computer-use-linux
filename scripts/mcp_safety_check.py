@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import re
 import select
 import subprocess
 import sys
+import tempfile
 from typing import Any
 
 
@@ -33,6 +35,7 @@ EXPECTED_TOOLS = {
     "perform_action",
     "set_value",
 }
+SHELL_TOOL = "run_shell"
 
 INJECTION_PATTERNS = [
     re.compile(pattern, re.IGNORECASE)
@@ -54,6 +57,7 @@ DANGEROUS_TOOL_NAMES = {
     "eval",
     "shell",
     "run_command",
+    SHELL_TOOL,
     "terminal",
     "read_file",
     "write_file",
@@ -97,6 +101,7 @@ DESTRUCTIVE_MUTATING_TOOLS = {
     "type_text",
     "perform_action",
     "set_value",
+    SHELL_TOOL,
 }
 
 NON_DESTRUCTIVE_MUTATING_TOOLS = EXPECTED_TOOLS - READ_ONLY_TOOLS - DESTRUCTIVE_MUTATING_TOOLS
@@ -109,7 +114,7 @@ IDEMPOTENT_TOOLS = READ_ONLY_TOOLS | {
     "resize_window",
 }
 
-OPEN_WORLD_TOOLS = EXPECTED_TOOLS - {
+OPEN_WORLD_TOOLS = (EXPECTED_TOOLS | {SHELL_TOOL}) - {
     "doctor",
     "setup_accessibility",
     "setup_window_targeting",
@@ -117,7 +122,10 @@ OPEN_WORLD_TOOLS = EXPECTED_TOOLS - {
 
 
 class McpClient:
-    def __init__(self, binary: pathlib.Path):
+    def __init__(self, binary: pathlib.Path, extra_env: dict[str, str] | None = None):
+        child_env = os.environ.copy()
+        if extra_env:
+            child_env.update(extra_env)
         self.process = subprocess.Popen(
             [str(binary), "mcp"],
             stdin=subprocess.PIPE,
@@ -125,6 +133,7 @@ class McpClient:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=child_env,
         )
         self.next_id = 1
 
@@ -239,7 +248,9 @@ def main() -> int:
         raise AssertionError(f"binary does not exist: {binary}")
 
     version = package_version(repo)
-    annotation_partition = READ_ONLY_TOOLS | NON_DESTRUCTIVE_MUTATING_TOOLS | DESTRUCTIVE_MUTATING_TOOLS
+    annotation_partition = (
+        READ_ONLY_TOOLS | NON_DESTRUCTIVE_MUTATING_TOOLS | DESTRUCTIVE_MUTATING_TOOLS
+    ) - {SHELL_TOOL}
     if annotation_partition != EXPECTED_TOOLS:
         raise AssertionError(
             "tool annotation classes do not cover the expected MCP tool set: "
@@ -288,13 +299,13 @@ def main() -> int:
             name = tool["name"]
             if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
                 raise AssertionError(f"tool name is not provider-safe snake_case: {name!r}")
-            if name in DANGEROUS_TOOL_NAMES:
+            if name in DANGEROUS_TOOL_NAMES and name != SHELL_TOOL:
                 raise AssertionError(f"unexpected dangerous tool name exposed: {name}")
             description = tool.get("description") or ""
             assert_no_injection_text(f"{name} description", description)
             assert_tool_annotations(tool)
             props = schema_properties(tool)
-            if "env" in props or "shell" in props or "command" in props:
+            if name != SHELL_TOOL and ("env" in props or "shell" in props or "command" in props):
                 raise AssertionError(f"{name} exposes a raw process-control parameter: {sorted(props)}")
             if name in {"press_key", "type_text", "activate_window"} and not FOCUS_SELECTORS <= props:
                 raise AssertionError(f"{name} is missing focus target selectors: {sorted(FOCUS_SELECTORS - props)}")
@@ -314,7 +325,72 @@ def main() -> int:
     finally:
         client.close()
 
-    print(f"MCP safety check passed: {len(EXPECTED_TOOLS)} tools, version {version}")
+    shell_home = tempfile.TemporaryDirectory(prefix="computer-use-linux-shell-home-")
+    pathlib.Path(shell_home.name, ".profile").write_text(
+        "export COMPUTER_USE_LINUX_PROFILE_SECRET=must-not-be-loaded\n",
+        encoding="utf-8",
+    )
+    shell_client = McpClient(
+        binary,
+        {
+            "COMPUTER_USE_LINUX_ENABLE_SHELL": "1",
+            "COMPUTER_USE_LINUX_TEST_SECRET": "must-not-be-inherited",
+            "HOME": shell_home.name,
+        },
+    )
+    try:
+        shell_client.request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "computer-use-linux-shell-ci", "version": "0"},
+            },
+        )
+        shell_client.notify("notifications/initialized", {})
+        tools = shell_client.request("tools/list", {})["result"].get("tools") or []
+        names = {tool.get("name") for tool in tools}
+        expected = EXPECTED_TOOLS | {SHELL_TOOL}
+        if names != expected:
+            raise AssertionError(
+                f"unexpected opt-in tools: missing={expected - names}, extra={names - expected}"
+            )
+        shell_tool = next(tool for tool in tools if tool.get("name") == SHELL_TOOL)
+        assert_tool_annotations(shell_tool)
+        shell_props = schema_properties(shell_tool)
+        required_shell_props = {"command", "cwd", "env", "timeout_seconds"}
+        if not required_shell_props <= shell_props:
+            raise AssertionError(
+                f"{SHELL_TOOL} is missing bounded execution controls: {sorted(required_shell_props - shell_props)}"
+            )
+        result = shell_client.request(
+            "tools/call",
+            {
+                "name": SHELL_TOOL,
+                "arguments": {
+                    "command": 'test -z "${COMPUTER_USE_LINUX_TEST_SECRET-}" && test -z "${COMPUTER_USE_LINUX_PROFILE_SECRET-}" && printf %s "$EXPLICIT"',
+                    "cwd": str(repo),
+                    "env": {"EXPLICIT": "shell-ok"},
+                    "timeout_seconds": 5,
+                },
+            },
+        )["result"]
+        content = result.get("content") or []
+        if not content or content[0].get("type") != "text":
+            raise AssertionError(f"{SHELL_TOOL} did not return text content: {result!r}")
+        shell_result = json.loads(content[0].get("text") or "{}")
+        if shell_result.get("ok") is not True or shell_result.get("stdout") != "shell-ok":
+            raise AssertionError(f"{SHELL_TOOL} smoke failed: {shell_result!r}")
+        if len(shell_result.get("command_sha256") or "") != 64:
+            raise AssertionError(f"{SHELL_TOOL} did not return an audit digest: {shell_result!r}")
+    finally:
+        shell_client.close()
+        shell_home.cleanup()
+
+    print(
+        f"MCP safety check passed: {len(EXPECTED_TOOLS)} default tools, "
+        f"{len(EXPECTED_TOOLS) + 1} with shell opt-in, version {version}"
+    )
     return 0
 
 

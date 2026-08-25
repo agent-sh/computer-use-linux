@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- An explicitly opt-in `run_shell` MCP tool supports bounded same-user shell
+  execution for trusted remote MCP deployments. The tool is absent unless
+  `COMPUTER_USE_LINUX_ENABLE_SHELL=1`, clears ambient credentials, requires
+  visible environment additions, enforces timeout/output limits and process-
+  group cleanup, and emits command-digest audit records.
+
 ## [0.4.10] - 2026-08-22
 
 ### Fixed

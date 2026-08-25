@@ -30,8 +30,11 @@ use rmcp::{
     tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     env,
+    ffi::OsString,
     future::Future,
     os::unix::net::UnixDatagram,
     path::{Path, PathBuf},
@@ -51,6 +54,14 @@ const KDE_CLIPBOARD_DBUS_TIMEOUT: Duration = Duration::from_secs(3);
 const KDE_KLIPPER_SERVICE: &str = "org.kde.klipper";
 const KDE_KLIPPER_PATH: &str = "/klipper";
 const KDE_KLIPPER_INTERFACE: &str = "org.kde.klipper.klipper";
+const SHELL_ENABLE_ENV: &str = "COMPUTER_USE_LINUX_ENABLE_SHELL";
+const SHELL_DEFAULT_TIMEOUT_SECS: u64 = 30;
+const SHELL_MAX_TIMEOUT_SECS: u64 = 120;
+const SHELL_MAX_COMMAND_BYTES: usize = 64 * 1024;
+const SHELL_MAX_CWD_BYTES: usize = 4096;
+const SHELL_MAX_ENV_ENTRIES: usize = 64;
+const SHELL_MAX_ENV_BYTES: usize = 64 * 1024;
+const SHELL_RESPONSE_STREAM_BYTES: usize = 512 * 1024;
 
 #[derive(Clone, Default)]
 pub struct ComputerUseLinux {
@@ -96,6 +107,9 @@ fn sanitize_unsigned_integer_formats(value: &mut serde_json::Value) {
 impl ComputerUseLinux {
     fn mcp_tool_router(&self) -> rmcp::handler::server::router::tool::ToolRouter<Self> {
         let mut router = Self::tool_router();
+        if !shell_execution_enabled() {
+            router.map.remove("run_shell");
+        }
         for route in router.map.values_mut() {
             let input_schema = Arc::make_mut(&mut route.attr.input_schema);
             for value in input_schema.values_mut() {
@@ -1494,6 +1508,23 @@ impl ComputerUseLinux {
     }
 
     #[tool(
+        name = "run_shell",
+        description = "Execute one explicitly approved /bin/sh command with same-user host authority. This tool is absent unless the server operator starts computer-use-linux with COMPUTER_USE_LINUX_ENABLE_SHELL=1. It is not sandboxed: the command can read or modify files and use the network with the server user's permissions. The inherited environment is cleared to a small desktop/runtime allowlist; pass any additional variables explicitly. Execution time and output are bounded: returned streams are truncated to 512 KiB, while a stream exceeding the 8 MiB collection ceiling fails the call without returning partial output. An audit digest is written to server stderr.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn run_shell(
+        &self,
+        Parameters(params): Parameters<RunShellParams>,
+    ) -> Json<RunShellOutput> {
+        Json(execute_shell(params).await)
+    }
+
+    #[tool(
         name = "type_text",
         description = "Type literal text using keyboard input, optionally after focusing a target window or terminal selector.",
         annotations(
@@ -1693,6 +1724,245 @@ impl ComputerUseLinux {
 )]
 impl ServerHandler for ComputerUseLinux {}
 
+fn shell_execution_enabled() -> bool {
+    shell_execution_enabled_value(env::var(SHELL_ENABLE_ENV).ok().as_deref())
+}
+
+fn shell_execution_enabled_value(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+fn valid_environment_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+fn inherited_shell_environment_allowed(name: &str) -> bool {
+    matches!(
+        name,
+        "PATH"
+            | "HOME"
+            | "USER"
+            | "LOGNAME"
+            | "LANG"
+            | "TERM"
+            | "XDG_RUNTIME_DIR"
+            | "DISPLAY"
+            | "WAYLAND_DISPLAY"
+            | "DBUS_SESSION_BUS_ADDRESS"
+    ) || name.starts_with("LC_")
+}
+
+fn inherited_shell_environment(
+    variables: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<(String, String)> {
+    variables
+        .into_iter()
+        .filter_map(|(name, value)| {
+            let (Ok(name), Ok(value)) = (name.into_string(), value.into_string()) else {
+                return None;
+            };
+            inherited_shell_environment_allowed(&name).then_some((name, value))
+        })
+        .collect()
+}
+
+fn shell_command_sha256(command: &str) -> String {
+    Sha256::digest(command.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn bounded_shell_stream(bytes: &[u8]) -> (String, bool) {
+    let truncated = bytes.len() > SHELL_RESPONSE_STREAM_BYTES;
+    let visible = if truncated {
+        &bytes[..SHELL_RESPONSE_STREAM_BYTES]
+    } else {
+        bytes
+    };
+    (String::from_utf8_lossy(visible).into_owned(), truncated)
+}
+
+fn shell_error_output(
+    command_sha256: String,
+    cwd: String,
+    timeout_seconds: u64,
+    error: impl Into<String>,
+) -> RunShellOutput {
+    RunShellOutput {
+        ok: false,
+        command_sha256,
+        cwd,
+        timeout_seconds,
+        exit_code: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+        error: Some(error.into()),
+    }
+}
+
+async fn execute_shell(params: RunShellParams) -> RunShellOutput {
+    let command_sha256 = shell_command_sha256(&params.command);
+    let timeout_seconds = params.timeout_seconds.unwrap_or(SHELL_DEFAULT_TIMEOUT_SECS);
+    let requested_cwd = params.cwd.as_deref().unwrap_or(".").to_string();
+
+    if !shell_execution_enabled() {
+        return shell_error_output(
+            command_sha256,
+            requested_cwd,
+            timeout_seconds,
+            format!(
+                "shell execution is disabled; restart the MCP server with {SHELL_ENABLE_ENV}=1 to opt in"
+            ),
+        );
+    }
+    if params.command.trim().is_empty() {
+        return shell_error_output(
+            command_sha256,
+            requested_cwd,
+            timeout_seconds,
+            "command must not be empty",
+        );
+    }
+    if params.command.len() > SHELL_MAX_COMMAND_BYTES {
+        return shell_error_output(
+            command_sha256,
+            requested_cwd,
+            timeout_seconds,
+            format!("command exceeds the {SHELL_MAX_COMMAND_BYTES}-byte limit"),
+        );
+    }
+    if requested_cwd.len() > SHELL_MAX_CWD_BYTES {
+        return shell_error_output(
+            command_sha256,
+            "<rejected: cwd too long>".to_string(),
+            timeout_seconds,
+            format!("cwd exceeds the {SHELL_MAX_CWD_BYTES}-byte limit"),
+        );
+    }
+    if !(1..=SHELL_MAX_TIMEOUT_SECS).contains(&timeout_seconds) {
+        return shell_error_output(
+            command_sha256,
+            requested_cwd,
+            timeout_seconds,
+            format!("timeout_seconds must be between 1 and {SHELL_MAX_TIMEOUT_SECS}"),
+        );
+    }
+    if params.env.len() > SHELL_MAX_ENV_ENTRIES {
+        return shell_error_output(
+            command_sha256,
+            requested_cwd,
+            timeout_seconds,
+            format!("env contains more than {SHELL_MAX_ENV_ENTRIES} entries"),
+        );
+    }
+    let env_bytes = params
+        .env
+        .iter()
+        .map(|(name, value)| name.len().saturating_add(value.len()))
+        .sum::<usize>();
+    if env_bytes > SHELL_MAX_ENV_BYTES {
+        return shell_error_output(
+            command_sha256,
+            requested_cwd,
+            timeout_seconds,
+            format!("env exceeds the {SHELL_MAX_ENV_BYTES}-byte limit"),
+        );
+    }
+    if let Some(invalid) = params.env.keys().find(|name| !valid_environment_name(name)) {
+        return shell_error_output(
+            command_sha256,
+            requested_cwd,
+            timeout_seconds,
+            format!("invalid environment variable name: {invalid}"),
+        );
+    }
+
+    let cwd = match std::fs::canonicalize(&requested_cwd) {
+        Ok(path) if path.is_dir() => path,
+        Ok(_) => {
+            return shell_error_output(
+                command_sha256,
+                requested_cwd,
+                timeout_seconds,
+                "cwd is not a directory",
+            )
+        }
+        Err(error) => {
+            return shell_error_output(
+                command_sha256,
+                requested_cwd,
+                timeout_seconds,
+                format!("failed to resolve cwd: {error}"),
+            )
+        }
+    };
+    let cwd_display = cwd.display().to_string();
+
+    let mut child = TokioCommand::new("/bin/sh");
+    // Do not use a login shell: profile scripts could reintroduce credentials
+    // after env_clear() and contaminate or prevent the requested command.
+    child.args(["-c", &params.command]);
+    child.current_dir(&cwd);
+    child.env_clear();
+    let mut inherited_path = false;
+    for (name, value) in inherited_shell_environment(env::vars_os()) {
+        inherited_path |= name == "PATH";
+        child.env(name, value);
+    }
+    if !inherited_path {
+        child.env("PATH", "/usr/local/bin:/usr/bin:/bin");
+    }
+    child.envs(&params.env);
+
+    eprintln!(
+        "[computer-use-linux] run_shell start sha256={command_sha256} cwd={cwd_display:?} timeout_seconds={timeout_seconds}"
+    );
+    match crate::command_runner::output_with_timeout(
+        child,
+        "run approved shell command",
+        Duration::from_secs(timeout_seconds),
+    )
+    .await
+    {
+        Ok(output) => {
+            let exit_code = output.status.code();
+            let (stdout, stdout_truncated) = bounded_shell_stream(&output.stdout);
+            let (stderr, stderr_truncated) = bounded_shell_stream(&output.stderr);
+            eprintln!(
+                "[computer-use-linux] run_shell finish sha256={command_sha256} exit_code={exit_code:?} stdout_bytes={} stderr_bytes={} stdout_truncated={stdout_truncated} stderr_truncated={stderr_truncated}",
+                output.stdout.len(),
+                output.stderr.len()
+            );
+            RunShellOutput {
+                ok: output.status.success(),
+                command_sha256,
+                cwd: cwd_display,
+                timeout_seconds,
+                exit_code,
+                stdout,
+                stderr,
+                stdout_truncated,
+                stderr_truncated,
+                error: None,
+            }
+        }
+        Err(error) => {
+            let error = format!("{error:#}");
+            eprintln!(
+                "[computer-use-linux] run_shell error sha256={command_sha256} error={error:?}"
+            );
+            shell_error_output(command_sha256, cwd_display, timeout_seconds, error)
+        }
+    }
+}
+
 pub async fn serve_mcp() -> Result<()> {
     ComputerUseLinux::default()
         .serve(rmcp::transport::stdio())
@@ -1813,6 +2083,35 @@ struct WindowGeometryOutput {
     permissions_hint: Option<String>,
     #[schemars(skip)]
     received: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct RunShellParams {
+    /// Shell program text passed to `/bin/sh -c` without loading login profiles.
+    command: String,
+    /// Existing directory in which to start the shell. Symlinks are resolved.
+    #[serde(default)]
+    cwd: Option<String>,
+    /// Additional environment entries. The ambient process environment is not inherited wholesale.
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    /// Wall-clock timeout in seconds (default 30, maximum 120).
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct RunShellOutput {
+    ok: bool,
+    command_sha256: String,
+    cwd: String,
+    timeout_seconds: u64,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -6582,5 +6881,88 @@ mod tests {
         assert!(
             apply_window_relative_scroll_coordinates(&mut params, (100, 200, 800, 600)).is_err()
         );
+    }
+
+    #[test]
+    fn shell_execution_requires_exact_operator_opt_in() {
+        assert!(shell_execution_enabled_value(Some("1")));
+        for value in [None, Some(""), Some("0"), Some("true"), Some("yes")] {
+            assert!(!shell_execution_enabled_value(value));
+        }
+    }
+
+    #[test]
+    fn shell_environment_policy_excludes_ambient_credentials() {
+        for allowed in [
+            "PATH",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "XDG_RUNTIME_DIR",
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "DBUS_SESSION_BUS_ADDRESS",
+        ] {
+            assert!(inherited_shell_environment_allowed(allowed));
+        }
+        for secret in [
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+            "OPENAI_API_KEY",
+            "SSH_AUTH_SOCK",
+            "LD_PRELOAD",
+        ] {
+            assert!(!inherited_shell_environment_allowed(secret));
+        }
+    }
+
+    #[test]
+    fn shell_environment_skips_non_utf8_entries() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let variables = [
+            (OsString::from("PATH"), OsString::from("/usr/bin")),
+            (OsString::from_vec(vec![0xff]), OsString::from("ignored")),
+            (OsString::from("LANG"), OsString::from_vec(vec![0xff])),
+            (OsString::from("GITHUB_TOKEN"), OsString::from("secret")),
+        ];
+
+        assert_eq!(
+            inherited_shell_environment(variables),
+            vec![("PATH".to_string(), "/usr/bin".to_string())]
+        );
+    }
+
+    #[test]
+    fn shell_environment_names_follow_exec_rules() {
+        for valid in ["A", "_PRIVATE", "NAME_2"] {
+            assert!(valid_environment_name(valid));
+        }
+        for invalid in ["", "2FAST", "BAD-NAME", "A=B", "naïve"] {
+            assert!(!valid_environment_name(invalid));
+        }
+    }
+
+    #[test]
+    fn shell_output_is_bounded_before_mcp_serialization() {
+        let oversized = vec![b'x'; SHELL_RESPONSE_STREAM_BYTES + 17];
+        let (visible, truncated) = bounded_shell_stream(&oversized);
+        assert!(truncated);
+        assert_eq!(visible.len(), SHELL_RESPONSE_STREAM_BYTES);
+
+        let (visible, truncated) = bounded_shell_stream(b"ok");
+        assert!(!truncated);
+        assert_eq!(visible, "ok");
+    }
+
+    #[test]
+    fn shell_audit_digest_is_stable_and_does_not_echo_command_text() {
+        let digest = shell_command_sha256("printf secret");
+        assert_eq!(digest.len(), 64);
+        assert!(digest
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()));
+        assert!(!digest.contains("secret"));
+        assert_eq!(digest, shell_command_sha256("printf secret"));
     }
 }
