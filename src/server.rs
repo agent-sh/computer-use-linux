@@ -34,6 +34,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     env,
+    ffi::OsString,
     future::Future,
     os::unix::net::UnixDatagram,
     path::{Path, PathBuf},
@@ -1755,6 +1756,20 @@ fn inherited_shell_environment_allowed(name: &str) -> bool {
     ) || name.starts_with("LC_")
 }
 
+fn inherited_shell_environment(
+    variables: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<(String, String)> {
+    variables
+        .into_iter()
+        .filter_map(|(name, value)| {
+            let (Ok(name), Ok(value)) = (name.into_string(), value.into_string()) else {
+                return None;
+            };
+            inherited_shell_environment_allowed(&name).then_some((name, value))
+        })
+        .collect()
+}
+
 fn shell_command_sha256(command: &str) -> String {
     Sha256::digest(command.as_bytes())
         .iter()
@@ -1895,11 +1910,9 @@ async fn execute_shell(params: RunShellParams) -> RunShellOutput {
     child.current_dir(&cwd);
     child.env_clear();
     let mut inherited_path = false;
-    for (name, value) in env::vars() {
-        if inherited_shell_environment_allowed(&name) {
-            inherited_path |= name == "PATH";
-            child.env(name, value);
-        }
+    for (name, value) in inherited_shell_environment(env::vars_os()) {
+        inherited_path |= name == "PATH";
+        child.env(name, value);
     }
     if !inherited_path {
         child.env("PATH", "/usr/local/bin:/usr/bin:/bin");
@@ -6899,6 +6912,23 @@ mod tests {
         ] {
             assert!(!inherited_shell_environment_allowed(secret));
         }
+    }
+
+    #[test]
+    fn shell_environment_skips_non_utf8_entries() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let variables = [
+            (OsString::from("PATH"), OsString::from("/usr/bin")),
+            (OsString::from_vec(vec![0xff]), OsString::from("ignored")),
+            (OsString::from("LANG"), OsString::from_vec(vec![0xff])),
+            (OsString::from("GITHUB_TOKEN"), OsString::from("secret")),
+        ];
+
+        assert_eq!(
+            inherited_shell_environment(variables),
+            vec![("PATH".to_string(), "/usr/bin".to_string())]
+        );
     }
 
     #[test]
