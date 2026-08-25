@@ -11,6 +11,7 @@ import re
 import select
 import subprocess
 import sys
+import tempfile
 from typing import Any
 
 
@@ -324,11 +325,17 @@ def main() -> int:
     finally:
         client.close()
 
+    shell_home = tempfile.TemporaryDirectory(prefix="computer-use-linux-shell-home-")
+    pathlib.Path(shell_home.name, ".profile").write_text(
+        "export COMPUTER_USE_LINUX_PROFILE_SECRET=must-not-be-loaded\n",
+        encoding="utf-8",
+    )
     shell_client = McpClient(
         binary,
         {
             "COMPUTER_USE_LINUX_ENABLE_SHELL": "1",
             "COMPUTER_USE_LINUX_TEST_SECRET": "must-not-be-inherited",
+            "HOME": shell_home.name,
         },
     )
     try:
@@ -361,7 +368,7 @@ def main() -> int:
             {
                 "name": SHELL_TOOL,
                 "arguments": {
-                    "command": 'test -z "${COMPUTER_USE_LINUX_TEST_SECRET-}" && printf %s "$EXPLICIT"',
+                    "command": 'test -z "${COMPUTER_USE_LINUX_TEST_SECRET-}" && test -z "${COMPUTER_USE_LINUX_PROFILE_SECRET-}" && printf %s "$EXPLICIT"',
                     "cwd": str(repo),
                     "env": {"EXPLICIT": "shell-ok"},
                     "timeout_seconds": 5,
@@ -378,6 +385,7 @@ def main() -> int:
             raise AssertionError(f"{SHELL_TOOL} did not return an audit digest: {shell_result!r}")
     finally:
         shell_client.close()
+        shell_home.cleanup()
 
     print(
         f"MCP safety check passed: {len(EXPECTED_TOOLS)} default tools, "

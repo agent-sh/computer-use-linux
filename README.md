@@ -73,7 +73,7 @@ Targeted `press_key`/`type_text` results append focused-element feedback from AT
 
 **Conditional host execution**
 
-- `run_shell` — same-user `/bin/sh -lc` execution, registered only when the server operator starts the MCP process with `COMPUTER_USE_LINUX_ENABLE_SHELL=1`. It is deliberately absent by default and is not a sandbox.
+- `run_shell` — same-user `/bin/sh -c` execution without login-profile loading, registered only when the server operator starts the MCP process with `COMPUTER_USE_LINUX_ENABLE_SHELL=1`. It is deliberately absent by default and is not a sandbox.
 
 ### MCP safety contract
 
@@ -89,7 +89,7 @@ Targeted `press_key`/`type_text` results append focused-element feedback from AT
 
 Annotations are safety hints, not an authorization system. MCP hosts should still ask the user before calls that could submit, delete, send, purchase, overwrite, or otherwise commit state.
 
-`run_shell` is an explicit trust-boundary opt-in, not a restricted command runner. Enabling it grants an approved MCP call the same file and network authority as the user running the server. The tool clears the ambient environment and inherits only a small desktop/runtime allowlist (`PATH`, home/user/locale fields, display/session-bus fields); additional variables must be supplied in the visible call payload. Commands use a fixed `/bin/sh`, an existing canonical working directory, a 30-second default / 120-second hard timeout, process-group cleanup, bounded collection, 512 KiB per returned stream, and stderr audit records keyed by the command SHA-256 rather than command text. These controls bound accidental leakage and runaway work; they do not make arbitrary shell code safe.
+`run_shell` is an explicit trust-boundary opt-in, not a restricted command runner. Enabling it grants an approved MCP call the same file and network authority as the user running the server. The tool clears the ambient environment and inherits only a small desktop/runtime allowlist (`PATH`, home/user/locale fields, display/session-bus fields); additional variables must be supplied in the visible call payload. Commands use a fixed non-login `/bin/sh`, an existing canonical working directory, a 30-second default / 120-second hard timeout, process-group cleanup, and stderr audit records keyed by the command SHA-256 rather than command text. Collected streams up to 8 MiB are returned with a 512 KiB per-stream response cap and truncation flag; exceeding 8 MiB on either stream fails the call without partial output. These controls bound accidental leakage and runaway work; they do not make arbitrary shell code safe.
 
 The binary also exposes the same capabilities from the CLI for scripting and debugging:
 

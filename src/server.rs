@@ -1509,7 +1509,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "run_shell",
-        description = "Execute one explicitly approved /bin/sh command with same-user host authority. This tool is absent unless the server operator starts computer-use-linux with COMPUTER_USE_LINUX_ENABLE_SHELL=1. It is not sandboxed: the command can read or modify files and use the network with the server user's permissions. The inherited environment is cleared to a small desktop/runtime allowlist; pass any additional variables explicitly. Execution time and returned output are bounded, and an audit digest is written to server stderr.",
+        description = "Execute one explicitly approved /bin/sh command with same-user host authority. This tool is absent unless the server operator starts computer-use-linux with COMPUTER_USE_LINUX_ENABLE_SHELL=1. It is not sandboxed: the command can read or modify files and use the network with the server user's permissions. The inherited environment is cleared to a small desktop/runtime allowlist; pass any additional variables explicitly. Execution time and output are bounded: returned streams are truncated to 512 KiB, while a stream exceeding the 8 MiB collection ceiling fails the call without returning partial output. An audit digest is written to server stderr.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1906,7 +1906,9 @@ async fn execute_shell(params: RunShellParams) -> RunShellOutput {
     let cwd_display = cwd.display().to_string();
 
     let mut child = TokioCommand::new("/bin/sh");
-    child.args(["-lc", &params.command]);
+    // Do not use a login shell: profile scripts could reintroduce credentials
+    // after env_clear() and contaminate or prevent the requested command.
+    child.args(["-c", &params.command]);
     child.current_dir(&cwd);
     child.env_clear();
     let mut inherited_path = false;
@@ -2085,7 +2087,7 @@ struct WindowGeometryOutput {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 struct RunShellParams {
-    /// Shell program text passed to `/bin/sh -lc`.
+    /// Shell program text passed to `/bin/sh -c` without loading login profiles.
     command: String,
     /// Existing directory in which to start the shell. Symlinks are resolved.
     #[serde(default)]
