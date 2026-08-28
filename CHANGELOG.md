@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.10] - 2026-08-29
+
 ### Added
 - An explicitly opt-in `run_shell` MCP tool supports bounded same-user shell
   execution for trusted remote MCP deployments. The tool is absent unless
@@ -14,9 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   visible environment additions, enforces timeout/output limits and process-
   group cleanup, and emits command-digest audit records.
 
-## [0.4.10] - 2026-08-22
-
 ### Fixed
+- Wayland literal text now uses `wtype` on compatible compositors when portal
+  keyboard input is unavailable, preserving Unicode before the ydotool
+  fallback. Known-incompatible GNOME, KDE/Plasma, and COSMIC sessions do not
+  advertise or select wtype, and a launched failure never replays the text.
 - Absolute uinput pointer axes now end at the final logical desktop pixel, so
   edge coordinates are advertised and clamped consistently.
 - Capability maps now advertise AT-SPI only when its bus is reachable and a
