@@ -147,6 +147,8 @@ pub struct InputReport {
     /// X11 XTEST keyboard backend. Preferred over ydotool on X11 sessions,
     /// where raw evdev scancodes are re-mapped by the active XKB layout.
     pub xdotool: Check,
+    /// Wayland virtual-keyboard backend for layout-safe Unicode literal text.
+    pub wtype: Check,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -278,6 +280,13 @@ fn capability_map_with_portal_keyboard(
         );
     if should_advertise_xdotool(platform, input, force_ydotool, force_xdotool) {
         input_backends.push("xdotool".to_string());
+    }
+    if platform_is_wayland(platform)
+        && wtype_compatible_wayland_desktop(platform.xdg_current_desktop.as_deref())
+        && input.wtype.ok
+        && !force_ydotool
+    {
+        input_backends.push("wtype".to_string());
     }
     if portal_available && portal_forced_for_all_input {
         input_backends.push("portal".to_string());
@@ -761,6 +770,7 @@ fn input_report() -> InputReport {
         ydotool_socket: ydotool_socket_check(),
         uinput: read_write_path_check(Path::new("/dev/uinput")),
         xdotool: command_path_check("xdotool"),
+        wtype: command_path_check("wtype"),
     }
 }
 
@@ -821,7 +831,7 @@ fn readiness_report_with_portal_keyboard(
 
     if !can_send_development_input {
         blockers.push(
-            "Development keyboard input is unavailable; enable XDG RemoteDesktop portal input on Wayland, xdotool with DISPLAY on X11, or ydotool with a connectable ydotoold socket. Read/write /dev/uinput alone provides only absolute pointer input."
+            "Development keyboard input is unavailable; enable XDG RemoteDesktop portal input or install wtype on compatible Wayland compositors, install xdotool with DISPLAY on X11, or use ydotool with a connectable ydotoold socket. Read/write /dev/uinput alone provides only absolute pointer input."
                 .to_string(),
         );
     }
@@ -841,7 +851,7 @@ fn readiness_report_with_portal_keyboard(
     } else if !can_focus_windows {
         "Enable an exact-focus window backend before using window_id, title, or terminal-targeted input.".to_string()
     } else if !can_send_development_input {
-        "Enable a keyboard-capable input backend: enable the XDG RemoteDesktop portal on Wayland, install xdotool for X11, or start ydotoold with a socket accessible to this desktop user."
+        "Enable a keyboard-capable input backend: enable the XDG RemoteDesktop portal or install wtype on compatible Wayland compositors, install xdotool for X11, or start ydotoold with a socket accessible to this desktop user."
             .to_string()
     } else {
         "Computer Use is ready: AT-SPI tree support, window targeting, and a Linux input backend are available."
@@ -868,6 +878,10 @@ fn can_send_development_input(
     let force_ydotool = env_flag_enabled_any(FORCE_YDOTOOL_KEYBOARD_ENV_KEYS);
     let force_xdotool = env_flag_enabled_any(FORCE_XDOTOOL_KEYBOARD_ENV_KEYS);
     portal_keyboard_input_available(platform, remote_desktop_keyboard)
+        || platform_is_wayland(platform)
+            && wtype_compatible_wayland_desktop(platform.xdg_current_desktop.as_deref())
+            && input.wtype.ok
+            && !force_ydotool
         || should_advertise_xdotool(platform, input, force_ydotool, force_xdotool)
         || input.ydotool.ok && input.ydotool_socket.ok
 }
@@ -974,6 +988,15 @@ fn platform_is_wayland(platform: &PlatformReport) -> bool {
             .as_deref()
             .is_some_and(|display| !display.trim().is_empty()),
     }
+}
+
+pub(crate) fn wtype_compatible_wayland_desktop(desktop: Option<&str>) -> bool {
+    desktop.is_none_or(|desktop| {
+        let desktop = desktop.to_ascii_lowercase();
+        !["gnome", "kde", "plasma", "cosmic"]
+            .iter()
+            .any(|known_incompatible| desktop.contains(known_incompatible))
+    })
 }
 
 fn should_advertise_xdotool(
@@ -1440,6 +1463,7 @@ mod tests {
             ydotool_socket,
             uinput,
             xdotool: Check::fail("missing xdotool"),
+            wtype: Check::fail("missing wtype"),
         }
     }
 
@@ -1565,6 +1589,7 @@ mod tests {
             ydotool_socket: Check::ok("connectable"),
             uinput: Check::fail("missing"),
             xdotool: Check::ok("xdotool"),
+            wtype: Check::fail("missing wtype"),
         };
 
         let capabilities = capability_map(
@@ -1597,6 +1622,36 @@ mod tests {
         assert_eq!(capabilities.input, ["xdotool"]);
         assert_eq!(capabilities.preferred.input.as_deref(), Some("xdotool"));
         assert!(readiness.can_send_development_input);
+    }
+
+    #[test]
+    fn wayland_diagnostics_advertise_wtype_without_portal_or_ydotool() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("wayland".to_string());
+        platform.xdg_current_desktop = Some("Hyprland".to_string());
+        platform.wayland_display = Some("wayland-0".to_string());
+        let portals = portal_report(Check::fail("missing"));
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let mut input = input_report(false);
+        input.wtype = Check::ok("wtype");
+
+        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+        let readiness = readiness_report(&platform, &portals, &accessibility, &windowing, &input);
+
+        assert_eq!(capabilities.input, ["wtype"]);
+        assert_eq!(capabilities.preferred.input.as_deref(), Some("wtype"));
+        assert!(readiness.can_send_development_input);
+    }
+
+    #[test]
+    fn wtype_excludes_known_incompatible_wayland_desktops() {
+        assert!(wtype_compatible_wayland_desktop(Some("Hyprland")));
+        assert!(wtype_compatible_wayland_desktop(Some("sway")));
+        assert!(wtype_compatible_wayland_desktop(None));
+        assert!(!wtype_compatible_wayland_desktop(Some("GNOME")));
+        assert!(!wtype_compatible_wayland_desktop(Some("KDE;Plasma")));
+        assert!(!wtype_compatible_wayland_desktop(Some("COSMIC")));
     }
 
     #[test]
@@ -1842,6 +1897,7 @@ mod tests {
             ydotool_socket: Check::ok("connectable"),
             uinput: Check::fail("missing"),
             xdotool: Check::ok("xdotool"),
+            wtype: Check::fail("missing wtype"),
         };
 
         let capabilities = capability_map(

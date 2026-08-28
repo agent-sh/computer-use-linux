@@ -34,7 +34,9 @@ pub mod diagnostics {
         DoctorReport, InputReport, PlatformReport, PortalReport, PreferredBackends,
         ReadinessReport, WindowingReport,
     };
-    pub(crate) use crate::diagnostics_impl::{setup_accessibility_report, SetupReport};
+    pub(crate) use crate::diagnostics_impl::{
+        setup_accessibility_report, wtype_compatible_wayland_desktop, SetupReport,
+    };
 }
 
 pub mod screenshot {

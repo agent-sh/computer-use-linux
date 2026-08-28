@@ -1651,6 +1651,35 @@ impl ComputerUseLinux {
             }
             return Json(output);
         }
+        if self.should_prefer_wtype_keyboard() {
+            let text = params.text.clone();
+            let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
+                run_wtype_type_text_or_fallback(Path::new("wtype"), &text, || {
+                    run_ydotool_type_text(&text)
+                })
+                .await
+            })
+            .await;
+            let _input_guard = input_guard;
+            let used_wtype = result
+                .as_ref()
+                .is_ok_and(|result| result.backend == KeyboardCommandBackend::Wtype);
+            let mut output = action_result_with_focus(
+                "type_text",
+                result.map(|result| vec![result.output]),
+                received,
+                focus.clone(),
+            );
+            if used_wtype {
+                output.message =
+                    "Action sent through wtype (Wayland virtual-keyboard protocol).".to_string();
+            }
+            if output.ok && focus.is_some() {
+                let notes = self.input_landing_notes(focus.as_ref(), true).await;
+                output = with_notes(output, notes);
+            }
+            return Json(output);
+        }
         let text = params.text.clone();
         let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
             run_ydotool_type_text(&text)
@@ -2678,6 +2707,17 @@ impl ComputerUseLinux {
             self.is_wayland_session(),
             env_var_non_empty("DISPLAY"),
             xdotool_available(),
+        )
+    }
+
+    fn should_prefer_wtype_keyboard(&self) -> bool {
+        prefer_wtype_keyboard(
+            env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD"),
+            self.is_wayland_session(),
+            crate::diagnostics::wtype_compatible_wayland_desktop(
+                env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
+            ),
+            wtype_available(),
         )
     }
 
@@ -4735,6 +4775,7 @@ fn ydotool_output_error(output: Output) -> String {
 /// live layout, which is what X11 clients actually expect. See issue #58.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyboardCommandBackend {
+    Wtype,
     Xdotool,
     Ydotool,
 }
@@ -4793,11 +4834,66 @@ where
     }
 }
 
+async fn run_wtype_type_text_or_fallback<F, Fut>(
+    program: &Path,
+    text: &str,
+    fallback: F,
+) -> std::result::Result<KeyboardCommandResult, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::result::Result<Output, String>>,
+{
+    let available = if program.components().count() > 1 {
+        std::fs::metadata(program)
+            .map(|meta| meta.is_file())
+            .unwrap_or(false)
+    } else {
+        program.to_str().is_some_and(which_in_path)
+    };
+    if !available {
+        return fallback().await.map(|output| KeyboardCommandResult {
+            output,
+            backend: KeyboardCommandBackend::Ydotool,
+        });
+    }
+
+    let mut command = TokioCommand::new(program);
+    command.arg("-");
+    let output = crate::command_runner::output_with_stdin(
+        command,
+        "run wtype",
+        ydotool_type_timeout(text),
+        text.as_bytes().to_vec(),
+    )
+    .await
+    .map_err(|error| format!("{error:#}"))?;
+    if !output.status.success() {
+        return Err(command_output_error("wtype", output));
+    }
+    Ok(KeyboardCommandResult {
+        output,
+        backend: KeyboardCommandBackend::Wtype,
+    })
+}
+
 /// True when `xdotool` can drive this session: an X11 session with `DISPLAY`
 /// set and the binary present. `COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD=1`
 /// opts out; `COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD=1` forces it on.
 fn xdotool_available() -> bool {
     which_in_path("xdotool")
+}
+
+fn wtype_available() -> bool {
+    which_in_path("wtype")
+}
+
+fn prefer_wtype_keyboard(
+    force_ydotool: bool,
+    is_wayland: bool,
+    compatible_desktop: bool,
+    available: bool,
+) -> bool {
+    !force_ydotool && is_wayland && compatible_desktop && available
 }
 
 fn xdotool_type_args(text: &str) -> Vec<String> {
@@ -5493,6 +5589,15 @@ mod tests {
         assert!(!prefer_xdotool_keyboard(false, true, true, false, true));
         assert!(!prefer_xdotool_keyboard(false, false, true, true, true));
         assert!(prefer_xdotool_keyboard(false, false, false, true, true));
+    }
+
+    #[test]
+    fn wayland_prefers_wtype_unless_ydotool_is_forced() {
+        assert!(prefer_wtype_keyboard(false, true, true, true));
+        assert!(!prefer_wtype_keyboard(true, true, true, true));
+        assert!(!prefer_wtype_keyboard(false, false, true, true));
+        assert!(!prefer_wtype_keyboard(false, true, false, true));
+        assert!(!prefer_wtype_keyboard(false, true, true, false));
     }
 
     #[test]
@@ -6377,6 +6482,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wtype_receives_unicode_text_through_stdin() {
+        let dir = std::env::temp_dir().join(format!(
+            "computer-use-linux-wtype-unicode-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).expect("create command test directory");
+        let wtype = dir.join("wtype");
+        let captured = dir.join("captured");
+        std::fs::write(
+            &wtype,
+            format!("#!/bin/sh\ncat > '{}'\n", captured.display()),
+        )
+        .expect("write fake wtype");
+        std::fs::set_permissions(&wtype, std::fs::Permissions::from_mode(0o700))
+            .expect("make fake wtype executable");
+        let text = "Zwölf Yaks aßen Öl über München";
+
+        let result = run_wtype_type_text_or_fallback(&wtype, text, || async {
+            panic!("available wtype must not fall back")
+        })
+        .await
+        .expect("wtype should succeed");
+
+        assert_eq!(result.backend, KeyboardCommandBackend::Wtype);
+        assert_eq!(std::fs::read_to_string(&captured).unwrap(), text);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn unavailable_wtype_uses_ydotool_fallback() {
+        let result = run_wtype_type_text_or_fallback(
+            Path::new("/definitely/missing/wtype"),
+            "text",
+            || async {
+                TokioCommand::new("sh")
+                    .args(["-c", "exit 0"])
+                    .output()
+                    .await
+                    .map_err(|error| error.to_string())
+            },
+        )
+        .await
+        .expect("missing wtype should use fallback");
+
+        assert_eq!(result.backend, KeyboardCommandBackend::Ydotool);
+    }
+
+    #[tokio::test]
+    async fn launched_wtype_failure_does_not_replay_through_ydotool() {
+        let dir = std::env::temp_dir().join(format!(
+            "computer-use-linux-wtype-fallback-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).expect("create command test directory");
+        let wtype = dir.join("wtype");
+        let fallback_marker = dir.join("ydotool-ran");
+        std::fs::write(&wtype, "#!/bin/sh\nexit 9\n").expect("write fake wtype");
+        std::fs::set_permissions(&wtype, std::fs::Permissions::from_mode(0o700))
+            .expect("make fake wtype executable");
+
+        let result = run_wtype_type_text_or_fallback(&wtype, "text", || async {
+            std::fs::write(&fallback_marker, "ran").unwrap();
+            TokioCommand::new("true")
+                .output()
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert!(
+            !fallback_marker.exists(),
+            "ydotool replayed input after wtype started"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn cancelling_xdotool_wait_kills_the_child() {
         let dir = std::env::temp_dir().join(format!(
             "computer-use-linux-xdotool-cancel-{}-{:?}",
@@ -6399,7 +6584,7 @@ mod tests {
 
         let task = tokio::spawn(async move { run_xdotool(&xdotool, &[]).await });
         let mut pid = None;
-        for _ in 0..50 {
+        for _ in 0..200 {
             if let Ok(value) = std::fs::read_to_string(&pid_path) {
                 pid = value.parse::<u32>().ok();
                 if pid.is_some() {
