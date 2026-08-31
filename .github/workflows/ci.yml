@@ -141,7 +141,7 @@ jobs:
           COMPUTER_USE_LINUX_LOCAL_COSMIC_HELPER="$PWD/target/debug/computer-use-linux-cosmic" \
             npm install --prefix "$prefix" -g .
           "$prefix/bin/computer-use-linux" --help
-      - run: npm pack --dry-run
+      - run: npm run pack:check
 
   zod-schema:
     name: zod MCP schema
@@ -160,6 +160,35 @@ jobs:
       - name: Validate tools/list against the MCP SDK zod schema
         run: node scripts/zod-check/check.mjs --command target/debug/computer-use-linux
 
+  pi-extension:
+    name: native Pi extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - run: cargo build --locked
+      - run: npm ci --prefix pi --ignore-scripts --no-audit --no-fund
+      - run: npm run build:check --prefix pi
+      - run: npm run typecheck --prefix pi
+      - run: COMPUTER_USE_LINUX_TEST_BINARY="$PWD/target/debug/computer-use-linux" npm test --prefix pi
+      - run: python3 scripts/generate_pi_tool_catalog.py --binary target/debug/computer-use-linux --check
+      - name: Smoke the installed Pi package
+        run: |
+          prefix="$RUNNER_TEMP/pi-package"
+          package="$(npm pack --pack-destination "$RUNNER_TEMP" --silent)"
+          COMPUTER_USE_LINUX_LOCAL_BINARY="$PWD/target/debug/computer-use-linux" \
+          COMPUTER_USE_LINUX_LOCAL_COSMIC_HELPER="$PWD/target/debug/computer-use-linux-cosmic" \
+            npm install --prefix "$prefix" "$RUNNER_TEMP/$package" --no-audit --no-fund
+          test -x "$prefix/node_modules/@agent-sh/computer-use-linux/npm/bin/computer-use-linux-linux-x64"
+          COMPUTER_USE_LINUX_EXTENSION_PATH="$prefix/node_modules/@agent-sh/computer-use-linux/pi/extension/index.ts" \
+          COMPUTER_USE_LINUX_USE_PACKAGED_BINARY=1 \
+            npm test --prefix pi -- pi-integration.test.ts
+
   release-binary:
     name: release artifact (${{ matrix.target }})
     needs:
@@ -173,6 +202,7 @@ jobs:
       - mcp-safety
       - agent-config
       - npm-wrapper
+      - pi-extension
       - zod-schema
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest

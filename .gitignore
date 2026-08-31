@@ -25,6 +25,7 @@ dist/
 
 # node deps (zod schema check is CI-only, deps installed on demand)
 node_modules/
+/pi/node_modules/
 
 # Python bytecode cache
 __pycache__/
