@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-31
+
 ### Added
 - The Pi package now exposes native `computer_use_linux_*` tools without a
   separate MCP adapter. One small loader stays active initially, then uses
@@ -482,7 +484,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.10...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.10...v0.5.0
 [0.4.10]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.9...v0.4.10
 [0.4.9]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.7...v0.4.8
