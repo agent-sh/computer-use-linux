@@ -40,18 +40,41 @@
     "npm/README.md",
     "npm/bin/computer-use-linux.js",
     "npm/install.js",
-    "pi/"
+    "pi/extension/index.ts",
+    "pi/extension/generated-tools.ts",
+    "pi/extension/mcp-client.bundle.cjs",
+    "pi/extension/THIRD_PARTY_NOTICES.txt"
   ],
   "pi": {
     "extensions": ["./pi/extension/index.ts"],
     "skills": ["./skills/computer-use-linux/SKILL.md"]
   },
   "scripts": {
+    "build:pi": "npm run build --prefix pi",
+    "check:pi-bundle": "npm run build:check --prefix pi",
     "postinstall": "node npm/install.js",
-    "pack:check": "npm pack --dry-run",
+    "pack:check": "node scripts/check_npm_package.mjs",
+    "test:pi": "npm test --prefix pi",
+    "typecheck:pi": "npm run typecheck --prefix pi",
     "test:wrapper": "node npm/bin/computer-use-linux.js --help"
   },
   "engines": {
     "node": ">=18"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
   }
 }

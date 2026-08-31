@@ -243,20 +243,34 @@ Restart Claude Desktop. The tools should appear in the tools list.
 ### Pi Coding Agent
 
 ```bash
-pi install npm:pi-mcp-adapter
 pi install npm:@agent-sh/computer-use-linux
 ```
 
-Restart pi or run `/reload`. The MCP proxy tool `mcp()` will have the desktop tools available:
+Restart Pi or run `/reload`. The package exposes one small loader initially;
+the real tools keep their upstream schemas and are enabled only when Computer
+Use is needed:
+
+Native tools require Pi 0.84.4 or newer (Node.js 22.19 or newer). The
+standalone npm CLI wrapper continues to support Node.js 18 or newer.
 
 ```
-mcp({ server: "computer-use-linux" })             # list all tools
-mcp({ search: "windows" })                         # search for window tools
-mcp({ tool: "computer_use_linux_doctor" })         # run readiness check
-mcp({ tool: "computer_use_linux_list_windows" })   # list desktop windows
+computer_use_linux_tools({ tools: ["doctor", "list_windows"] })
+computer_use_linux_doctor({})
+computer_use_linux_list_windows({})
 ```
 
-The extension auto-registers the computer-use-linux MCP server into pi-mcp-adapter's config. If the binary is not found, check the [Pi setup guide](skills/computer-use-linux/references/pi-setup.md).
+You can also search by capability:
+
+```
+computer_use_linux_tools({ query: "observe a window and click a control" })
+```
+
+No separate MCP adapter or manual MCP configuration is required. Pi starts one
+computer-use-linux process lazily on the first real tool call, reuses it for the
+session so accessibility snapshots remain valid, serializes desktop actions,
+and closes it on reload, session switch, or exit. See the
+[Pi setup guide](skills/computer-use-linux/references/pi-setup.md) for migration
+from older adapter-based installs.
 
 ### Hermes Agent
 

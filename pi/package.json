@@ -1,0 +1,22 @@
+{
+  "name": "computer-use-linux-pi-dev",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:check": "node scripts/build.mjs --check",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@types/node": "26.4.0",
+    "esbuild": "0.28.2",
+    "typebox": "1.3.7",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  }
+}

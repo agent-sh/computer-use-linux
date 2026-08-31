@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The Pi package now exposes native `computer_use_linux_*` tools without a
+  separate MCP adapter. One small loader stays active initially, then uses
+  Pi's additive dynamic-tool loading to expose selected tools with their exact
+  generated MCP schemas only when desktop control is needed.
+- Pi keeps one lazily started, session-scoped computer-use-linux process,
+  forwards cancellation, serializes desktop actions, preserves image results,
+  bounds text output, and rejects binary/schema version drift.
+
+### Changed
+- Pi installation is now one command (`pi install
+  npm:@agent-sh/computer-use-linux`) and no longer writes
+  `~/.pi/agent/mcp.json`. Existing adapter-based entries are detected and
+  reported for non-destructive manual cleanup.
+
 ## [0.4.10] - 2026-08-29
 
 ### Added
