@@ -419,6 +419,7 @@ If you're running this on a shared workstation, set `ydotoold`'s socket permissi
 - **KWin / Hyprland / i3 / COSMIC / X11 windowing is unavailable** — check `doctor.windowing.backends`. KWin needs session-bus scripting; Hyprland needs `hyprctl`; i3 needs `i3-msg` and its IPC socket; generic X11 needs `wmctrl` and `xprop`. COSMIC needs `computer-use-linux-cosmic`, which the standard installers provide automatically; if you copied binaries by hand, copy the helper too or set `COMPUTER_USE_LINUX_COSMIC_HELPER`.
 - **Screenshots return black frames on multi-monitor setups** — known portal / compositor edge case. Use `get_app_state` with `include_screenshot: false` and rely on AT-SPI until the portal backend is healthy.
 - **`type_text` types into the wrong window** — pass an explicit target (`window_id`, `pid`, `wm_class`, `title`, or for terminals `tty` / `terminal_pid` / `terminal_command` / `terminal_cwd`). Without a target, input goes to whatever window currently has compositor focus.
+- **Wayland pointer actions miss an unfocused window** — injected pointer input is subject to the compositor's input-focus rules. Call `activate_window` for the target before `click`, `drag`, or coordinate `scroll`; a pointer can land at the requested coordinate without the unfocused surface receiving the action.
 
 If `doctor` is green and a specific tool still misbehaves, file an issue with the JSON output of `doctor` and the failing tool's request payload.
 
