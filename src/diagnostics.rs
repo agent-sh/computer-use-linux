@@ -595,42 +595,18 @@ pub fn setup_accessibility_report() -> SetupReport {
     hydrate_session_bus_env();
 
     let before = doctor_report();
-    let accessibility_command = if can_build_accessibility_tree(&before.accessibility) {
-        Check::ok("AT-SPI accessibility is already enabled")
-    } else {
-        let atspi_status = command_check_with_session_bus(
-            "busctl",
-            &[
-                "--user",
-                "set-property",
-                "org.a11y.Bus",
-                "/org/a11y/bus",
-                "org.a11y.Status",
-                "IsEnabled",
-                "b",
-                "true",
-            ],
-        );
-        if atspi_status.ok {
-            atspi_status
-        } else {
-            command_check_with_session_bus(
-                "gsettings",
-                &[
-                    "set",
-                    "org.gnome.desktop.interface",
-                    "toolkit-accessibility",
-                    "true",
-                ],
-            )
-        }
-    };
+    let accessibility_command =
+        enable_accessibility(&before.accessibility, command_check_with_session_bus);
     let after = doctor_report();
     let before_ready = before.readiness.can_build_accessibility_tree;
     let after_ready = after.readiness.can_build_accessibility_tree;
-    let changed_accessibility = !before_ready && after_ready;
+    let saved_before = check_detail_contains_true(&before.accessibility.toolkit_accessibility);
+    let saved_after = check_detail_contains_true(&after.accessibility.toolkit_accessibility);
+    let changed_accessibility = after_ready && saved_after && (!before_ready || !saved_before);
     let requires_target_app_restart = changed_accessibility;
-    let message = if after_ready {
+    let message = if after_ready && !saved_after {
+        "AT-SPI is available at runtime, but toolkit-accessibility could not be verified as enabled in GSettings. Newly launched apps may have no accessibility tree. Check accessibility_command and the saved setting; other accessibility tools can change it."
+    } else if after_ready {
         if changed_accessibility {
             "AT-SPI accessibility is enabled. Restart already-running target apps if their AT-SPI tree is still empty."
         } else {
@@ -649,6 +625,75 @@ pub fn setup_accessibility_report() -> SetupReport {
         requires_target_app_restart,
         message,
     }
+}
+
+// Runtime IsEnabled does not establish the setting read by newly launched
+// GTK apps. Always check the saved key, even when an existing tree is usable.
+fn enable_accessibility(
+    before: &AccessibilityReport,
+    mut run: impl FnMut(&str, &[&str]) -> Check,
+) -> Check {
+    let setting = if check_detail_contains_true(&before.toolkit_accessibility) {
+        before.toolkit_accessibility.clone()
+    } else {
+        let write = run(
+            "gsettings",
+            &[
+                "set",
+                "org.gnome.desktop.interface",
+                "toolkit-accessibility",
+                "true",
+            ],
+        );
+        let read = run(
+            "gsettings",
+            &[
+                "get",
+                "org.gnome.desktop.interface",
+                "toolkit-accessibility",
+            ],
+        );
+        if !check_detail_contains_true(&read) {
+            let runtime = run(
+                "busctl",
+                &[
+                    "--user",
+                    "set-property",
+                    "org.a11y.Bus",
+                    "/org/a11y/bus",
+                    "org.a11y.Status",
+                    "IsEnabled",
+                    "b",
+                    "true",
+                ],
+            );
+            return Check::fail(format!(
+                "Saved toolkit-accessibility was not verified: {}; write: {}; runtime fallback: {}",
+                read.detail, write.detail, runtime.detail
+            ));
+        }
+        read
+    };
+    if !can_build_accessibility_tree(before) {
+        let runtime = run(
+            "busctl",
+            &[
+                "--user",
+                "set-property",
+                "org.a11y.Bus",
+                "/org/a11y/bus",
+                "org.a11y.Status",
+                "IsEnabled",
+                "b",
+                "true",
+            ],
+        );
+        return Check::ok(format!(
+            "Saved toolkit-accessibility verified: {}; runtime request: {}",
+            setting.detail, runtime.detail
+        ));
+    }
+    Check::ok("Saved toolkit-accessibility is enabled; runtime AT-SPI is available")
 }
 
 fn platform_report() -> PlatformReport {
@@ -1377,6 +1422,55 @@ fn run_command(command: &str, args: &[&str], with_session_bus: bool) -> Check {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_repairs_saved_key_even_when_runtime_is_ready() {
+        let mut before = accessibility_report(Check::ok("bus"), Check::ok("false"));
+        before.at_spi_enabled = Check::ok("b true");
+        let mut calls = Vec::new();
+        let result = enable_accessibility(&before, |program, args| {
+            calls.push((program.to_string(), args.join(" ")));
+            Check::ok(if args[0] == "get" { "true" } else { "" })
+        });
+        assert!(result.ok);
+        assert_eq!(
+            calls,
+            vec![
+                (
+                    "gsettings".into(),
+                    "set org.gnome.desktop.interface toolkit-accessibility true".into()
+                ),
+                (
+                    "gsettings".into(),
+                    "get org.gnome.desktop.interface toolkit-accessibility".into()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn setup_does_not_claim_saved_success_from_command_exit_status() {
+        let before = accessibility_report(Check::ok("bus"), Check::ok("false"));
+        let mut calls = Vec::new();
+        let result = enable_accessibility(&before, |program, args| {
+            calls.push(program.to_string());
+            Check::ok(if args[0] == "get" {
+                "false"
+            } else {
+                "exit status 0"
+            })
+        });
+        assert!(!result.ok);
+        assert!(result.detail.contains("not verified"));
+        assert_eq!(calls, ["gsettings", "gsettings", "busctl"]);
+    }
+
+    #[test]
+    fn setup_preserves_enabled_settings_without_writing() {
+        let before = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let result = enable_accessibility(&before, |_, _| panic!("already enabled"));
+        assert!(result.ok);
+    }
 
     fn platform_report() -> PlatformReport {
         PlatformReport {

@@ -56,6 +56,11 @@ If `doctor` selects ydotool as the input backend, also enable its per-user daemo
 
 On GNOME Wayland, log out and back in after `setup-window-targeting` if the GNOME Shell extension was newly installed.
 
+`setup_accessibility` verifies the saved GNOME `toolkit-accessibility` key
+separately from runtime AT-SPI. Inspect its warning and readback before assuming
+new apps can expose trees. Other accessibility tools may change the key later;
+setup does not hold it enabled continuously.
+
 ## Configure Your Agent
 
 The `computer-use-linux` binary is an MCP server. Configure it as a stdio MCP server in your agent of choice:

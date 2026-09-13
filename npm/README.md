@@ -20,6 +20,10 @@ hermes mcp test computer-use-linux
 hermes mcp configure computer-use-linux
 ```
 
+If accessibility is disabled, run `computer-use-linux setup`. Setup writes and
+reads back GNOME's `toolkit-accessibility` setting and warns if only runtime
+accessibility is available. Restart target apps if their trees remain empty.
+
 The generated Hermes config should look like this:
 
 ```yaml

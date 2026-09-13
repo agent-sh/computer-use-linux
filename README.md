@@ -408,6 +408,13 @@ If you're running this on a shared workstation, set `ydotoold`'s socket permissi
 
 ## Troubleshooting
 
+`setup` and `setup_accessibility` write and read back GNOME's
+`org.gnome.desktop.interface toolkit-accessibility` setting, even if AT-SPI
+is already enabled at runtime. A runtime-only success is reported as a warning:
+newly launched GTK apps may still have no tree. Enabling the saved key may
+require restarting target apps. Other accessibility tools can change that key
+later; setup does not continuously override user settings.
+
 `computer-use-linux doctor` is the source of truth. Common failure modes and fixes:
 
 - **`accessibility.at_spi_bus.ok = false`** — AT-SPI registry isn't running or the toolkit bridge is off. Fix: `computer-use-linux setup` (or call the `setup_accessibility` MCP tool). Restart the apps you want to drive.
