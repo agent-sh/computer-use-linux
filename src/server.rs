@@ -3463,12 +3463,9 @@ impl ComputerUseLinux {
         // (GTK3 X11 HiDPI, GTK4 zero-origin bounds). Ordinary activation does
         // not need a guessed scale when the target exposes its native action.
         if is_plain_left_click(params.button.as_deref(), params.click_count) {
-            if let Some(action) = primary_action(&node.actions).filter(|action| {
-                matches!(
-                    action.name.to_ascii_lowercase().as_str(),
-                    "click" | "press" | "toggle"
-                )
-            }) {
+            if let Some(action) =
+                primary_action(&node.actions).filter(|action| click_equivalent_action(action))
+            {
                 return Ok(ClickTarget::PrimaryAction {
                     object_ref: node.object_ref.clone(),
                     action_name: Some(action.name.clone()),
@@ -3488,17 +3485,10 @@ impl ComputerUseLinux {
             ));
         }
 
-        let Some(action) = primary_action(node.actions.as_slice()) else {
-            return Err(format!(
-                "No clickable bounds cached for element_index {}, and the element exposes no primary AT-SPI action.",
-                node.index
-            ));
-        };
-        Ok(ClickTarget::PrimaryAction {
-            object_ref: node.object_ref.clone(),
-            action_name: Some(action.name.clone()),
-            action_index: action.index,
-        })
+        Err(format!(
+            "No clickable bounds or click-equivalent AT-SPI action for element_index {}. Use perform_action explicitly for other actions.",
+            node.index
+        ))
     }
 
     fn center_for_cached_node(&self, element_index: u32) -> Option<(i32, i32)> {
@@ -3832,6 +3822,13 @@ fn is_plain_left_click(button: Option<&str>, click_count: Option<u32>) -> bool {
     let button = button.unwrap_or("left");
     let click_count = click_count.unwrap_or(1);
     matches!(button.to_ascii_lowercase().as_str(), "left" | "primary") && click_count == 1
+}
+
+fn click_equivalent_action(action: &AccessibilityAction) -> bool {
+    matches!(
+        action.name.to_ascii_lowercase().as_str(),
+        "click" | "press" | "toggle"
+    )
 }
 
 fn requested_or_primary_action(action: Option<&str>) -> &str {
@@ -6559,6 +6556,31 @@ mod tests {
                     .unwrap(),
                 ClickTarget::Coordinates(60, 40)
             ));
+            let mut node = backend.last_nodes.lock().unwrap()[0].clone();
+            for bounds in [
+                None,
+                Some(Bounds {
+                    x: i32::MIN,
+                    y: i32::MIN,
+                    width: 1,
+                    height: 1,
+                }),
+                Some(Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 0,
+                    height: 0,
+                }),
+            ] {
+                node.bounds = bounds;
+                backend.cache_nodes(&[node.clone()]);
+                assert!(backend
+                    .resolve_click_target(&ClickParams {
+                        element_index: Some(7),
+                        ..Default::default()
+                    })
+                    .is_err());
+            }
         }
     }
 

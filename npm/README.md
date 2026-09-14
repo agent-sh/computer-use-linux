@@ -12,6 +12,8 @@ desktop actions.
 Plain left `click` by element index or selector prefers a native AT-SPI
 `click`, `press`, or `toggle` action over toolkit bounds,
 avoiding pointer-coordinate conversion when that action is available. Explicit
+`activate`/`jump` requests belong in `perform_action`, not `click`, even when
+bounds are missing. Explicit
 `x`/`y`, right clicks, and multi-clicks retain pointer semantics. For coordinate
 `click` or `scroll` with `relative: true`, use the clipped target-window
 screenshot crop origin and divide preview coordinates by screenshot `scale`.

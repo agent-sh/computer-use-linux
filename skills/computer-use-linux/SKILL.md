@@ -117,6 +117,8 @@ Plain left element/index/selector `click` prefers native AT-SPI `click`,
 conversion when available. This preference does not replace a coordinate click
 with an arbitrary action name. Explicit `x`/`y`, right clicks, and double/multiple
 clicks retain pointer semantics.
+Use `perform_action` explicitly for entry `activate` or slider `jump`; `click`
+never substitutes those actions, including when bounds are unavailable.
 
 ### Screenshot-relative coordinates
 

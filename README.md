@@ -63,7 +63,10 @@ Screenshot payloads are size-bounded by default before they are returned to the 
 
 For a plain left `click` by element index or selector, a recognized native
 AT-SPI `click`, `press`, or `toggle` action takes precedence
-over the element's bounds. This avoids pointer conversion for GTK3 HiDPI
+over bounds. Entry `activate` and slider `jump` must be requested explicitly
+with `perform_action`; they are never a substitute for a pointer click, even
+when bounds are missing.
+This avoids pointer conversion for GTK3 HiDPI
 extents and GTK4 zero-origin bounds when the element exposes such an action.
 The preference does not substitute an arbitrary action name for a coordinate
 click. Explicit `x`/`y`, right clicks, and double/multiple clicks retain pointer
