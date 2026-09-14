@@ -14,6 +14,17 @@ const SCHEMA: &str = "org.gnome.desktop.interface";
 const KEY: &str = "toolkit-accessibility";
 const DEADLINE: Duration = Duration::from_secs(5);
 
+async fn until_stopped<T>(
+    stop: &mut (impl Future<Output = ()> + Unpin),
+    operation: impl Future<Output = Result<T>>,
+) -> Result<Option<T>> {
+    tokio::select! {
+        biased;
+        _ = stop => Ok(None),
+        result = operation => result.map(Some),
+    }
+}
+
 async fn gsettings(args: Vec<&'static str>) -> Result<String> {
     let mut command = Command::new("gsettings");
     command.args(args);
@@ -50,13 +61,32 @@ pub(crate) async fn run() -> Result<()> {
     // another accessibility client or restores a stale snapshot over a user's new choice.
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let stop = async {
+        tokio::select! { _ = interrupt.recv() => {}, _ = terminate.recv() => {} }
+    };
+    tokio::pin!(stop);
     eprintln!("Accessibility guard requested: keeps GNOME toolkit-accessibility enabled while running. Stop with Ctrl-C or SIGTERM before disabling accessibility.");
-    let connection = timeout(DEADLINE, AccessibilityConnection::new())
-        .await
-        .context("accessibility guard connection timed out")??;
-    timeout(DEADLINE, connection.register_event::<ActivateEvent>())
-        .await
-        .context("accessibility listener registration timed out")??;
+    let Some(connection) = until_stopped(&mut stop, async {
+        timeout(DEADLINE, AccessibilityConnection::new())
+            .await
+            .context("accessibility guard connection timed out")?
+            .map_err(Into::into)
+    })
+    .await?
+    else {
+        return Ok(());
+    };
+    if until_stopped(&mut stop, async {
+        timeout(DEADLINE, connection.register_event::<ActivateEvent>())
+            .await
+            .context("accessibility listener registration timed out")?
+            .map_err(Into::into)
+    })
+    .await?
+    .is_none()
+    {
+        return Ok(());
+    }
     // Subscribe narrowly and discard event contents. No focus changes, speech, or logging
     // of application names. Holding this connection registers us with the bus launcher.
     let mut events = connection.event_stream();
@@ -67,7 +97,7 @@ pub(crate) async fn run() -> Result<()> {
             .kill_on_drop(true).spawn().context("start accessibility setting monitor")?;
         let stdout = monitor.stdout.take().context("setting monitor stdout missing")?;
         let mut lines = BufReader::new(stdout).lines();
-        let result = async {
+        let result: Result<Option<()>> = until_stopped(&mut stop, async {
             ensure_enabled(&mut gsettings).await?;
             eprintln!("Accessibility guard active: passive listener registered; saved toolkit setting verified. No accessibility applications were enabled.");
             // Periodic readback also covers a change between monitor spawn and its
@@ -75,8 +105,6 @@ pub(crate) async fn run() -> Result<()> {
             let mut readback = tokio::time::interval(Duration::from_secs(1));
             loop {
                 tokio::select! {
-                    _ = interrupt.recv() => break,
-                    _ = terminate.recv() => break,
                     event = events.next() => {
                         if event.is_none() { bail!("accessibility event stream disconnected"); }
                         // Unrelated registry signals need not decode as our event type.
@@ -90,11 +118,10 @@ pub(crate) async fn run() -> Result<()> {
                     _ = readback.tick() => { ensure_enabled(&mut gsettings).await?; }
                 }
             }
-            Ok(())
-        }.await;
+        }).await;
         let _ = monitor.start_kill();
         let _ = timeout(DEADLINE, monitor.wait()).await;
-        result
+        result.map(|_| ())
     }.await;
     drop(events);
     let _ = timeout(DEADLINE, connection.deregister_event::<ActivateEvent>()).await;
@@ -146,5 +173,28 @@ mod tests {
         let (result, calls) = exercise(&["unexpected"]).await;
         assert!(result.is_err());
         assert_eq!(calls.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stop_during_read_does_not_write_or_claim_active() {
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let stop = async {
+            let _ = stop_rx.await;
+        };
+        tokio::pin!(stop);
+        let mut calls = Vec::new();
+        let mut stop_tx = Some(stop_tx);
+        let result = until_stopped(
+            &mut stop,
+            ensure_enabled(&mut |args| {
+                calls.push(args);
+                stop_tx.take().unwrap().send(()).unwrap();
+                std::future::pending::<Result<String>>()
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_none());
+        assert_eq!(calls, vec![vec!["get", SCHEMA, KEY]]);
     }
 }

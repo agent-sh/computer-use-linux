@@ -77,4 +77,19 @@ guard_pid=
 gsettings set org.gnome.desktop.interface toolkit-accessibility false
 sleep 1.2
 [[ $(setting get) == false ]]
-echo 'PASS: GSD unguarded reset control, guarded reset, new GTK tree, SIGTERM, no writes after stop'
+# Losing the monitor must fail closed, release the listener, and stop writes.
+"$binary" guard-accessibility >"$scratch/guard.log" 2>&1 & guard_pid=$!
+wait_enabled
+for ((attempt=0; attempt<50; attempt++)); do
+  monitor_pid=$(pgrep -P "$guard_pid" -f '^gsettings monitor org.gnome.desktop.interface toolkit-accessibility$' || true)
+  [[ -n "$monitor_pid" ]] && break
+  sleep 0.1
+done
+[[ "$monitor_pid" =~ ^[0-9]+$ ]]
+kill -TERM "$monitor_pid"
+if wait "$guard_pid"; then echo 'guard ignored monitor failure' >&2; exit 1; fi
+guard_pid=
+gsettings set org.gnome.desktop.interface toolkit-accessibility false
+sleep 1.2
+[[ $(setting get) == false ]]
+echo 'PASS: GSD unguarded reset control, guarded reset, new GTK tree, SIGTERM, monitor failure, no writes after stop'
