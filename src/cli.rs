@@ -6,6 +6,7 @@ pub(crate) async fn run_from_env() -> Result<()> {
 
     match std::env::args().nth(1).as_deref() {
         Some("mcp") => server::serve_mcp().await,
+        Some("guard-accessibility") => crate::accessibility_guard::run().await,
         Some("doctor") => {
             let report = diagnostics::doctor_report();
             println!(
@@ -132,7 +133,7 @@ pub(crate) async fn run_from_env() -> Result<()> {
         }
         Some(command) => {
             anyhow::bail!(
-                "unknown command '{command}'. Expected one of: mcp, doctor, setup, apps, state, screenshot, windows, setup-window-targeting"
+                "unknown command '{command}'. Expected one of: mcp, doctor, setup, guard-accessibility, apps, state, screenshot, windows, setup-window-targeting"
             );
         }
         None => {
@@ -158,6 +159,7 @@ fn abs_test_report(
 }
 
 fn print_help() {
+    println!("guard-accessibility: explicit foreground accessibility hold-open; stop with Ctrl-C or SIGTERM before disabling accessibility.\n");
     println!(
         "computer-use-linux\n\nUsage:\n  computer-use-linux mcp\n  computer-use-linux doctor\n  computer-use-linux setup\n  computer-use-linux setup-window-targeting\n  computer-use-linux apps\n  computer-use-linux state [APP_NAME]\n  computer-use-linux screenshot\n  computer-use-linux windows"
     );
