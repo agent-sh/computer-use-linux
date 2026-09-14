@@ -492,6 +492,13 @@ activation through MCP at scales 1 and 2. This does not establish correctness
 of Mutter 46 EWMH move/resize, all mixed-output layouts, or GNOME 50.4 pointer
 clicks.
 
+Native Wayland qualification on GNOME 50.1 at 133.3% display scale used the
+same green target for both modes: crop-relative `(122, 145)` and desktop
+`(2140, 193)` both delivered widget coordinates approximately `(84.81, 84.78)`
+with `hit: true` through uinput. These are one capture's measured coordinates,
+not reusable offsets. Raw surface coordinates must still be transformed before
+comparing them with a widget-local target.
+
 ## Related
 
 - [agent-workspace-linux](https://github.com/agent-sh/agent-workspace-linux) — the sibling MCP that gives an agent its **own** isolated Linux desktop (a hidden Xvfb display with its own apps and browser) instead of driving yours. It is the inverse of this project: `computer-use-linux` automates the desktop you are already on; `agent-workspace-linux` sandboxes the agent in a separate one. Use them together.
