@@ -1,7 +1,7 @@
 use crate::atspi_tree::{
     focused_element_summary, list_accessible_apps, perform_action as invoke_accessibility_action,
-    set_element_value, snapshot_tree, AccessibilityAction, AccessibilityNode, AccessibleAppSummary,
-    Bounds, FocusedElementSummary, ValueSetInvocation,
+    perform_named_action, set_element_value, snapshot_tree, AccessibilityAction, AccessibilityNode,
+    AccessibleAppSummary, Bounds, FocusedElementSummary, ValueSetInvocation,
 };
 use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
@@ -743,8 +743,15 @@ impl ComputerUseLinux {
             action_index,
         } = target
         {
-            let action_index = action_index.to_string();
-            return match invoke_accessibility_action(&object_ref, Some(&action_index)).await {
+            let invocation = if let Some(name) = action_name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+            {
+                perform_named_action(&object_ref, name).await
+            } else {
+                invoke_accessibility_action(&object_ref, Some(&action_index.to_string())).await
+            };
+            return match invocation {
                 Ok(invocation) => Json(ActionOutput {
                     ok: invocation.ok,
                     implemented: true,

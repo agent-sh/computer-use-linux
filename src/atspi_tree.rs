@@ -392,6 +392,21 @@ pub async fn perform_action(
     object_ref_id: &str,
     requested_action: Option<&str>,
 ) -> Result<ActionInvocation> {
+    perform_action_inner(object_ref_id, requested_action, false).await
+}
+
+pub(crate) async fn perform_named_action(
+    object_ref_id: &str,
+    name: &str,
+) -> Result<ActionInvocation> {
+    perform_action_inner(object_ref_id, Some(name), true).await
+}
+
+async fn perform_action_inner(
+    object_ref_id: &str,
+    requested_action: Option<&str>,
+    name_only: bool,
+) -> Result<ActionInvocation> {
     let conn = connect().await?;
     let object_ref = object_ref_from_id(object_ref_id)?;
     let proxy = open_accessible(&conn, &object_ref)
@@ -404,7 +419,11 @@ pub async fn perform_action(
         .await
         .context("element does not expose the AT-SPI Action interface")?;
     let actions = action.get_actions().await.unwrap_or_default();
-    let action_index = select_action_index(&actions, requested_action)?;
+    let action_index = if name_only {
+        select_named_action_index(&actions, requested_action.unwrap_or_default())?
+    } else {
+        select_action_index(&actions, requested_action)?
+    };
     let action_name = actions
         .get(action_index as usize)
         .map(|action| action.name.clone());
@@ -838,6 +857,16 @@ fn select_action_index(actions: &[atspi::Action], requested_action: Option<&str>
     Ok(if actions.len() > 1 { 1 } else { 0 })
 }
 
+fn select_named_action_index(actions: &[atspi::Action], name: &str) -> Result<i32> {
+    actions
+        .iter()
+        .position(|action| action.name.eq_ignore_ascii_case(name))
+        .map(|index| index as i32)
+        .ok_or_else(|| {
+            anyhow!("cached AT-SPI action name is no longer available; refresh get_app_state")
+        })
+}
+
 fn optional_string(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
@@ -904,6 +933,23 @@ mod tests {
         ];
 
         assert_eq!(select_action_index(&actions, Some("show-menu")).unwrap(), 1);
+    }
+
+    #[test]
+    fn cached_action_name_is_revalidated_against_current_actions() {
+        let mut actions = vec![atspi::Action {
+            name: "show-menu".into(),
+            description: "Click".into(),
+            keybinding: String::new(),
+        }];
+        // Neither a stale index nor a matching description may invoke another action.
+        assert!(select_named_action_index(&actions, "Click").is_err());
+        actions.push(atspi::Action {
+            name: "click".into(),
+            description: String::new(),
+            keybinding: String::new(),
+        });
+        assert_eq!(select_named_action_index(&actions, "Click").unwrap(), 1);
     }
 
     #[test]
