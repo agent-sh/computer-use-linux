@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.5.0";
-export const GENERATED_TOOL_CATALOG_HASH = "5d6f3bd292d187d16cf207d06d7914405491d34e57d0a2d4715ace579c3415ac";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "cb31c3bbf87552a8ac4e34d8b9496a161f40beb0102113e5e3264745e102f698";
+export const GENERATED_TOOL_CATALOG_HASH = "9107297df765ce3b907540db172cc7823b7664586255db1064a40a44483d6fd6";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "e0bc41db617ea6d10d812cbddce6ef78036e44251360f5fac9c207dd0d5ce392";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -102,7 +102,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. Plain left activation prefers a native AT-SPI click/press/activate/toggle/jump action, avoiding toolkit coordinate scaling. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics.",
+    "description": "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. Plain left activation prefers a native AT-SPI click/press/toggle action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {

@@ -62,7 +62,7 @@ Screenshot payloads are size-bounded by default before they are returned to the 
 - `type_text` — literal text input, optionally targeted at a window or terminal
 
 For a plain left `click` by element index or selector, a recognized native
-AT-SPI `click`, `press`, `activate`, `toggle`, or `jump` action takes precedence
+AT-SPI `click`, `press`, or `toggle` action takes precedence
 over the element's bounds. This avoids pointer conversion for GTK3 HiDPI
 extents and GTK4 zero-origin bounds when the element exposes such an action.
 The preference does not substitute an arbitrary action name for a coordinate

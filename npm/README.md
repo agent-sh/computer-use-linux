@@ -10,7 +10,7 @@ mutating and can change real application state. The MCP tool list includes
 desktop actions.
 
 Plain left `click` by element index or selector prefers a native AT-SPI
-`click`, `press`, `activate`, `toggle`, or `jump` action over toolkit bounds,
+`click`, `press`, or `toggle` action over toolkit bounds,
 avoiding pointer-coordinate conversion when that action is available. Explicit
 `x`/`y`, right clicks, and multi-clicks retain pointer semantics. For coordinate
 `click` or `scroll` with `relative: true`, use the clipped target-window

@@ -644,7 +644,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "click",
-        description = "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. Plain left activation prefers a native AT-SPI click/press/activate/toggle/jump action, avoiding toolkit coordinate scaling. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics.",
+        description = "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. Plain left activation prefers a native AT-SPI click/press/toggle action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -3466,7 +3466,7 @@ impl ComputerUseLinux {
             if let Some(action) = primary_action(&node.actions).filter(|action| {
                 matches!(
                     action.name.to_ascii_lowercase().as_str(),
-                    "click" | "press" | "activate" | "toggle" | "jump"
+                    "click" | "press" | "toggle"
                 )
             }) {
                 return Ok(ClickTarget::PrimaryAction {
@@ -6523,6 +6523,43 @@ mod tests {
                 .unwrap(),
             ClickTarget::Coordinates(20, 30)
         ));
+    }
+
+    #[test]
+    fn entry_submit_and_slider_jump_are_not_pointer_clicks() {
+        for (role, action_name) in [
+            ("entry", "activate"),
+            ("spin button", "activate"),
+            ("slider", "jump"),
+        ] {
+            let backend = ComputerUseLinux::default();
+            let mut target = node_with_actions(
+                7,
+                Some(Bounds {
+                    x: 10,
+                    y: 20,
+                    width: 100,
+                    height: 40,
+                }),
+                vec![AccessibilityAction {
+                    index: 0,
+                    name: action_name.into(),
+                    description: String::new(),
+                    keybinding: String::new(),
+                }],
+            );
+            target.role = role.into();
+            backend.cache_nodes(&[target]);
+            assert!(matches!(
+                backend
+                    .resolve_click_target(&ClickParams {
+                        element_index: Some(7),
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                ClickTarget::Coordinates(60, 40)
+            ));
+        }
     }
 
     #[test]

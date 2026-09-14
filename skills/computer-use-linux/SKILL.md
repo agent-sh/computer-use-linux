@@ -113,7 +113,7 @@ If the binary is not on `PATH`, use the absolute path (typically `~/.local/bin/c
 10. After mutating actions, re-check state with `get_app_state`, `focused_window`, or an app-specific readback.
 
 Plain left element/index/selector `click` prefers native AT-SPI `click`,
-`press`, `activate`, `toggle`, or `jump` over toolkit bounds, avoiding coordinate
+`press`, or `toggle` over toolkit bounds, avoiding coordinate
 conversion when available. This preference does not replace a coordinate click
 with an arbitrary action name. Explicit `x`/`y`, right clicks, and double/multiple
 clicks retain pointer semantics.
