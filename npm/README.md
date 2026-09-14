@@ -25,6 +25,8 @@ For an optional MCP completion notification, set
 agent call `complete_interaction` after its desktop work. `notify-send` must be
 installed with an available desktop notification service. The cue is best effort
 and does not provide exclusive desktop ownership.
+This cue is available only to directly spawned MCP hosts; the native Pi extension
+does not yet forward the flag or include the tool in its catalog.
 
 The generated Hermes config should look like this:
 

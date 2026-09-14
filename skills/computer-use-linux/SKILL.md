@@ -60,6 +60,7 @@ For MCP hosts with `COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE=1`, call the optional
 `complete_interaction` tool once after finishing desktop interaction. A skipped
 cue is not a task failure. This notification does not guarantee exclusive
 desktop ownership or that other clients have stopped sending input.
+This applies only to directly spawned MCP hosts, not the native Pi extension.
 
 ## Configure Your Agent
 

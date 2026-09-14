@@ -419,6 +419,8 @@ limit and bounded process cleanup. Missing services, errors, or timeouts return
 `cue: "skipped"`; notification settings may suppress a submitted cue. This does
 not reserve the desktop or prove that other clients have stopped sending input.
 No sound or additional desktop settings are enabled by this option.
+This option currently applies only to directly spawned MCP hosts. The native Pi
+extension does not forward the flag or include this optional tool in its catalog.
 
 `computer-use-linux doctor` is the source of truth. Common failure modes and fixes:
 
