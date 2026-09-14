@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.5.0";
-export const GENERATED_TOOL_CATALOG_HASH = "3dd52d53c100e240fe2789dd1818ef80fd30202331c0aca2718212e2a79e47ff";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "13406c87ad78dbdea7e5480e3e482be14c97687fa92320fde8e16f2efbbd3339";
+export const GENERATED_TOOL_CATALOG_HASH = "5d6f3bd292d187d16cf207d06d7914405491d34e57d0a2d4715ace579c3415ac";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "cb31c3bbf87552a8ac4e34d8b9496a161f40beb0102113e5e3264745e102f698";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -102,7 +102,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata.",
+    "description": "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. Plain left activation prefers a native AT-SPI click/press/activate/toggle/jump action, avoiding toolkit coordinate scaling. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -153,7 +153,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "relative": {
           "default": null,
-          "description": "Interpret `x`/`y` as relative to the targeted window's top-left corner\n(the same coordinate space as a window-cropped `screenshot`). Requires a\nwindow target; ignored otherwise.",
+          "description": "Interpret `x`/`y` from the clipped window screenshot crop origin, in\ncoordinate pixels before preview resizing. Divide preview pixels by its\nscale first. This is not a toolkit widget or raw GDK surface origin.\nRequires a window target; missing targets are rejected.",
           "type": [
             "boolean",
             "null"
@@ -1043,7 +1043,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "relative": {
           "default": null,
-          "description": "Interpret `x`/`y` as relative to the targeted window's top-left corner\n(the same coordinate space as a window-cropped `screenshot`). Requires a\nwindow target; ignored otherwise.",
+          "description": "Interpret `x`/`y` from the clipped window screenshot crop origin, in\ncoordinate pixels before preview resizing. Divide preview pixels by its\nscale first. This is not a toolkit widget or raw GDK surface origin.\nRequires a window target; missing targets are rejected.",
           "type": [
             "boolean",
             "null"

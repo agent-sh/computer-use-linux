@@ -61,6 +61,20 @@ Screenshot payloads are size-bounded by default before they are returned to the 
 - `press_key` — keys / chords; can focus a window or terminal first
 - `type_text` — literal text input, optionally targeted at a window or terminal
 
+For a plain left `click` by element index or selector, a recognized native
+AT-SPI `click`, `press`, `activate`, `toggle`, or `jump` action takes precedence
+over the element's bounds. This avoids pointer conversion for GTK3 HiDPI
+extents and GTK4 zero-origin bounds when the element exposes such an action.
+The preference does not substitute an arbitrary action name for a coordinate
+click. Explicit `x`/`y`, right clicks, and double/multiple clicks retain pointer
+semantics. Re-check application state after either kind of activation.
+
+For coordinate `click` or `scroll` with `relative: true`, select a target window
+and measure from its clipped screenshot crop origin. Divide preview `x` and
+`y` by the returned screenshot `scale` before passing them. These are not raw
+GDK surface or widget-local coordinates; decorations and clipping can change
+the origin. A missing window target is rejected.
+
 Targeted `press_key`/`type_text` results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus. Click/screenshot/input results warn when the target window or coordinate is partially or fully off-screen. `get_app_state` returns a compact readiness block by default; pass `verbose: true` for the full diagnostics report.
 
 **Semantic actions**
@@ -443,6 +457,19 @@ later; setup does not continuously override user settings.
 - **Wayland pointer actions miss an unfocused window** — injected pointer input is subject to the compositor's input-focus rules. Call `activate_window` for the target before `click`, `drag`, or coordinate `scroll`; a pointer can land at the requested coordinate without the unfocused surface receiving the action.
 
 If `doctor` is green and a specific tool still misbehaves, file an issue with the JSON output of `doctor` and the failing tool's request payload.
+
+For coordinate calibration, launch [the GTK4 probe](examples/coordinate_probe.py)
+in your test desktop and take a targeted screenshot. Choose the center of its
+green 10x10 square from that screenshot, convert by `scale`, and click relative
+to the same target window. The probe's delivered-event `hit: true` is the
+acceptance condition. Do not pass its widget-local `(85, 85)` directly as a
+window-relative click: margins and decorations belong to different spaces.
+
+[The semantic-click regression](scripts/semantic_click_test.py) runs against a
+built binary in an isolated graphical display and checks actual GTK3 button
+activation through MCP at scales 1 and 2. This does not establish correctness
+of Mutter 46 EWMH move/resize, all mixed-output layouts, or GNOME 50.4 pointer
+clicks.
 
 ## Related
 

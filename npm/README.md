@@ -9,6 +9,15 @@ mutating and can change real application state. The MCP tool list includes
 `ToolAnnotations` so hosts can distinguish read-only observation from mutating
 desktop actions.
 
+Plain left `click` by element index or selector prefers a native AT-SPI
+`click`, `press`, `activate`, `toggle`, or `jump` action over toolkit bounds,
+avoiding pointer-coordinate conversion when that action is available. Explicit
+`x`/`y`, right clicks, and multi-clicks retain pointer semantics. For coordinate
+`click` or `scroll` with `relative: true`, use the clipped target-window
+screenshot crop origin and divide preview coordinates by screenshot `scale`.
+Do not use widget-local or raw GDK surface coordinates. A window target is
+required.
+
 ```bash
 npm install -g @agent-sh/computer-use-linux
 computer-use-linux doctor

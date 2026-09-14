@@ -98,6 +98,24 @@ If the binary is not on `PATH`, use the absolute path (typically `~/.local/bin/c
 9. For text input, prefer `type_text` with a target selector (`window_id`, `pid`, `app_id`, `wm_class`, `title`, `tty`, `terminal_pid`, `terminal_command`, or `terminal_cwd`) rather than relying on current focus.
 10. After mutating actions, re-check state with `get_app_state`, `focused_window`, or an app-specific readback.
 
+Plain left element/index/selector `click` prefers native AT-SPI `click`,
+`press`, `activate`, `toggle`, or `jump` over toolkit bounds, avoiding coordinate
+conversion when available. This preference does not replace a coordinate click
+with an arbitrary action name. Explicit `x`/`y`, right clicks, and double/multiple
+clicks retain pointer semantics.
+
+### Screenshot-relative coordinates
+
+Skip unless: a coordinate `click` or `scroll` uses `relative: true`.
+
+Select a target window and use its clipped screenshot crop origin. Divide
+preview `x`/`y` by screenshot `scale` first. Widget-local and raw GDK surface
+coordinates are not interchangeable with that origin; missing window targets
+are rejected. For calibration, use the repository's
+`examples/coordinate_probe.py`: select the green square from the screenshot
+and require a delivered-event `hit: true`. Do not pass widget-local `(85, 85)`
+directly to a window-relative click.
+
 ## Pitfalls
 
 - Already-running GTK, Qt, and Electron apps may need a restart after AT-SPI is enabled.
