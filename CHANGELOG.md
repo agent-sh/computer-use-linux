@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-15
+
 ### Added
 - GTK4 delivered-event coordinate probe and an opt-in GTK3/MCP semantic-click
   regression that verifies actual button activation at scales 1 and 2.
@@ -19,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and graceful handling of unavailable desktop notification services.
 
 ### Fixed
+- KDE Plasma terminal paste uses terminal shortcuts, including uxterm detection.
+- Setup verifies saved GNOME accessibility settings instead of reporting an
+  unverified write as success.
 - Plain left element/selector clicks prefer recognized native AT-SPI activation
   actions over toolkit bounds, avoiding GTK3 HiDPI and GTK4 zero-origin pointer
   conversion when a matching action is available. Explicit coordinates, right
@@ -504,7 +509,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/agent-sh/computer-use-linux/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.10...v0.5.0
 [0.4.10]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.9...v0.4.10
 [0.4.9]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.8...v0.4.9
