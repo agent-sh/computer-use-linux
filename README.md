@@ -75,6 +75,8 @@ Targeted `press_key`/`type_text` results append focused-element feedback from AT
 
 **Conditional host execution**
 
+- `complete_interaction` - optional desktop completion notification, registered only with `COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE=1`. Repeated calls can create repeated notifications; it does not provide desktop exclusivity.
+
 - `run_shell` — same-user `/bin/sh -c` execution without login-profile loading, registered only when the server operator starts the MCP process with `COMPUTER_USE_LINUX_ENABLE_SHELL=1`. It is deliberately absent by default and is not a sandbox.
 
 ### MCP safety contract
@@ -358,6 +360,7 @@ Most setups need none of these — `doctor` and the installers pick sensible def
 
 | Variable | Effect |
 | --- | --- |
+| `COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE` | Set exactly to `1` to expose the optional `complete_interaction` notification tool. Requires `notify-send` and a desktop notification service; disabled by default. |
 | `COMPUTER_USE_LINUX_COSMIC_HELPER` | Path to the `computer-use-linux-cosmic` helper when it isn't next to the binary or on `PATH`. |
 | `CU_DISABLE_ABS_POINTER` | Disable the uinput absolute pointer and click through `ydotool` instead for setups where the abs-pointer device misbehaves. |
 | `COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER` / `…_KEYBOARD` | Always route pointer / keyboard through the RemoteDesktop portal on Wayland, skipping auto-detection. |
@@ -407,6 +410,15 @@ Computer-use tooling is, by definition, a privilege-escalation surface. The thre
 If you're running this on a shared workstation, set `ydotoold`'s socket permissions to `0600` (the default) and audit which processes on your user can `connect()` to it.
 
 ## Troubleshooting
+
+To receive an explicit completion cue, start the MCP server with
+`COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE=1`. This exposes `complete_interaction`,
+a parameter-free tool the agent calls once after finishing its desktop work.
+It submits a notification through `notify-send` with a two-second execution
+limit and bounded process cleanup. Missing services, errors, or timeouts return
+`cue: "skipped"`; notification settings may suppress a submitted cue. This does
+not reserve the desktop or prove that other clients have stopped sending input.
+No sound or additional desktop settings are enabled by this option.
 
 `computer-use-linux doctor` is the source of truth. Common failure modes and fixes:
 

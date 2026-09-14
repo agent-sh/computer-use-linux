@@ -56,6 +56,7 @@ const KDE_KLIPPER_SERVICE: &str = "org.kde.klipper";
 const KDE_KLIPPER_PATH: &str = "/klipper";
 const KDE_KLIPPER_INTERFACE: &str = "org.kde.klipper.klipper";
 const SHELL_ENABLE_ENV: &str = "COMPUTER_USE_LINUX_ENABLE_SHELL";
+const COMPLETION_ENABLE_ENV: &str = "COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE";
 const SHELL_DEFAULT_TIMEOUT_SECS: u64 = 30;
 const SHELL_MAX_TIMEOUT_SECS: u64 = 120;
 const SHELL_MAX_COMMAND_BYTES: usize = 64 * 1024;
@@ -107,7 +108,17 @@ fn sanitize_unsigned_integer_formats(value: &mut serde_json::Value) {
 
 impl ComputerUseLinux {
     fn mcp_tool_router(&self) -> rmcp::handler::server::router::tool::ToolRouter<Self> {
+        self.router_with_completion(env::var(COMPLETION_ENABLE_ENV).as_deref() == Ok("1"))
+    }
+
+    fn router_with_completion(
+        &self,
+        enabled: bool,
+    ) -> rmcp::handler::server::router::tool::ToolRouter<Self> {
         let mut router = Self::tool_router();
+        if !enabled {
+            router.map.remove("complete_interaction");
+        }
         if !shell_execution_enabled() {
             router.map.remove("run_shell");
         }
@@ -128,6 +139,27 @@ impl ComputerUseLinux {
 
 #[tool_router]
 impl ComputerUseLinux {
+    #[tool(
+        name = "complete_interaction",
+        description = "Send a desktop notification that this agent has finished its interaction. Available only with COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE=1. This cue does not acquire or release an exclusive desktop lock. Delivery is best effort and bounded; it may be suppressed by desktop notification settings.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn complete_interaction(&self) -> Json<CompletionOutput> {
+        if env::var(COMPLETION_ENABLE_ENV).as_deref() != Ok("1") {
+            return Json(CompletionOutput {
+                ok: true,
+                cue: "skipped".into(),
+                note: "Completion notifications are disabled.".into(),
+            });
+        }
+        Json(send_completion_notification(Path::new("notify-send"), Duration::from_secs(2)).await)
+    }
+
     #[tool(
         name = "doctor",
         description = "Report Linux Computer Use desktop integration readiness.",
@@ -1777,6 +1809,41 @@ impl ServerHandler for ComputerUseLinux {}
 
 fn shell_execution_enabled() -> bool {
     shell_execution_enabled_value(env::var(SHELL_ENABLE_ENV).ok().as_deref())
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct CompletionOutput {
+    ok: bool,
+    cue: String,
+    note: String,
+}
+
+async fn send_completion_notification(program: &Path, limit: Duration) -> CompletionOutput {
+    let mut command = TokioCommand::new(program);
+    command.args([
+        "--app-name=computer-use-linux",
+        "--expire-time=3000",
+        "Desktop interaction finished",
+        "The agent has finished its desktop interaction.",
+    ]);
+    let sent =
+        crate::command_runner::output_with_timeout(command, "send completion notification", limit)
+            .await;
+    match sent {
+        Ok(output) if output.status.success() => CompletionOutput {
+            ok: true,
+            cue: "notification".into(),
+            note: "Notification submitted; desktop settings control whether it is displayed."
+                .into(),
+        },
+        _ => CompletionOutput {
+            ok: true,
+            cue: "skipped".into(),
+            note:
+                "Notification unavailable, failed, or timed out. The interaction is still complete."
+                    .into(),
+        },
+    }
 }
 
 fn shell_execution_enabled_value(value: Option<&str>) -> bool {
@@ -5355,6 +5422,57 @@ mod tests {
     use crate::atspi_tree::{AccessibilityAction, Bounds};
     use crate::windows::{WindowBounds, GNOME_SHELL_EXTENSION_BACKEND};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn completion_tool_is_explicitly_opt_in_and_has_side_effect_annotations() {
+        let server = ComputerUseLinux::default();
+        assert!(!server
+            .router_with_completion(false)
+            .list_all()
+            .iter()
+            .any(|t| t.name == "complete_interaction"));
+        let tools = server.router_with_completion(true).list_all();
+        let tool = tools
+            .iter()
+            .find(|t| t.name == "complete_interaction")
+            .unwrap();
+        let value = serde_json::to_value(tool).unwrap();
+        assert_eq!(value["annotations"]["readOnlyHint"], false);
+        assert_eq!(value["annotations"]["destructiveHint"], false);
+        assert_eq!(value["annotations"]["idempotentHint"], false);
+        assert_eq!(value["annotations"]["openWorldHint"], true);
+    }
+
+    #[tokio::test]
+    async fn completion_notification_handles_missing_and_failed_backends() {
+        for path in ["/nonexistent/computer-use-notify", "/bin/false"] {
+            let result =
+                send_completion_notification(Path::new(path), Duration::from_secs(2)).await;
+            assert!(result.ok);
+            assert_eq!(result.cue, "skipped");
+        }
+        let result =
+            send_completion_notification(Path::new("/bin/true"), Duration::from_secs(2)).await;
+        assert_eq!(result.cue, "notification");
+    }
+
+    #[tokio::test]
+    async fn completion_notification_timeout_is_bounded() {
+        let dir = std::env::temp_dir().join(format!(
+            "computer-use-notify-test-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("notify");
+        std::fs::write(&program, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let started = std::time::Instant::now();
+        let output = send_completion_notification(&program, Duration::from_millis(30)).await;
+        assert_eq!(output.cue, "skipped");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn exported_tool_schemas_omit_unsigned_integer_formats() {

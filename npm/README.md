@@ -20,6 +20,12 @@ hermes mcp test computer-use-linux
 hermes mcp configure computer-use-linux
 ```
 
+For an optional MCP completion notification, set
+`COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE=1` in the server environment and have the
+agent call `complete_interaction` after its desktop work. `notify-send` must be
+installed with an available desktop notification service. The cue is best effort
+and does not provide exclusive desktop ownership.
+
 The generated Hermes config should look like this:
 
 ```yaml

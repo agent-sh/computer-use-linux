@@ -36,6 +36,7 @@ EXPECTED_TOOLS = {
     "set_value",
 }
 SHELL_TOOL = "run_shell"
+COMPLETION_TOOL = "complete_interaction"
 
 INJECTION_PATTERNS = [
     re.compile(pattern, re.IGNORECASE)
@@ -114,7 +115,7 @@ IDEMPOTENT_TOOLS = READ_ONLY_TOOLS | {
     "resize_window",
 }
 
-OPEN_WORLD_TOOLS = (EXPECTED_TOOLS | {SHELL_TOOL}) - {
+OPEN_WORLD_TOOLS = (EXPECTED_TOOLS | {SHELL_TOOL, COMPLETION_TOOL}) - {
     "doctor",
     "setup_accessibility",
     "setup_window_targeting",
@@ -124,6 +125,8 @@ OPEN_WORLD_TOOLS = (EXPECTED_TOOLS | {SHELL_TOOL}) - {
 class McpClient:
     def __init__(self, binary: pathlib.Path, extra_env: dict[str, str] | None = None):
         child_env = os.environ.copy()
+        child_env["COMPUTER_USE_LINUX_ENABLE_SHELL"] = "0"
+        child_env["COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE"] = "0"
         if extra_env:
             child_env.update(extra_env)
         self.process = subprocess.Popen(
@@ -324,6 +327,23 @@ def main() -> int:
                 raise AssertionError(f"doctor report missing {section!r}: {report.keys()}")
     finally:
         client.close()
+
+    notification_client = McpClient(binary, {"COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE": "1"})
+    try:
+        notification_client.request("initialize", {
+            "protocolVersion": "2024-11-05", "capabilities": {},
+            "clientInfo": {"name": "completion-contract", "version": "0"},
+        })
+        notification_client.notify("notifications/initialized", {})
+        tools = notification_client.request("tools/list", {})["result"]["tools"]
+        if {tool["name"] for tool in tools} != EXPECTED_TOOLS | {COMPLETION_TOOL}:
+            raise AssertionError("completion opt-in changed the wrong tool set")
+        completion = next(tool for tool in tools if tool["name"] == COMPLETION_TOOL)
+        assert_tool_annotations(completion)
+        if schema_properties(completion):
+            raise AssertionError("completion notification must not accept process parameters")
+    finally:
+        notification_client.close()
 
     shell_home = tempfile.TemporaryDirectory(prefix="computer-use-linux-shell-home-")
     pathlib.Path(shell_home.name, ".profile").write_text(

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Optional `complete_interaction` MCP notification, enabled by
+  `COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE=1`, with bounded notification execution
+  and graceful handling of unavailable desktop notification services.
+
 ## [0.5.0] - 2026-08-31
 
 ### Added

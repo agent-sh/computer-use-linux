@@ -56,6 +56,11 @@ If `doctor` selects ydotool as the input backend, also enable its per-user daemo
 
 On GNOME Wayland, log out and back in after `setup-window-targeting` if the GNOME Shell extension was newly installed.
 
+For MCP hosts with `COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE=1`, call the optional
+`complete_interaction` tool once after finishing desktop interaction. A skipped
+cue is not a task failure. This notification does not guarantee exclusive
+desktop ownership or that other clients have stopped sending input.
+
 ## Configure Your Agent
 
 The `computer-use-linux` binary is an MCP server. Configure it as a stdio MCP server in your agent of choice:
