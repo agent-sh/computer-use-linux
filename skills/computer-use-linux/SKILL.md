@@ -67,6 +67,20 @@ separately from runtime AT-SPI. Inspect its warning and readback before assuming
 new apps can expose trees. Other accessibility tools may change the key later;
 setup does not hold it enabled continuously.
 
+### Optional foreground accessibility guard
+
+Skip unless: the user explicitly wants GNOME's saved `toolkit-accessibility`
+setting kept enabled while desktop automation runs.
+
+Run `computer-use-linux guard-accessibility` in a foreground terminal. It
+registers a passive AT-SPI window-activation listener and watches/reasserts the
+saved key with readback. The setting affects all apps for the current user.
+`mcp`, setup, and `get_app_state` never start this guard automatically.
+Stop with Ctrl-C or SIGTERM before intentionally disabling accessibility.
+Stopping ends writes and removes its listener without disabling other clients
+or restoring a previous saved value. Apps launched during a reset/reassertion
+race may still need restarting; do not claim a complete GNOME toggle fix.
+
 ## Configure Your Agent
 
 The `computer-use-linux` binary is an MCP server. Configure it as a stdio MCP server in your agent of choice:

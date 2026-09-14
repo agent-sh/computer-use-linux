@@ -32,6 +32,16 @@ If accessibility is disabled, run `computer-use-linux setup`. Setup writes and
 reads back GNOME's `toolkit-accessibility` setting and warns if only runtime
 accessibility is available. Restart target apps if their trees remain empty.
 
+To explicitly keep that saved setting enabled during desktop automation, run
+`computer-use-linux guard-accessibility` in a foreground terminal. It registers
+a passive AT-SPI window-activation listener and reasserts the current user's
+GNOME `toolkit-accessibility` key after resets, verifying each write by readback.
+This affects other apps using the same user setting. MCP, setup, and
+`get_app_state` never start it automatically. Stop with Ctrl-C or SIGTERM before
+disabling accessibility; stopping removes its listener and ends writes without
+disabling other clients or restoring an old value. An app launched during a
+reset may still need restarting, so this is not a complete GNOME toggle fix.
+
 The generated Hermes config should look like this:
 
 ```yaml

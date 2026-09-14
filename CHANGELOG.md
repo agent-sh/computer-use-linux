@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Explicit foreground `guard-accessibility` command with a passive AT-SPI
+  listener and verified GNOME toolkit-accessibility reassertion. Ctrl-C or
+  SIGTERM stops the guard without disabling other accessibility clients or
+  restoring an old saved setting. Never started automatically by MCP or setup.
 - Optional `complete_interaction` MCP notification, enabled by
   `COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE=1`, with bounded notification execution
   and graceful handling of unavailable desktop notification services.

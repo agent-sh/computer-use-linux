@@ -101,6 +101,7 @@ The binary also exposes the same capabilities from the CLI for scripting and deb
 computer-use-linux mcp                                  # stdio MCP server
 computer-use-linux doctor                               # JSON readiness report
 computer-use-linux setup                                # enable AT-SPI
+computer-use-linux guard-accessibility                  # explicit foreground GNOME accessibility guard
 computer-use-linux setup-window-targeting               # install GNOME Shell extension
 computer-use-linux apps
 computer-use-linux state [APP_NAME]
@@ -428,6 +429,26 @@ is already enabled at runtime. A runtime-only success is reported as a warning:
 newly launched GTK apps may still have no tree. Enabling the saved key may
 require restarting target apps. Other accessibility tools can change that key
 later; setup does not continuously override user settings.
+
+For an explicit foreground guard while using desktop automation, run:
+
+```bash
+computer-use-linux guard-accessibility
+```
+
+The guard registers a passive AT-SPI window-activation listener and watches
+GNOME's saved `toolkit-accessibility` key. It re-enables the key after a reset
+and verifies it by readback, with periodic checks as well as change monitoring.
+This affects all applications using the current user's GNOME setting, not just
+the target app. It does not start a screen reader or change focus.
+
+`mcp`, `setup`, `setup_accessibility`, and `get_app_state` never start this guard.
+Stop it with Ctrl-C or SIGTERM **before** intentionally disabling accessibility.
+Stopping ends setting writes and removes its listener without disabling other
+accessibility clients or restoring an old saved value. A reset and reassertion
+are not atomic: an app launched in that interval may still need restarting.
+This is an opt-in mitigation, not a guarantee that every GNOME toggle sequence
+preserves application accessibility trees.
 
 `computer-use-linux doctor` is the source of truth. Common failure modes and fixes:
 
