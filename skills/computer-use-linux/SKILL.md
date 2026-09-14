@@ -62,6 +62,11 @@ cue is not a task failure. This notification does not guarantee exclusive
 desktop ownership or that other clients have stopped sending input.
 This applies only to directly spawned MCP hosts, not the native Pi extension.
 
+`setup_accessibility` verifies the saved GNOME `toolkit-accessibility` key
+separately from runtime AT-SPI. Inspect its warning and readback before assuming
+new apps can expose trees. Other accessibility tools may change the key later;
+setup does not hold it enabled continuously.
+
 ## Configure Your Agent
 
 The `computer-use-linux` binary is an MCP server. Configure it as a stdio MCP server in your agent of choice:

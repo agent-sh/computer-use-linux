@@ -28,6 +28,10 @@ and does not provide exclusive desktop ownership.
 This cue is available only to directly spawned MCP hosts; the native Pi extension
 does not yet forward the flag or include the tool in its catalog.
 
+If accessibility is disabled, run `computer-use-linux setup`. Setup writes and
+reads back GNOME's `toolkit-accessibility` setting and warns if only runtime
+accessibility is available. Restart target apps if their trees remain empty.
+
 The generated Hermes config should look like this:
 
 ```yaml
