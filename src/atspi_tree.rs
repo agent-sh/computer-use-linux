@@ -136,6 +136,8 @@ struct BoundedTraversal<T> {
     queue: VecDeque<T>,
     attempted: usize,
     max_items: usize,
+    /// Set once an enqueue had to drop offered items for lack of capacity.
+    dropped: bool,
 }
 
 impl<T> BoundedTraversal<T> {
@@ -144,12 +146,17 @@ impl<T> BoundedTraversal<T> {
             queue: VecDeque::new(),
             attempted: 0,
             max_items,
+            dropped: false,
         }
     }
 
     fn enqueue(&mut self, items: impl IntoIterator<Item = T>) {
-        self.queue
-            .extend(items.into_iter().take(self.remaining_capacity()));
+        let capacity = self.remaining_capacity();
+        let mut items = items.into_iter();
+        self.queue.extend(items.by_ref().take(capacity));
+        if items.next().is_some() {
+            self.dropped = true;
+        }
     }
 
     fn pop(&mut self) -> Option<T> {
@@ -165,6 +172,12 @@ impl<T> BoundedTraversal<T> {
         self.max_items
             .saturating_sub(self.attempted.saturating_add(self.queue.len()))
     }
+
+    /// True when the budget stopped work that was actually offered: items were
+    /// dropped on enqueue, or the attempt cap was hit with items still queued.
+    fn truncated(&self) -> bool {
+        self.dropped || (self.attempted >= self.max_items && !self.queue.is_empty())
+    }
 }
 
 fn bounded_child_count(reported: i32, limit: usize) -> usize {
@@ -174,6 +187,10 @@ fn bounded_child_count(reported: i32, limit: usize) -> usize {
 struct IndexedReadBatch<T> {
     items: Vec<T>,
     attempted: usize,
+    /// True when fewer children were attempted than the parent reported, because
+    /// the caller's limit or the shared read budget ran out. Failed reads do not
+    /// count; they were attempted.
+    incomplete: bool,
 }
 
 impl<T> IndexedReadBatch<T> {
@@ -206,6 +223,7 @@ where
     IndexedReadBatch {
         items,
         attempted: attempt_count,
+        incomplete: attempt_count < usize::try_from(reported).unwrap_or_default(),
     }
 }
 
@@ -215,9 +233,13 @@ async fn children_up_to(
     remaining_attempts: &mut usize,
 ) -> zbus::Result<IndexedReadBatch<ObjectRefOwned>> {
     if limit == 0 || *remaining_attempts == 0 {
+        // Budget already spent; still ask whether children exist so the caller
+        // can report the tree as incomplete instead of merely short.
+        let child_count = proxy.child_count().await?;
         return Ok(IndexedReadBatch {
             items: Vec::new(),
             attempted: 0,
+            incomplete: child_count > 0,
         });
     }
 
@@ -251,6 +273,9 @@ pub(crate) struct AccessibilitySnapshot {
     pub nodes: Vec<AccessibilityNode>,
     /// True when registry roots were filtered to an app name and/or pid.
     pub scoped: bool,
+    /// True when max_nodes, max_depth, or the child read budget stopped
+    /// traversal with unread elements left. Failed element reads do not count.
+    pub truncated: bool,
 }
 
 pub async fn snapshot_tree(
@@ -312,6 +337,7 @@ async fn snapshot_tree_inner(
     .await;
     let scoped = selected_roots.scoped;
     let mut nodes = Vec::new();
+    let mut truncated = false;
     let mut traversal = BoundedTraversal::new(max_nodes);
 
     traversal.enqueue(
@@ -327,16 +353,22 @@ async fn snapshot_tree_inner(
         };
         let index = nodes.len() as u32;
         let remaining = traversal.remaining_capacity();
+        let node = read_node(&proxy, &object_ref, index, parent_index, depth).await;
         let child_refs = if depth < max_depth && remaining > 0 {
-            children_up_to(&proxy, remaining, &mut remaining_traversal_reads)
-                .await
-                .map(|batch| batch.items)
-                .unwrap_or_default()
+            match children_up_to(&proxy, remaining, &mut remaining_traversal_reads).await {
+                Ok(batch) => {
+                    truncated |= batch.incomplete;
+                    batch.items
+                }
+                Err(_) => Vec::new(),
+            }
         } else {
+            // Depth or node cap reached: any child this node reports is unread.
+            truncated |= node.child_count > 0;
             Vec::new()
         };
 
-        nodes.push(read_node(&proxy, &object_ref, index, parent_index, depth).await);
+        nodes.push(node);
 
         traversal.enqueue(
             child_refs
@@ -344,8 +376,13 @@ async fn snapshot_tree_inner(
                 .map(|child| (child, depth + 1, Some(index))),
         );
     }
+    truncated |= traversal.truncated();
 
-    Ok(AccessibilitySnapshot { nodes, scoped })
+    Ok(AccessibilitySnapshot {
+        nodes,
+        scoped,
+        truncated,
+    })
 }
 
 /// Compact description of the AT-SPI element that currently holds keyboard
@@ -1075,6 +1112,36 @@ mod tests {
         assert_eq!(traversal.pop(), Some(4));
         assert_eq!(traversal.pop(), None);
         assert_eq!(traversal.attempted, 4);
+        assert!(
+            traversal.truncated(),
+            "dropped enqueue items must be reported"
+        );
+    }
+
+    #[test]
+    fn traversal_that_drains_within_budget_is_not_truncated() {
+        let mut traversal = BoundedTraversal::new(3);
+        traversal.enqueue([1, 2, 3]);
+        assert_eq!(traversal.pop(), Some(1));
+        assert_eq!(traversal.pop(), Some(2));
+        assert_eq!(traversal.pop(), Some(3));
+        assert_eq!(traversal.pop(), None);
+        assert!(
+            !traversal.truncated(),
+            "exactly max_items real nodes is complete"
+        );
+    }
+
+    #[test]
+    fn traversal_with_queued_work_at_the_attempt_cap_is_truncated() {
+        let mut traversal = BoundedTraversal::new(2);
+        traversal.enqueue([1, 2]);
+        assert_eq!(traversal.pop(), Some(1));
+        assert_eq!(traversal.pop(), Some(2));
+        // Capacity is zero now; an enqueue offered work that cannot run.
+        traversal.enqueue([3]);
+        assert_eq!(traversal.pop(), None);
+        assert!(traversal.truncated());
     }
 
     #[test]
@@ -1106,6 +1173,10 @@ mod tests {
 
         assert_eq!(batch.items, vec![0, 2]);
         assert_eq!(batch.attempted, 3);
+        assert!(
+            batch.incomplete,
+            "100 reported children, 3 attempted: budget cut must be reported"
+        );
         assert!(!batch.all_failed());
         assert_eq!(*calls.lock().unwrap(), vec![0, 1, 2]);
         assert_eq!(remaining_attempts, 0);
