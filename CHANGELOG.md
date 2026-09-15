@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `get_app_state` reports `tree_scoped` and `accessibility_tree_truncated`,
+  warns in `message` when no app target narrowed the AT-SPI tree to one app,
+  and documents every scoping parameter in its schema, the server
+  instructions, the skill, and the Pi guide. Unscoped calls used to return the
+  whole desktop tree silently and could exhaust a small context window.
+
 ### Fixed
 - Skill Install section now separates Pi native install from PATH CLI/MCP
   install, so `pi install` is not described as sufficient for shell `doctor`

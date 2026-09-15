@@ -21,8 +21,8 @@ mod ydotool;
 pub mod atspi_tree {
     pub(crate) use crate::atspi_tree_impl::{
         focused_element_summary, list_accessible_apps, perform_action, perform_named_action,
-        set_element_value, snapshot_limits, AccessibleAppSummary, FocusedElementSummary,
-        ValueSetInvocation,
+        set_element_value, snapshot_accessibility_tree, snapshot_limits, AccessibleAppSummary,
+        FocusedElementSummary, ValueSetInvocation,
     };
     pub use crate::atspi_tree_impl::{
         snapshot_tree, AccessibilityAction, AccessibilityNode, AccessibilityText,

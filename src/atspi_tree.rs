@@ -246,12 +246,35 @@ pub async fn list_accessible_apps(limit: usize) -> Result<Vec<AccessibleAppSumma
     Ok(apps)
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct AccessibilitySnapshot {
+    pub nodes: Vec<AccessibilityNode>,
+    /// True when registry roots were filtered to an app name and/or pid.
+    pub scoped: bool,
+}
+
 pub async fn snapshot_tree(
     app_name_or_bundle_identifier: Option<&str>,
     target_pid: Option<u32>,
     max_nodes: usize,
     max_depth: u32,
 ) -> Result<Vec<AccessibilityNode>> {
+    Ok(snapshot_accessibility_tree(
+        app_name_or_bundle_identifier,
+        target_pid,
+        max_nodes,
+        max_depth,
+    )
+    .await?
+    .nodes)
+}
+
+pub(crate) async fn snapshot_accessibility_tree(
+    app_name_or_bundle_identifier: Option<&str>,
+    target_pid: Option<u32>,
+    max_nodes: usize,
+    max_depth: u32,
+) -> Result<AccessibilitySnapshot> {
     let (max_nodes, max_depth) = snapshot_limits(Some(max_nodes), Some(max_depth));
     timeout(
         SNAPSHOT_TIMEOUT,
@@ -271,7 +294,7 @@ async fn snapshot_tree_inner(
     target_pid: Option<u32>,
     max_nodes: usize,
     max_depth: u32,
-) -> Result<Vec<AccessibilityNode>> {
+) -> Result<AccessibilitySnapshot> {
     let conn = connect().await?;
     // App discovery is bounded independently so a tiny requested tree still
     // finds a target registered after the first accessibility root.
@@ -287,11 +310,13 @@ async fn snapshot_tree_inner(
         &mut remaining_filter_reads,
     )
     .await;
+    let scoped = selected_roots.scoped;
     let mut nodes = Vec::new();
     let mut traversal = BoundedTraversal::new(max_nodes);
 
     traversal.enqueue(
         selected_roots
+            .roots
             .into_iter()
             .map(|object_ref| (object_ref, 0_u32, None)),
     );
@@ -320,7 +345,7 @@ async fn snapshot_tree_inner(
         );
     }
 
-    Ok(nodes)
+    Ok(AccessibilitySnapshot { nodes, scoped })
 }
 
 /// Compact description of the AT-SPI element that currently holds keyboard
@@ -355,6 +380,7 @@ pub async fn focused_element_summary(
 
     traversal.enqueue(
         selected_roots
+            .roots
             .into_iter()
             .map(|object_ref| (object_ref, 0_u32)),
     );
@@ -529,17 +555,28 @@ async fn registry_children(
     Ok(batch.items)
 }
 
+struct SelectedRoots {
+    roots: Vec<ObjectRefOwned>,
+    scoped: bool,
+}
+
+/// Normalized app-name filter, or `None` when the caller passed nothing usable.
+/// A `None` needle with no pid match means the snapshot covers the whole desktop.
+fn app_name_needle(app_name_or_bundle_identifier: Option<&str>) -> Option<String> {
+    app_name_or_bundle_identifier
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+}
+
 async fn select_roots(
     conn: &AccessibilityConnection,
     roots: Vec<ObjectRefOwned>,
     app_name_or_bundle_identifier: Option<&str>,
     target_pid: Option<u32>,
     remaining_child_reads: &mut usize,
-) -> Vec<ObjectRefOwned> {
-    let needle = app_name_or_bundle_identifier
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase());
+) -> SelectedRoots {
+    let needle = app_name_needle(app_name_or_bundle_identifier);
     let dbus = DBusProxy::new(conn.connection()).await.ok();
     let mut remaining = roots;
 
@@ -565,17 +602,26 @@ async fn select_roots(
         }
 
         if !pid_and_filter_matches.is_empty() {
-            return pid_and_filter_matches;
+            return SelectedRoots {
+                roots: pid_and_filter_matches,
+                scoped: true,
+            };
         }
         if !pid_matches.is_empty() {
-            return pid_matches;
+            return SelectedRoots {
+                roots: pid_matches,
+                scoped: true,
+            };
         }
 
         remaining = non_pid_matches;
     }
 
     let Some(needle) = needle.as_deref() else {
-        return remaining;
+        return SelectedRoots {
+            roots: remaining,
+            scoped: false,
+        };
     };
 
     let mut selected = Vec::new();
@@ -585,7 +631,10 @@ async fn select_roots(
         }
     }
 
-    selected
+    SelectedRoots {
+        roots: selected,
+        scoped: true,
+    }
 }
 
 async fn root_matches(
@@ -982,6 +1031,21 @@ mod tests {
         // Nautilus 50 places file-list cells below depth 20 and can expose
         // more than 850 raw nodes. Keep the defaults above that known shape.
         assert_eq!(snapshot_limits(None, None), (1_000, 32));
+    }
+
+    #[test]
+    fn app_name_needle_ignores_blank_values_and_normalizes_the_rest() {
+        assert_eq!(app_name_needle(None), None);
+        assert_eq!(app_name_needle(Some("")), None);
+        assert_eq!(app_name_needle(Some("   ")), None);
+        assert_eq!(
+            app_name_needle(Some("Calculator")).as_deref(),
+            Some("calculator")
+        );
+        assert_eq!(
+            app_name_needle(Some(" :1.64/org/a11y/atspi/accessible/root ")).as_deref(),
+            Some(":1.64/org/a11y/atspi/accessible/root")
+        );
     }
 
     #[test]
