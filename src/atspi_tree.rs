@@ -235,13 +235,13 @@ async fn children_up_to(
     remaining_attempts: &mut usize,
 ) -> zbus::Result<IndexedReadBatch<ObjectRefOwned>> {
     if limit == 0 || *remaining_attempts == 0 {
-        // Budget already spent; still ask whether children exist so the caller
-        // can report the tree as incomplete instead of merely short.
-        let child_count = proxy.child_count().await?;
+        // Budget already spent: stay I/O-free. `incomplete` is false here because
+        // nothing was asked of the parent; callers that already hold the node's
+        // child_count (snapshot_tree_inner) derive truncation from that instead.
         return Ok(IndexedReadBatch {
             items: Vec::new(),
             attempted: 0,
-            incomplete: child_count > 0,
+            incomplete: false,
         });
     }
 
@@ -359,7 +359,10 @@ async fn snapshot_tree_inner(
         let child_refs = if depth < max_depth && remaining > 0 {
             match children_up_to(&proxy, remaining, &mut remaining_traversal_reads).await {
                 Ok(batch) => {
-                    truncated |= batch.incomplete;
+                    // A read-budget cut inside the fetch reports `incomplete`; an
+                    // already-exhausted budget returns the I/O-free empty batch, so
+                    // fall back to the child_count read_node already fetched.
+                    truncated |= batch.incomplete || (batch.attempted == 0 && node.child_count > 0);
                     batch.items
                 }
                 Err(_) => Vec::new(),
