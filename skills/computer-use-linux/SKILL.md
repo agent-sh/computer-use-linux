@@ -113,7 +113,7 @@ Pi native tools skip this MCP `command` config; see [Pi setup](references/pi-set
 ## Procedure
 
 1. In Pi, call `computer_use_linux_tools` with the exact tools or capability you need. Enabled tools use the `computer_use_linux_<name>` prefix, appear starting on the next model turn, and remain active for the session.
-2. Begin every desktop-control turn with `get_app_state`; use `include_screenshot: false` when the accessibility tree is sufficient. Its compact readiness block identifies missing setup.
+2. Begin every desktop-control turn with `get_app_state`, scoped to the app you are working in: pass `app_name_or_bundle_identifier` or a window target (`window_id`, `pid`, `app_id`, `wm_class`, `title`). Without a target the result is the whole desktop AT-SPI tree, `tree_scoped` is `false`, and `message` warns; that can flood context. Use `include_screenshot: false` when the accessibility tree is sufficient. If `accessibility_tree_truncated` is `true`, the tree is incomplete: scope to a narrower target and raise `max_nodes` or `max_depth` (hard caps 2000 and 64) rather than lowering them. The compact readiness block identifies missing setup.
 3. Use `doctor` only when you need the full diagnostic report.
 4. If `can_build_accessibility_tree` is false, run `setup_accessibility` and restart the target app.
 5. If `can_query_windows` is false on GNOME Wayland, run `setup_window_targeting` and ask the user to log out and back in if setup says the shell extension needs a reload.

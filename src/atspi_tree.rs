@@ -136,6 +136,8 @@ struct BoundedTraversal<T> {
     queue: VecDeque<T>,
     attempted: usize,
     max_items: usize,
+    /// Set once an enqueue had to drop offered items for lack of capacity.
+    dropped: bool,
 }
 
 impl<T> BoundedTraversal<T> {
@@ -144,12 +146,17 @@ impl<T> BoundedTraversal<T> {
             queue: VecDeque::new(),
             attempted: 0,
             max_items,
+            dropped: false,
         }
     }
 
     fn enqueue(&mut self, items: impl IntoIterator<Item = T>) {
-        self.queue
-            .extend(items.into_iter().take(self.remaining_capacity()));
+        let capacity = self.remaining_capacity();
+        let mut items = items.into_iter();
+        self.queue.extend(items.by_ref().take(capacity));
+        if items.next().is_some() {
+            self.dropped = true;
+        }
     }
 
     fn pop(&mut self) -> Option<T> {
@@ -165,6 +172,14 @@ impl<T> BoundedTraversal<T> {
         self.max_items
             .saturating_sub(self.attempted.saturating_add(self.queue.len()))
     }
+
+    /// True when the budget stopped work that was actually offered. `enqueue`
+    /// is the only gate: it never exceeds `remaining_capacity`, so
+    /// `attempted + queue.len() <= max_items` always holds and the queue can
+    /// never be non-empty at the attempt cap. Dropped items are the whole story.
+    fn truncated(&self) -> bool {
+        self.dropped
+    }
 }
 
 fn bounded_child_count(reported: i32, limit: usize) -> usize {
@@ -174,6 +189,10 @@ fn bounded_child_count(reported: i32, limit: usize) -> usize {
 struct IndexedReadBatch<T> {
     items: Vec<T>,
     attempted: usize,
+    /// True when fewer children were attempted than the parent reported, because
+    /// the caller's limit or the shared read budget ran out. Failed reads do not
+    /// count; they were attempted.
+    incomplete: bool,
 }
 
 impl<T> IndexedReadBatch<T> {
@@ -206,6 +225,7 @@ where
     IndexedReadBatch {
         items,
         attempted: attempt_count,
+        incomplete: attempt_count < usize::try_from(reported).unwrap_or_default(),
     }
 }
 
@@ -215,9 +235,13 @@ async fn children_up_to(
     remaining_attempts: &mut usize,
 ) -> zbus::Result<IndexedReadBatch<ObjectRefOwned>> {
     if limit == 0 || *remaining_attempts == 0 {
+        // Budget already spent: stay I/O-free. `incomplete` is false here because
+        // nothing was asked of the parent; callers that already hold the node's
+        // child_count (snapshot_tree_inner) derive truncation from that instead.
         return Ok(IndexedReadBatch {
             items: Vec::new(),
             attempted: 0,
+            incomplete: false,
         });
     }
 
@@ -246,12 +270,38 @@ pub async fn list_accessible_apps(limit: usize) -> Result<Vec<AccessibleAppSumma
     Ok(apps)
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct AccessibilitySnapshot {
+    pub nodes: Vec<AccessibilityNode>,
+    /// True when registry roots were filtered to an app name and/or pid.
+    pub scoped: bool,
+    /// True when max_nodes, max_depth, or the child read budget stopped
+    /// traversal with unread elements left. Failed element reads do not count.
+    pub truncated: bool,
+}
+
 pub async fn snapshot_tree(
     app_name_or_bundle_identifier: Option<&str>,
     target_pid: Option<u32>,
     max_nodes: usize,
     max_depth: u32,
 ) -> Result<Vec<AccessibilityNode>> {
+    Ok(snapshot_accessibility_tree(
+        app_name_or_bundle_identifier,
+        target_pid,
+        max_nodes,
+        max_depth,
+    )
+    .await?
+    .nodes)
+}
+
+pub(crate) async fn snapshot_accessibility_tree(
+    app_name_or_bundle_identifier: Option<&str>,
+    target_pid: Option<u32>,
+    max_nodes: usize,
+    max_depth: u32,
+) -> Result<AccessibilitySnapshot> {
     let (max_nodes, max_depth) = snapshot_limits(Some(max_nodes), Some(max_depth));
     timeout(
         SNAPSHOT_TIMEOUT,
@@ -271,7 +321,7 @@ async fn snapshot_tree_inner(
     target_pid: Option<u32>,
     max_nodes: usize,
     max_depth: u32,
-) -> Result<Vec<AccessibilityNode>> {
+) -> Result<AccessibilitySnapshot> {
     let conn = connect().await?;
     // App discovery is bounded independently so a tiny requested tree still
     // finds a target registered after the first accessibility root.
@@ -287,11 +337,14 @@ async fn snapshot_tree_inner(
         &mut remaining_filter_reads,
     )
     .await;
+    let scoped = selected_roots.scoped;
     let mut nodes = Vec::new();
+    let mut truncated = false;
     let mut traversal = BoundedTraversal::new(max_nodes);
 
     traversal.enqueue(
         selected_roots
+            .roots
             .into_iter()
             .map(|object_ref| (object_ref, 0_u32, None)),
     );
@@ -302,16 +355,25 @@ async fn snapshot_tree_inner(
         };
         let index = nodes.len() as u32;
         let remaining = traversal.remaining_capacity();
+        let node = read_node(&proxy, &object_ref, index, parent_index, depth).await;
         let child_refs = if depth < max_depth && remaining > 0 {
-            children_up_to(&proxy, remaining, &mut remaining_traversal_reads)
-                .await
-                .map(|batch| batch.items)
-                .unwrap_or_default()
+            match children_up_to(&proxy, remaining, &mut remaining_traversal_reads).await {
+                Ok(batch) => {
+                    // A read-budget cut inside the fetch reports `incomplete`; an
+                    // already-exhausted budget returns the I/O-free empty batch, so
+                    // fall back to the child_count read_node already fetched.
+                    truncated |= batch.incomplete || (batch.attempted == 0 && node.child_count > 0);
+                    batch.items
+                }
+                Err(_) => Vec::new(),
+            }
         } else {
+            // Depth or node cap reached: any child this node reports is unread.
+            truncated |= node.child_count > 0;
             Vec::new()
         };
 
-        nodes.push(read_node(&proxy, &object_ref, index, parent_index, depth).await);
+        nodes.push(node);
 
         traversal.enqueue(
             child_refs
@@ -319,8 +381,13 @@ async fn snapshot_tree_inner(
                 .map(|child| (child, depth + 1, Some(index))),
         );
     }
+    truncated |= traversal.truncated();
 
-    Ok(nodes)
+    Ok(AccessibilitySnapshot {
+        nodes,
+        scoped,
+        truncated,
+    })
 }
 
 /// Compact description of the AT-SPI element that currently holds keyboard
@@ -355,6 +422,7 @@ pub async fn focused_element_summary(
 
     traversal.enqueue(
         selected_roots
+            .roots
             .into_iter()
             .map(|object_ref| (object_ref, 0_u32)),
     );
@@ -529,17 +597,28 @@ async fn registry_children(
     Ok(batch.items)
 }
 
+struct SelectedRoots {
+    roots: Vec<ObjectRefOwned>,
+    scoped: bool,
+}
+
+/// Normalized app-name filter, or `None` when the caller passed nothing usable.
+/// A `None` needle with no pid match means the snapshot covers the whole desktop.
+fn app_name_needle(app_name_or_bundle_identifier: Option<&str>) -> Option<String> {
+    app_name_or_bundle_identifier
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+}
+
 async fn select_roots(
     conn: &AccessibilityConnection,
     roots: Vec<ObjectRefOwned>,
     app_name_or_bundle_identifier: Option<&str>,
     target_pid: Option<u32>,
     remaining_child_reads: &mut usize,
-) -> Vec<ObjectRefOwned> {
-    let needle = app_name_or_bundle_identifier
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase());
+) -> SelectedRoots {
+    let needle = app_name_needle(app_name_or_bundle_identifier);
     let dbus = DBusProxy::new(conn.connection()).await.ok();
     let mut remaining = roots;
 
@@ -565,17 +644,26 @@ async fn select_roots(
         }
 
         if !pid_and_filter_matches.is_empty() {
-            return pid_and_filter_matches;
+            return SelectedRoots {
+                roots: pid_and_filter_matches,
+                scoped: true,
+            };
         }
         if !pid_matches.is_empty() {
-            return pid_matches;
+            return SelectedRoots {
+                roots: pid_matches,
+                scoped: true,
+            };
         }
 
         remaining = non_pid_matches;
     }
 
     let Some(needle) = needle.as_deref() else {
-        return remaining;
+        return SelectedRoots {
+            roots: remaining,
+            scoped: false,
+        };
     };
 
     let mut selected = Vec::new();
@@ -585,7 +673,10 @@ async fn select_roots(
         }
     }
 
-    selected
+    SelectedRoots {
+        roots: selected,
+        scoped: true,
+    }
 }
 
 async fn root_matches(
@@ -985,6 +1076,21 @@ mod tests {
     }
 
     #[test]
+    fn app_name_needle_ignores_blank_values_and_normalizes_the_rest() {
+        assert_eq!(app_name_needle(None), None);
+        assert_eq!(app_name_needle(Some("")), None);
+        assert_eq!(app_name_needle(Some("   ")), None);
+        assert_eq!(
+            app_name_needle(Some("Calculator")).as_deref(),
+            Some("calculator")
+        );
+        assert_eq!(
+            app_name_needle(Some(" :1.64/org/a11y/atspi/accessible/root ")).as_deref(),
+            Some(":1.64/org/a11y/atspi/accessible/root")
+        );
+    }
+
+    #[test]
     fn requested_snapshot_limits_remain_bounded() {
         assert_eq!(snapshot_limits(Some(0), Some(0)), (1, 0));
         assert_eq!(snapshot_limits(Some(10_000), Some(128)), (2_000, 64));
@@ -1011,6 +1117,39 @@ mod tests {
         assert_eq!(traversal.pop(), Some(4));
         assert_eq!(traversal.pop(), None);
         assert_eq!(traversal.attempted, 4);
+        assert!(
+            traversal.truncated(),
+            "dropped enqueue items must be reported"
+        );
+    }
+
+    #[test]
+    fn traversal_that_drains_within_budget_is_not_truncated() {
+        let mut traversal = BoundedTraversal::new(3);
+        traversal.enqueue([1, 2, 3]);
+        assert_eq!(traversal.pop(), Some(1));
+        assert_eq!(traversal.pop(), Some(2));
+        assert_eq!(traversal.pop(), Some(3));
+        assert_eq!(traversal.pop(), None);
+        assert!(
+            !traversal.truncated(),
+            "exactly max_items real nodes is complete"
+        );
+    }
+
+    #[test]
+    fn enqueue_at_zero_capacity_marks_the_traversal_truncated() {
+        let mut traversal = BoundedTraversal::new(2);
+        traversal.enqueue([1, 2]);
+        assert_eq!(traversal.pop(), Some(1));
+        assert_eq!(traversal.pop(), Some(2));
+        assert!(!traversal.truncated(), "nothing dropped yet");
+        // Capacity is zero; the offered item is dropped, which is the only
+        // path that can mark truncation.
+        traversal.enqueue([3]);
+        assert!(traversal.queue.is_empty());
+        assert_eq!(traversal.pop(), None);
+        assert!(traversal.truncated());
     }
 
     #[test]
@@ -1042,6 +1181,10 @@ mod tests {
 
         assert_eq!(batch.items, vec![0, 2]);
         assert_eq!(batch.attempted, 3);
+        assert!(
+            batch.incomplete,
+            "100 reported children, 3 attempted: budget cut must be reported"
+        );
         assert!(!batch.all_failed());
         assert_eq!(*calls.lock().unwrap(), vec![0, 1, 2]);
         assert_eq!(remaining_attempts, 0);

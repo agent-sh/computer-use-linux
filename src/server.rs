@@ -1,7 +1,7 @@
 use crate::atspi_tree::{
     focused_element_summary, list_accessible_apps, perform_action as invoke_accessibility_action,
-    perform_named_action, set_element_value, snapshot_tree, AccessibilityAction, AccessibilityNode,
-    AccessibleAppSummary, Bounds, FocusedElementSummary, ValueSetInvocation,
+    perform_named_action, set_element_value, snapshot_accessibility_tree, AccessibilityAction,
+    AccessibilityNode, AccessibleAppSummary, Bounds, FocusedElementSummary, ValueSetInvocation,
 };
 use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
@@ -331,7 +331,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "get_app_state",
-        description = "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
+        description = "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -387,13 +387,24 @@ impl ComputerUseLinux {
         } else {
             (None, None)
         };
+        let mut tree_scoped = false;
+        let mut accessibility_tree_truncated = false;
         let (accessibility_tree, accessibility_tree_raw_count, accessibility_error) =
             if diagnostics.readiness.can_build_accessibility_tree {
                 let target_pid = window_context.as_ref().and_then(|window| window.pid);
-                match snapshot_tree(app_filter.as_deref(), target_pid, max_nodes, max_depth).await {
-                    Ok(nodes) => {
-                        let raw_count = nodes.len();
-                        (compact_accessibility_tree(nodes), raw_count, None)
+                match snapshot_accessibility_tree(
+                    app_filter.as_deref(),
+                    target_pid,
+                    max_nodes,
+                    max_depth,
+                )
+                .await
+                {
+                    Ok(snapshot) => {
+                        tree_scoped = snapshot.scoped;
+                        accessibility_tree_truncated = snapshot.truncated;
+                        let raw_count = snapshot.nodes.len();
+                        (compact_accessibility_tree(snapshot.nodes), raw_count, None)
                     }
                     Err(error) => (Vec::new(), 0, Some(format!("{error:#}"))),
                 }
@@ -442,6 +453,16 @@ impl ComputerUseLinux {
         } else if let Some(error) = &window_error {
             message.push_str(&format!(" Window target resolution failed: {error}"));
         }
+        if let Some(warning) =
+            unscoped_accessibility_tree_warning(tree_scoped, accessibility_error.is_none())
+        {
+            message.push(' ');
+            message.push_str(warning);
+        }
+        if let Some(note) = truncated_accessibility_tree_note(accessibility_tree_truncated) {
+            message.push(' ');
+            message.push_str(note);
+        }
 
         // Full diagnostics are huge (portal/process dumps); emit them only on
         // request. The compact readiness block always travels, and failures get
@@ -465,6 +486,8 @@ impl ComputerUseLinux {
             screenshot_error,
             accessibility_tree,
             accessibility_tree_raw_count,
+            tree_scoped,
+            accessibility_tree_truncated,
             accessibility_error,
             readiness,
             diagnostics: include_full.then_some(diagnostics),
@@ -1810,7 +1833,7 @@ impl ComputerUseLinux {
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
     version = "0.6.0",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
 )]
 impl ServerHandler for ComputerUseLinux {}
 
@@ -2248,24 +2271,44 @@ struct AppCandidate {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 struct GetAppStateParams {
+    /// App name or AT-SPI id that limits the accessibility tree. Omit only when
+    /// you need the whole desktop tree; unscoped results can flood context.
     #[serde(default)]
     app_name_or_bundle_identifier: Option<String>,
+    /// Compositor window id. Also scopes the accessibility tree to that window's
+    /// application when possible.
     #[serde(default)]
     window_id: Option<u64>,
+    /// Process id. Also scopes the accessibility tree to that process when it
+    /// exposes AT-SPI.
     #[serde(default)]
     pid: Option<u32>,
+    /// Terminal tty device (for example /dev/pts/3). Resolves a window target
+    /// and scopes the tree when possible.
     #[serde(default)]
     tty: Option<String>,
+    /// Terminal emulator pid. Resolves a window target and scopes the tree when
+    /// possible.
     #[serde(default)]
     terminal_pid: Option<u32>,
+    /// Terminal command substring. Resolves a window target and scopes the tree
+    /// when possible.
     #[serde(default)]
     terminal_command: Option<String>,
+    /// Terminal working directory. Resolves a window target and scopes the tree
+    /// when possible.
     #[serde(default)]
     terminal_cwd: Option<String>,
+    /// Application id. Also scopes the accessibility tree when it matches an
+    /// AT-SPI root.
     #[serde(default)]
     app_id: Option<String>,
+    /// Window manager class. Also scopes the accessibility tree when it matches
+    /// an AT-SPI root.
     #[serde(default)]
     wm_class: Option<String>,
+    /// Window title substring. Also scopes the accessibility tree when it
+    /// matches an AT-SPI root.
     #[serde(default)]
     title: Option<String>,
     /// Maximum raw AT-SPI nodes to inspect before compaction (default 1000, hard max 2000).
@@ -2274,6 +2317,8 @@ struct GetAppStateParams {
     /// Maximum AT-SPI traversal depth (default 32, hard max 64).
     #[serde(default)]
     max_depth: Option<u32>,
+    /// Include a size-bounded screenshot (default true). Set false when the
+    /// accessibility tree is enough.
     #[serde(default)]
     include_screenshot: Option<bool>,
     /// Maximum returned screenshot width in pixels (default 1920, hard-capped).
@@ -2414,6 +2459,14 @@ struct GetAppStateOutput {
     screenshot_error: Option<String>,
     accessibility_tree: Vec<AccessibilityNode>,
     accessibility_tree_raw_count: usize,
+    /// True when the snapshot was limited to selected app roots rather than the
+    /// full desktop AT-SPI registry.
+    tree_scoped: bool,
+    /// True when max_nodes, max_depth, or the child read budget stopped
+    /// traversal with unread elements left, so the tree is incomplete. Recover
+    /// by scoping to a narrower app or window target and raising max_nodes or
+    /// max_depth (hard caps 2000 and 64). Failed element reads do not count.
+    accessibility_tree_truncated: bool,
     accessibility_error: Option<String>,
     /// Compact readiness summary (always present).
     readiness: crate::diagnostics::ReadinessReport,
@@ -3857,6 +3910,22 @@ fn bounds_center(bounds: &Bounds) -> Option<(i32, i32)> {
         bounds.x.checked_add(bounds.width / 2)?,
         bounds.y.checked_add(bounds.height / 2)?,
     ))
+}
+
+/// Context-cost warning for an AT-SPI snapshot that no app target narrowed.
+/// Silent when the tree failed (the failure message already explains) or when
+/// any filter or pid match scoped the roots.
+fn unscoped_accessibility_tree_warning(tree_scoped: bool, tree_ok: bool) -> Option<&'static str> {
+    (tree_ok && !tree_scoped).then_some(
+        "WARNING: no app target scoped the accessibility tree, so it covers the whole desktop and can flood context. Pass app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title) to limit it.",
+    )
+}
+
+/// Note appended when raw traversal hit max_nodes; the tree is incomplete.
+fn truncated_accessibility_tree_note(truncated: bool) -> Option<&'static str> {
+    truncated.then_some(
+        "The node, depth, or read budget stopped traversal with unread elements left. To recover missing elements, scope to a narrower app or window target and raise max_nodes or max_depth (hard caps 2000 and 64); lowering max_nodes would drop more.",
+    )
 }
 
 fn compact_accessibility_tree(nodes: Vec<AccessibilityNode>) -> Vec<AccessibilityNode> {
@@ -7619,5 +7688,33 @@ mod tests {
             .all(|character| character.is_ascii_hexdigit()));
         assert!(!digest.contains("secret"));
         assert_eq!(digest, shell_command_sha256("printf secret"));
+    }
+}
+
+#[cfg(test)]
+mod accessibility_tree_note_tests {
+    use super::{truncated_accessibility_tree_note, unscoped_accessibility_tree_warning};
+
+    #[test]
+    fn unscoped_warning_only_when_tree_succeeded_without_a_scope() {
+        let warning = unscoped_accessibility_tree_warning(false, true).unwrap();
+        assert!(warning.starts_with("WARNING:"));
+        assert!(warning.contains("app_name_or_bundle_identifier"));
+        assert!(warning.contains("window_id, pid, app_id, wm_class, title"));
+
+        assert!(unscoped_accessibility_tree_warning(true, true).is_none());
+        assert!(unscoped_accessibility_tree_warning(false, false).is_none());
+        assert!(unscoped_accessibility_tree_warning(true, false).is_none());
+    }
+
+    #[test]
+    fn truncated_note_only_when_the_node_cap_was_hit() {
+        let note = truncated_accessibility_tree_note(true).unwrap();
+        assert!(note.contains("raise max_nodes or max_depth"));
+        assert!(
+            !note.contains("smaller max_nodes"),
+            "shrinking the cap belongs to the unscoped warning, not the truncation note"
+        );
+        assert!(truncated_accessibility_tree_note(false).is_none());
     }
 }

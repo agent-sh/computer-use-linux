@@ -62,8 +62,11 @@ session so `get_app_state` element indices and portal sessions remain valid.
 ## Safe operating loop
 
 1. Enable `get_app_state`, `list_windows`, and any likely action tools.
-2. Call `computer_use_linux_get_app_state`, using
-   `include_screenshot: false` when accessibility data is enough.
+2. Call `computer_use_linux_get_app_state` scoped to the target app
+   (`app_name_or_bundle_identifier`, or `window_id`/`pid`/`app_id`/`wm_class`/
+   `title`), using `include_screenshot: false` when accessibility data is
+   enough. An unscoped call returns the whole desktop tree, reports
+   `tree_scoped: false`, and warns; that can exhaust a small context window.
 3. Inspect the returned readiness block; enable/call `doctor` only for full
    diagnostics.
 4. Identify the target with `computer_use_linux_list_windows` or

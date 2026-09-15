@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.6.0";
-export const GENERATED_TOOL_CATALOG_HASH = "9107297df765ce3b907540db172cc7823b7664586255db1064a40a44483d6fd6";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "e0bc41db617ea6d10d812cbddce6ef78036e44251360f5fac9c207dd0d5ce392";
+export const GENERATED_TOOL_CATALOG_HASH = "c0c1e9d0e200637ff286baec47b6ee8a6798c7e17f29a9cb71a62a8c292a47ed";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "f2ebf4164a8a92893933b674bf761430251dce068d7944ce363c99eb88d316ff";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -298,7 +298,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
+    "description": "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -313,6 +313,7 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "app_id": {
           "default": null,
+          "description": "Application id. Also scopes the accessibility tree when it matches an\nAT-SPI root.",
           "type": [
             "string",
             "null"
@@ -320,6 +321,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "app_name_or_bundle_identifier": {
           "default": null,
+          "description": "App name or AT-SPI id that limits the accessibility tree. Omit only when\nyou need the whole desktop tree; unscoped results can flood context.",
           "type": [
             "string",
             "null"
@@ -339,6 +341,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "include_screenshot": {
           "default": null,
+          "description": "Include a size-bounded screenshot (default true). Set false when the\naccessibility tree is enough.",
           "type": [
             "boolean",
             "null"
@@ -391,6 +394,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
+          "description": "Process id. Also scopes the accessibility tree to that process when it\nexposes AT-SPI.",
           "minimum": 0,
           "type": [
             "integer",
@@ -418,6 +422,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_command": {
           "default": null,
+          "description": "Terminal command substring. Resolves a window target and scopes the tree\nwhen possible.",
           "type": [
             "string",
             "null"
@@ -425,6 +430,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_cwd": {
           "default": null,
+          "description": "Terminal working directory. Resolves a window target and scopes the tree\nwhen possible.",
           "type": [
             "string",
             "null"
@@ -432,6 +438,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_pid": {
           "default": null,
+          "description": "Terminal emulator pid. Resolves a window target and scopes the tree when\npossible.",
           "minimum": 0,
           "type": [
             "integer",
@@ -440,6 +447,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "title": {
           "default": null,
+          "description": "Window title substring. Also scopes the accessibility tree when it\nmatches an AT-SPI root.",
           "type": [
             "string",
             "null"
@@ -447,6 +455,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "tty": {
           "default": null,
+          "description": "Terminal tty device (for example /dev/pts/3). Resolves a window target\nand scopes the tree when possible.",
           "type": [
             "string",
             "null"
@@ -462,6 +471,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
+          "description": "Compositor window id. Also scopes the accessibility tree to that window's\napplication when possible.",
           "minimum": 0,
           "type": [
             "integer",
@@ -470,6 +480,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
+          "description": "Window manager class. Also scopes the accessibility tree when it matches\nan AT-SPI root.",
           "type": [
             "string",
             "null"
