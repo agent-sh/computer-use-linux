@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Skill Install section now separates Pi native install from PATH CLI/MCP
+  install, so `pi install` is not described as sufficient for shell `doctor`
+  and `setup`.
+
 ## [0.6.0] - 2026-09-15
 
 ### Added

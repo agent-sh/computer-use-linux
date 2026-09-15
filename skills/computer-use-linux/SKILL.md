@@ -24,13 +24,23 @@ Do not use this for remote browsers, websites, or headless automation when a bro
 
 ## Install
 
-Pi users need only the package:
+Pick the install that matches how you will run this skill. You can use both.
+
+### Pi native tools
 
 ```bash
 pi install npm:@agent-sh/computer-use-linux
 ```
 
-Preferred install:
+This enables Pi's `computer_use_linux_*` tools. It does not put
+`computer-use-linux` on `PATH`. Shell commands in this skill (`doctor`,
+`setup`, `setup-window-targeting`, `guard-accessibility`, the MCP `command`
+config, and Verification) need the CLI install below.
+
+### Shell CLI / MCP server
+
+Use this when you need `computer-use-linux` on `PATH` for the commands in this
+skill.
 
 ```bash
 npm install -g @agent-sh/computer-use-linux
@@ -93,6 +103,7 @@ The `computer-use-linux` binary is an MCP server. Configure it as a stdio MCP se
 ```
 
 If the binary is not on `PATH`, use the absolute path (typically `~/.local/bin/computer-use-linux` or the npm global bin directory).
+Pi native tools skip this MCP `command` config; see [Pi setup](references/pi-setup.md).
 
 ### Host-specific guides
 
@@ -144,6 +155,10 @@ directly to a window-relative click.
 - On COSMIC, the standard npm, Cargo, and install-script paths install the `computer-use-linux-cosmic` helper automatically. Manual binary installs must copy both binaries.
 
 ## Verification
+
+Pi-only installs: enable and call `computer_use_linux_doctor` as in
+[Pi setup](references/pi-setup.md). Shell `computer-use-linux doctor` needs
+the CLI on `PATH`.
 
 Run:
 

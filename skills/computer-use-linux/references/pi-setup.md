@@ -14,7 +14,10 @@ pi install npm:@agent-sh/computer-use-linux
 ```
 
 Restart Pi or run `/reload`. No separate MCP adapter or MCP configuration is
-required.
+required. This does not put `computer-use-linux` on `PATH`. For shell `doctor`,
+`setup`, or MCP hosts, also install the CLI with
+`npm install -g @agent-sh/computer-use-linux` or
+`cargo install computer-use-linux`.
 
 The integration is designed for current Pi releases with additive dynamic tool
 loading. Update Pi and installed packages when needed:
