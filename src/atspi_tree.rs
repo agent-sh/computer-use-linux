@@ -173,10 +173,12 @@ impl<T> BoundedTraversal<T> {
             .saturating_sub(self.attempted.saturating_add(self.queue.len()))
     }
 
-    /// True when the budget stopped work that was actually offered: items were
-    /// dropped on enqueue, or the attempt cap was hit with items still queued.
+    /// True when the budget stopped work that was actually offered. `enqueue`
+    /// is the only gate: it never exceeds `remaining_capacity`, so
+    /// `attempted + queue.len() <= max_items` always holds and the queue can
+    /// never be non-empty at the attempt cap. Dropped items are the whole story.
     fn truncated(&self) -> bool {
-        self.dropped || (self.attempted >= self.max_items && !self.queue.is_empty())
+        self.dropped
     }
 }
 
@@ -1133,13 +1135,16 @@ mod tests {
     }
 
     #[test]
-    fn traversal_with_queued_work_at_the_attempt_cap_is_truncated() {
+    fn enqueue_at_zero_capacity_marks_the_traversal_truncated() {
         let mut traversal = BoundedTraversal::new(2);
         traversal.enqueue([1, 2]);
         assert_eq!(traversal.pop(), Some(1));
         assert_eq!(traversal.pop(), Some(2));
-        // Capacity is zero now; an enqueue offered work that cannot run.
+        assert!(!traversal.truncated(), "nothing dropped yet");
+        // Capacity is zero; the offered item is dropped, which is the only
+        // path that can mark truncation.
         traversal.enqueue([3]);
+        assert!(traversal.queue.is_empty());
         assert_eq!(traversal.pop(), None);
         assert!(traversal.truncated());
     }
