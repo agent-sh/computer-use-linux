@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-16
+
 ### Added
 - `get_app_state` reports `tree_scoped` and `accessibility_tree_truncated`,
   warns in `message` when no app target narrowed the AT-SPI tree to one app,
@@ -521,7 +523,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/agent-sh/computer-use-linux/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/agent-sh/computer-use-linux/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.10...v0.5.0
 [0.4.10]: https://github.com/agent-sh/computer-use-linux/compare/v0.4.9...v0.4.10
