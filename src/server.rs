@@ -354,6 +354,14 @@ impl ComputerUseLinux {
         let include_screenshot = params.include_screenshot.unwrap_or(true);
         let screenshot_options = params.screenshot_options();
         let screenshot_target_requested = params.window_target().has_target();
+        // Whether the caller asked for any scope at all. `tree_scoped` can still
+        // come back false when a target matched no AT-SPI root, and that case
+        // needs different advice than "pass a target".
+        let accessibility_target_requested = screenshot_target_requested
+            || params
+                .app_name_or_bundle_identifier
+                .as_deref()
+                .is_some_and(|name| !name.trim().is_empty());
         let app_filter = self
             .resolve_accessibility_app_filter(&params, window_context.as_ref())
             .await;
@@ -453,9 +461,11 @@ impl ComputerUseLinux {
         } else if let Some(error) = &window_error {
             message.push_str(&format!(" Window target resolution failed: {error}"));
         }
-        if let Some(warning) =
-            unscoped_accessibility_tree_warning(tree_scoped, accessibility_error.is_none())
-        {
+        if let Some(warning) = unscoped_accessibility_tree_warning(
+            tree_scoped,
+            accessibility_error.is_none(),
+            accessibility_target_requested,
+        ) {
             message.push(' ');
             message.push_str(warning);
         }
@@ -3914,11 +3924,23 @@ fn bounds_center(bounds: &Bounds) -> Option<(i32, i32)> {
 
 /// Context-cost warning for an AT-SPI snapshot that no app target narrowed.
 /// Silent when the tree failed (the failure message already explains) or when
-/// any filter or pid match scoped the roots.
-fn unscoped_accessibility_tree_warning(tree_scoped: bool, tree_ok: bool) -> Option<&'static str> {
-    (tree_ok && !tree_scoped).then_some(
-        "WARNING: no app target scoped the accessibility tree, so it covers the whole desktop and can flood context. Pass app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title) to limit it.",
-    )
+/// any filter or pid match scoped the roots. When the caller did pass a target
+/// and it still matched no AT-SPI root, telling them to pass a target would
+/// only replay the same desktop-wide snapshot, so that case points at the
+/// app's accessibility support instead.
+fn unscoped_accessibility_tree_warning(
+    tree_scoped: bool,
+    tree_ok: bool,
+    target_requested: bool,
+) -> Option<&'static str> {
+    if !tree_ok || tree_scoped {
+        return None;
+    }
+    Some(if target_requested {
+        "WARNING: the requested target matched no AT-SPI application root, so the accessibility tree covers the whole desktop and can flood context. The target app may expose no accessibility tree (Electron apps need --force-renderer-accessibility); check list_apps for its AT-SPI name and pass that as app_name_or_bundle_identifier, or lower max_nodes to bound the cost."
+    } else {
+        "WARNING: no app target scoped the accessibility tree, so it covers the whole desktop and can flood context. Pass app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title) to limit it."
+    })
 }
 
 /// Note appended when raw traversal hit max_nodes; the tree is incomplete.
@@ -7697,14 +7719,29 @@ mod accessibility_tree_note_tests {
 
     #[test]
     fn unscoped_warning_only_when_tree_succeeded_without_a_scope() {
-        let warning = unscoped_accessibility_tree_warning(false, true).unwrap();
+        let warning = unscoped_accessibility_tree_warning(false, true, false).unwrap();
         assert!(warning.starts_with("WARNING:"));
+        assert!(warning.contains("no app target scoped"));
         assert!(warning.contains("app_name_or_bundle_identifier"));
         assert!(warning.contains("window_id, pid, app_id, wm_class, title"));
 
-        assert!(unscoped_accessibility_tree_warning(true, true).is_none());
-        assert!(unscoped_accessibility_tree_warning(false, false).is_none());
-        assert!(unscoped_accessibility_tree_warning(true, false).is_none());
+        for target_requested in [false, true] {
+            assert!(unscoped_accessibility_tree_warning(true, true, target_requested).is_none());
+            assert!(unscoped_accessibility_tree_warning(false, false, target_requested).is_none());
+            assert!(unscoped_accessibility_tree_warning(true, false, target_requested).is_none());
+        }
+    }
+
+    /// A caller that already passed a target must not be told to pass a target;
+    /// that advice would replay the same desktop-wide snapshot.
+    #[test]
+    fn unscoped_warning_with_a_target_points_at_accessibility_support() {
+        let warning = unscoped_accessibility_tree_warning(false, true, true).unwrap();
+        assert!(warning.starts_with("WARNING:"));
+        assert!(warning.contains("matched no AT-SPI application root"));
+        assert!(warning.contains("force-renderer-accessibility"));
+        assert!(warning.contains("list_apps"));
+        assert!(!warning.contains("Pass app_name_or_bundle_identifier or a window target"));
     }
 
     #[test]

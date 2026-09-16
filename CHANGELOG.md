@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The unscoped-tree warning from `get_app_state` no longer tells a caller that
+  already passed a `pid` or window target to pass a target. When the target
+  matched no AT-SPI application root, the warning now points at the app's
+  missing accessibility support, `list_apps`, and a lower `max_nodes` instead.
+
 ## [0.7.0] - 2026-09-16
 
 ### Added
