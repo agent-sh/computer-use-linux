@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `get_app_state` now returns its screenshot as a structured `image` content
+  block (the same shape as the `screenshot` tool) followed by the JSON report
+  as text and `structuredContent`. The JSON `screenshot` field keeps the
+  metadata (dimensions, scale, format, bytes) but no longer embeds the base64
+  `data_url`, which hosts were counting as ~30K text tokens per call. Callers
+  that read `screenshot.data_url` from the JSON should read the image block
+  instead. (#145)
+
 ### Fixed
 - The unscoped-tree warning from `get_app_state` no longer tells a caller that
   already passed a `pid` or window target to pass a target. When the target

@@ -331,6 +331,8 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "get_app_state",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<GetAppStateOutput>()
+            .expect("get_app_state output schema"),
         description = "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
         annotations(
             read_only_hint = true,
@@ -342,7 +344,7 @@ impl ComputerUseLinux {
     async fn get_app_state(
         &self,
         Parameters(params): Parameters<GetAppStateParams>,
-    ) -> Json<GetAppStateOutput> {
+    ) -> Result<CallToolResult, ErrorData> {
         let verbose = params.verbose.unwrap_or(false);
         let diagnostics = tokio::task::spawn_blocking(doctor_report)
             .await
@@ -486,13 +488,13 @@ impl ComputerUseLinux {
         {
             message.push_str(" Pass verbose=true for full diagnostics.");
         }
-        Json(GetAppStateOutput {
+        let output = GetAppStateOutput {
             app_name_or_bundle_identifier: params.app_name_or_bundle_identifier,
             window_context,
             window_error,
             window_permissions_hint,
             backend: "linux-atspi".to_string(),
-            screenshot,
+            screenshot: screenshot.as_ref().map(ScreenshotSummary::from),
             screenshot_error,
             accessibility_tree,
             accessibility_tree_raw_count,
@@ -502,7 +504,8 @@ impl ComputerUseLinux {
             readiness,
             diagnostics: include_full.then_some(diagnostics),
             message,
-        })
+        };
+        app_state_result(output, screenshot)
     }
 
     #[tool(
@@ -2458,6 +2461,74 @@ impl ScreenshotParams {
     }
 }
 
+/// Screenshot metadata for `get_app_state`. The image bytes travel as a
+/// separate `image` content block (issue #145), not inside this JSON.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct ScreenshotSummary {
+    mime_type: String,
+    source: String,
+    /// Width of the returned image payload.
+    width: u32,
+    /// Height of the returned image payload.
+    height: u32,
+    /// Coordinate-space width before payload downscaling.
+    coordinate_width: u32,
+    /// Coordinate-space height before payload downscaling.
+    coordinate_height: u32,
+    /// Returned pixels per coordinate-space pixel.
+    scale: f32,
+    resized: bool,
+    bytes: usize,
+    original_bytes: usize,
+    max_bytes: usize,
+    format: ScreenshotOutputFormat,
+    quality: Option<u8>,
+}
+
+impl From<&ScreenshotCapture> for ScreenshotSummary {
+    fn from(capture: &ScreenshotCapture) -> Self {
+        Self {
+            mime_type: capture.mime_type.clone(),
+            source: capture.source.clone(),
+            width: capture.width,
+            height: capture.height,
+            coordinate_width: capture.coordinate_width,
+            coordinate_height: capture.coordinate_height,
+            scale: capture.scale,
+            resized: capture.resized,
+            bytes: capture.bytes,
+            original_bytes: capture.original_bytes,
+            max_bytes: capture.max_bytes,
+            format: capture.format,
+            quality: capture.quality,
+        }
+    }
+}
+
+/// Assemble the `get_app_state` result: the screenshot (when present) as a
+/// structured image block first, then the JSON report as text and as
+/// `structured_content`. Inlining the base64 in the JSON made hosts treat a
+/// 100KB+ image as plain text tokens (issue #145).
+fn app_state_result(
+    output: GetAppStateOutput,
+    screenshot: Option<ScreenshotCapture>,
+) -> Result<CallToolResult, ErrorData> {
+    let value = serde_json::to_value(&output).map_err(|error| {
+        ErrorData::internal_error(
+            format!("failed to serialize get_app_state output: {error}"),
+            None,
+        )
+    })?;
+    let mut result = CallToolResult::structured(value);
+    if let Some(capture) = screenshot {
+        result.content.insert(
+            0,
+            Content::image(data_url_payload(&capture.data_url), capture.mime_type),
+        );
+    }
+    Ok(result)
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 struct GetAppStateOutput {
     app_name_or_bundle_identifier: Option<String>,
@@ -2465,7 +2536,8 @@ struct GetAppStateOutput {
     window_error: Option<String>,
     window_permissions_hint: Option<String>,
     backend: String,
-    screenshot: Option<ScreenshotCapture>,
+    /// Screenshot metadata; the image itself is the first `image` content block.
+    screenshot: Option<ScreenshotSummary>,
     screenshot_error: Option<String>,
     accessibility_tree: Vec<AccessibilityNode>,
     accessibility_tree_raw_count: usize,
@@ -5743,6 +5815,86 @@ mod tests {
         assert_eq!(
             (capture.coordinate_width, capture.coordinate_height),
             (50, 60)
+        );
+    }
+
+    fn sample_app_state_output(screenshot: Option<&ScreenshotCapture>) -> GetAppStateOutput {
+        GetAppStateOutput {
+            app_name_or_bundle_identifier: None,
+            window_context: None,
+            window_error: None,
+            window_permissions_hint: None,
+            backend: "linux-atspi".to_string(),
+            screenshot: screenshot.map(ScreenshotSummary::from),
+            screenshot_error: None,
+            accessibility_tree: Vec::new(),
+            accessibility_tree_raw_count: 0,
+            tree_scoped: true,
+            accessibility_tree_truncated: false,
+            accessibility_error: None,
+            readiness: crate::diagnostics::ReadinessReport {
+                can_register_mcp_tools: true,
+                can_build_accessibility_tree: true,
+                can_query_windows: true,
+                can_focus_apps: true,
+                can_focus_windows: true,
+                can_send_development_input: true,
+                recommended_next_step: String::new(),
+                blockers: Vec::new(),
+            },
+            diagnostics: None,
+            message: "ok".to_string(),
+        }
+    }
+
+    #[test]
+    fn app_state_result_emits_screenshot_as_image_block_not_inline_base64() {
+        // Issue #145: the base64 payload must ride a structured image block so
+        // hosts count it as vision tokens instead of a 100KB text blob.
+        let raw = RawScreenshotCapture {
+            mime_type: "image/png".to_string(),
+            bytes: solid_png(64, 32),
+            source: "test".to_string(),
+            width: 64,
+            height: 32,
+        };
+        let capture =
+            prepare_app_state_screenshot(raw, None, false, ScreenshotPayloadOptions::default())
+                .unwrap();
+        let payload = data_url_payload(&capture.data_url);
+        let output = sample_app_state_output(Some(&capture));
+
+        let result = app_state_result(output, Some(capture)).unwrap();
+
+        assert_eq!(result.content.len(), 2);
+        let image = result.content[0]
+            .as_image()
+            .expect("first block is an image");
+        assert_eq!(image.mime_type, "image/png");
+        assert_eq!(image.data, payload);
+        let text = &result.content[1]
+            .as_text()
+            .expect("second block is text")
+            .text;
+        assert!(
+            !text.contains(&payload),
+            "base64 leaked into the text block"
+        );
+        assert!(!text.contains("data_url"));
+        let structured = result.structured_content.expect("structured content");
+        assert_eq!(structured["screenshot"]["width"], 64);
+        assert_eq!(structured["screenshot"]["mime_type"], "image/png");
+        assert!(structured["screenshot"].get("data_url").is_none());
+    }
+
+    #[test]
+    fn app_state_result_without_screenshot_is_text_only() {
+        let result = app_state_result(sample_app_state_output(None), None).unwrap();
+        assert_eq!(result.content.len(), 1);
+        assert!(result.content[0].as_text().is_some());
+        assert_eq!(
+            result.structured_content.unwrap()["screenshot"],
+            serde_json::Value::Null
         );
     }
 
