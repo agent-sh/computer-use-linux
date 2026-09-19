@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `type_text` on X11 no longer delivers characters out of order. The xdotool
+  backend passed `--delay 0`, which lets XTEST key events race each other on
+  some X servers (seen on Cinnamon / Mint 22). It now uses xdotool's 12ms
+  per-character default and scales the command timeout with text length.
+  `COMPUTER_USE_LINUX_XDOTOOL_TYPE_DELAY_MS` overrides the delay. (#147)
 - The unscoped-tree warning from `get_app_state` no longer tells a caller that
   already passed a `pid` or window target to pass a target. When the target
   matched no AT-SPI application root, the warning now points at the app's

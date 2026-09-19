@@ -1717,12 +1717,17 @@ impl ComputerUseLinux {
         // ydotool's raw scancodes get re-mapped by X11 and mangle symbols and
         // digits (`_` → `%`, `1` → `+`) even on a plain US layout (issue #58).
         if self.should_prefer_xdotool_keyboard() {
-            let args = xdotool_type_args(&params.text);
+            let delay_ms = xdotool_type_delay_ms();
+            let args = xdotool_type_args_with_delay(&params.text, delay_ms);
+            let command_timeout = xdotool_type_timeout(&params.text, delay_ms);
             let text = params.text.clone();
             let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
-                run_xdotool_or_fallback(Path::new("xdotool"), &args, || {
-                    run_ydotool_type_text(&text)
-                })
+                run_xdotool_or_fallback_with_timeout(
+                    Path::new("xdotool"),
+                    &args,
+                    command_timeout,
+                    || run_ydotool_type_text(&text),
+                )
                 .await
             })
             .await;
@@ -5033,6 +5038,14 @@ enum XdotoolAttempt {
 }
 
 async fn run_xdotool(program: &Path, args: &[String]) -> XdotoolAttempt {
+    run_xdotool_with_timeout(program, args, INPUT_COMMAND_TIMEOUT).await
+}
+
+async fn run_xdotool_with_timeout(
+    program: &Path,
+    args: &[String],
+    command_timeout: Duration,
+) -> XdotoolAttempt {
     let mut command = TokioCommand::new(program);
     command.args(args);
     command.stdout(Stdio::piped());
@@ -5042,7 +5055,7 @@ async fn run_xdotool(program: &Path, args: &[String]) -> XdotoolAttempt {
 
     match command.spawn() {
         Ok(child) => XdotoolAttempt::Finished(
-            match crate::command_runner::output_child(child, "run xdotool", INPUT_COMMAND_TIMEOUT)
+            match crate::command_runner::output_child(child, "run xdotool", command_timeout)
                 .await
                 .map_err(|error| format!("{error:#}"))
             {
@@ -5064,7 +5077,20 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = std::result::Result<Output, String>>,
 {
-    match run_xdotool(program, args).await {
+    run_xdotool_or_fallback_with_timeout(program, args, INPUT_COMMAND_TIMEOUT, fallback).await
+}
+
+async fn run_xdotool_or_fallback_with_timeout<F, Fut>(
+    program: &Path,
+    args: &[String],
+    command_timeout: Duration,
+    fallback: F,
+) -> std::result::Result<KeyboardCommandResult, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::result::Result<Output, String>>,
+{
+    match run_xdotool_with_timeout(program, args, command_timeout).await {
         XdotoolAttempt::Unavailable => fallback().await.map(|output| KeyboardCommandResult {
             output,
             backend: KeyboardCommandBackend::Ydotool,
@@ -5138,15 +5164,37 @@ fn prefer_wtype_keyboard(
     !force_ydotool && is_wayland && compatible_desktop && available
 }
 
-fn xdotool_type_args(text: &str) -> Vec<String> {
+/// Default per-character delay for `xdotool type`, in milliseconds (xdotool's
+/// own default). `--delay 0` lets XTEST key events race each other on some X
+/// servers (Cinnamon on Mint 22, issue #147): every character arrives, but in
+/// a random order. A small delay keeps them ordered.
+/// `COMPUTER_USE_LINUX_XDOTOOL_TYPE_DELAY_MS` overrides it.
+const XDOTOOL_TYPE_DELAY_MS: u64 = 12;
+const XDOTOOL_TYPE_DELAY_ENV: &str = "COMPUTER_USE_LINUX_XDOTOOL_TYPE_DELAY_MS";
+
+fn xdotool_type_delay_ms() -> u64 {
+    env::var(XDOTOOL_TYPE_DELAY_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(XDOTOOL_TYPE_DELAY_MS)
+}
+
+fn xdotool_type_args_with_delay(text: &str, delay_ms: u64) -> Vec<String> {
     vec![
         "type".to_string(),
         "--clearmodifiers".to_string(),
         "--delay".to_string(),
-        "0".to_string(),
+        delay_ms.to_string(),
         "--".to_string(),
         text.to_string(),
     ]
+}
+
+/// `xdotool type` spends about `delay_ms` per character, so long inputs need
+/// more than the flat input timeout.
+fn xdotool_type_timeout(text: &str, delay_ms: u64) -> Duration {
+    let chars = text.chars().count() as u64;
+    INPUT_COMMAND_TIMEOUT.saturating_add(Duration::from_millis(chars.saturating_mul(delay_ms)))
 }
 
 fn which_in_path(binary: &str) -> bool {
@@ -6965,15 +7013,32 @@ mod tests {
     }
 
     #[test]
-    fn xdotool_type_disables_per_character_delay_for_long_input() {
+    fn xdotool_type_keeps_a_per_character_delay_so_xtest_events_stay_ordered() {
+        // Issue #147: `--delay 0` delivers characters out of order on some X
+        // servers. The default must stay non-zero.
+        const { assert!(XDOTOOL_TYPE_DELAY_MS > 0) };
         let text = "x".repeat(10_000);
-        let args = xdotool_type_args(&text);
+        let args = xdotool_type_args_with_delay(&text, XDOTOOL_TYPE_DELAY_MS);
 
         assert_eq!(
             &args[..5],
-            ["type", "--clearmodifiers", "--delay", "0", "--"]
+            ["type", "--clearmodifiers", "--delay", "12", "--"]
         );
+        assert_eq!(args[3], XDOTOOL_TYPE_DELAY_MS.to_string());
         assert_eq!(args[5], text);
+    }
+
+    #[test]
+    fn xdotool_type_timeout_grows_with_text_length() {
+        assert_eq!(xdotool_type_timeout("", 12), INPUT_COMMAND_TIMEOUT);
+        assert_eq!(
+            xdotool_type_timeout(&"x".repeat(1_000), 12),
+            INPUT_COMMAND_TIMEOUT + Duration::from_secs(12)
+        );
+        assert_eq!(
+            xdotool_type_timeout(&"x".repeat(1_000), 0),
+            INPUT_COMMAND_TIMEOUT
+        );
     }
 
     #[tokio::test]
@@ -7020,7 +7085,7 @@ mod tests {
     async fn unavailable_xdotool_uses_ydotool_fallback() {
         let result = run_xdotool_or_fallback(
             Path::new("/definitely/missing/xdotool"),
-            &xdotool_type_args("text"),
+            &xdotool_type_args_with_delay("text", XDOTOOL_TYPE_DELAY_MS),
             || async {
                 TokioCommand::new("sh")
                     .args(["-c", "exit 0"])

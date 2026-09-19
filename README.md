@@ -384,6 +384,7 @@ Most setups need none of these — `doctor` and the installers pick sensible def
 | `COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER` / `…_KEYBOARD` | Always route pointer / keyboard through the RemoteDesktop portal on Wayland, skipping auto-detection. |
 | `COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER` / `…_KEYBOARD` | Always route pointer / keyboard through `ydotool`, skipping the portal and KDE clipboard paths; pointer forcing also skips native-X11 `xdotool` coordinate clicks. |
 | `COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD` | Prefer `xdotool`/XTEST keyboard input when `DISPLAY` is available. `COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD=1` takes precedence. |
+| `COMPUTER_USE_LINUX_XDOTOOL_TYPE_DELAY_MS` | Per-character delay for `xdotool type` in milliseconds (default `12`). `0` is faster but can deliver characters out of order on some X servers. |
 | `COMPUTER_USE_LINUX_SCREENSHOT_BACKEND` | Force a single screenshot backend, skipping the fallback chain. Accepts `gnome-shell`, `portal`, or `gnome-screenshot`. Pin `gnome-screenshot` for background/systemd contexts where the GNOME Shell and portal DBus paths are denied. |
 | `COMPUTER_USE_LINUX_ENABLE_SHELL` | Set exactly to `1` before starting the MCP server to register the destructive `run_shell` tool. Unset by default. Do not enable for untrusted or unattended MCP hosts. |
 
