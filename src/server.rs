@@ -26,7 +26,7 @@ use crate::ydotool;
 use anyhow::Result;
 use rmcp::{
     handler::server::wrapper::{Json, Parameters},
-    model::{CallToolResult, Content},
+    model::{CallToolResult, ContentBlock},
     schemars::JsonSchema,
     tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt,
 };
@@ -613,8 +613,8 @@ impl ComputerUseLinux {
             caption["off_screen_note"] = serde_json::json!(note);
         }
         Ok(CallToolResult::success(vec![
-            Content::image(data_url_payload(&capture.data_url), capture.mime_type),
-            Content::text(caption.to_string()),
+            ContentBlock::image(data_url_payload(&capture.data_url), capture.mime_type),
+            ContentBlock::text(caption.to_string()),
         ]))
     }
 
@@ -2528,7 +2528,7 @@ fn app_state_result(
     if let Some(capture) = screenshot {
         result.content.insert(
             0,
-            Content::image(data_url_payload(&capture.data_url), capture.mime_type),
+            ContentBlock::image(data_url_payload(&capture.data_url), capture.mime_type),
         );
     }
     Ok(result)

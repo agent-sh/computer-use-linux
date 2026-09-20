@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.1";
-export const GENERATED_TOOL_CATALOG_HASH = "768e9650a96630f6b01672b7e94489d3ea5661544752175112879a5368f8dca9";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "4030cfe80339e7006fdf944ad172731d8c2955f6aa1f9ba22c6dd80805355a26";
+export const GENERATED_TOOL_CATALOG_HASH = "4a213b7ae3e233e7269502e3358e592b58546bd4bb32dc5ae523abfb8c668d6c";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "ea680d0da020a1a3bf882cf544c8bc525691a1d64f11af8862a494ec2d826cda";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -90,7 +90,6 @@ export const GENERATED_MCP_TOOLS =
           ]
         }
       },
-      "title": "ActivateWindowParams",
       "type": "object"
     },
     "name": "activate_window"
@@ -219,7 +218,6 @@ export const GENERATED_MCP_TOOLS =
           ]
         }
       },
-      "title": "ClickParams",
       "type": "object"
     },
     "name": "click"
@@ -272,7 +270,6 @@ export const GENERATED_MCP_TOOLS =
         "end_x",
         "end_y"
       ],
-      "title": "DragParams",
       "type": "object"
     },
     "name": "drag"
@@ -487,7 +484,6 @@ export const GENERATED_MCP_TOOLS =
           ]
         }
       },
-      "title": "GetAppStateParams",
       "type": "object"
     },
     "name": "get_app_state"
@@ -612,7 +608,6 @@ export const GENERATED_MCP_TOOLS =
         "x",
         "y"
       ],
-      "title": "MoveWindowParams",
       "type": "object"
     },
     "name": "move_window"
@@ -679,7 +674,6 @@ export const GENERATED_MCP_TOOLS =
           ]
         }
       },
-      "title": "ActionParams",
       "type": "object"
     },
     "name": "perform_action"
@@ -768,7 +762,6 @@ export const GENERATED_MCP_TOOLS =
       "required": [
         "key"
       ],
-      "title": "PressKeyParams",
       "type": "object"
     },
     "name": "press_key"
@@ -865,7 +858,6 @@ export const GENERATED_MCP_TOOLS =
         "width",
         "height"
       ],
-      "title": "ResizeWindowParams",
       "type": "object"
     },
     "name": "resize_window"
@@ -1002,7 +994,6 @@ export const GENERATED_MCP_TOOLS =
           ]
         }
       },
-      "title": "ScreenshotParams",
       "type": "object"
     },
     "name": "screenshot"
@@ -1102,7 +1093,6 @@ export const GENERATED_MCP_TOOLS =
       "required": [
         "direction"
       ],
-      "title": "ScrollParams",
       "type": "object"
     },
     "name": "scroll"
@@ -1168,7 +1158,6 @@ export const GENERATED_MCP_TOOLS =
       "required": [
         "value"
       ],
-      "title": "SetValueParams",
       "type": "object"
     },
     "name": "set_value"
@@ -1285,7 +1274,6 @@ export const GENERATED_MCP_TOOLS =
       "required": [
         "text"
       ],
-      "title": "TypeTextParams",
       "type": "object"
     },
     "name": "type_text"
@@ -1337,7 +1325,6 @@ export const GENERATED_OPTIONAL_MCP_TOOLS =
       "required": [
         "command"
       ],
-      "title": "RunShellParams",
       "type": "object"
     },
     "name": "run_shell"
