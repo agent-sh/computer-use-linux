@@ -108,6 +108,7 @@ Pi native tools skip this MCP `command` config; see [Pi setup](references/pi-set
 ### Host-specific guides
 
 - [Hermes setup](references/hermes-setup.md)
+- [Memcode memory composition](references/memcode-setup.md)
 - [Pi coding agent setup](references/pi-setup.md)
 
 ## Procedure

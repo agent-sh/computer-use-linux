@@ -260,6 +260,14 @@ Edit `~/.config/Claude/claude_desktop_config.json`:
 
 Restart Claude Desktop. The tools should appear in the tools list.
 
+### Add opt-in long-term memory
+
+An MCP host can compose this server with a separate memory server without
+changing `computer-use-linux` or giving it network access. The
+[Memcode composition guide](skills/computer-use-linux/references/memcode-setup.md)
+shows a host-agnostic configuration and the required consent, data-minimization,
+provenance, fallback, and deletion boundaries.
+
 ### Pi Coding Agent
 
 ```bash
