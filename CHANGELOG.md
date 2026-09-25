@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `doctor` no longer reports the XDG Screenshot, ScreenCast, or InputCapture
+  portal as available when the portal does not export that interface.
+  `busctl introspect` exits 0 with only a header line for a missing interface,
+  so each entry now requires its methods (Screenshot: `Screenshot`). Readiness
+  gains `can_capture_screenshots` and a blocker when no screenshot route is
+  detected; this is detection, not a test capture. (#156)
+
 ## [0.7.1] - 2026-09-19
 
 ### Changed
