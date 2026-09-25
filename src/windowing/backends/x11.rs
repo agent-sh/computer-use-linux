@@ -18,34 +18,20 @@ use crate::command_runner;
 use crate::terminal::enrich_terminal_windows;
 use crate::windowing::registry::BackendProbe;
 use crate::windowing::types::{WindowBounds, WindowInfo};
-use crate::x11_display::{frame_origin, X11Display};
-use anyhow::{anyhow, bail, Result};
+use crate::x11_display::{
+    frame_origin, is_native_x11_session as is_x11_session, with_x11_display, X11_QUERY_TIMEOUT,
+};
+use anyhow::{bail, Result};
 use std::env;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use tokio::process::Command as TokioCommand;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{sleep, Duration};
 
 pub const X11_BACKEND: &str = "x11";
 const GEOMETRY_VERIFY_ATTEMPTS: usize = 11;
 const GEOMETRY_VERIFY_DELAY: Duration = Duration::from_millis(50);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// True when this looks like a plain X11 session we can drive over EWMH.
-///
-/// Requires an X `DISPLAY` and either an explicit `x11` session type or the
-/// absence of a Wayland display, so we never hijack XWayland under a Wayland
-/// compositor (where a native backend should answer instead).
-fn is_x11_session() -> bool {
-    if env_nonempty("DISPLAY").is_none() {
-        return false;
-    }
-    match env_nonempty("XDG_SESSION_TYPE").as_deref() {
-        Some("x11") => true,
-        Some("wayland") => false,
-        _ => env_nonempty("WAYLAND_DISPLAY").is_none(),
-    }
-}
 
 pub(crate) fn can_exact_focus() -> bool {
     is_x11_session() && command_on_path("wmctrl") && command_on_path("xprop")
@@ -133,31 +119,17 @@ async fn list_windows_with_focus_query(require_focus_query: bool) -> Result<Vec<
     Ok(windows)
 }
 
-/// Run `f` against a fresh X connection off the async runtime, bounded by
-/// `PROBE_TIMEOUT` so a wedged X server cannot hang a tool call.
-async fn with_x11_display<T, F>(f: F) -> Result<T>
-where
-    T: Send + 'static,
-    F: FnOnce(&X11Display) -> T + Send + 'static,
-{
-    let task =
-        tokio::task::spawn_blocking(move || X11Display::connect().map(|display| f(&display)));
-    match timeout(PROBE_TIMEOUT, task).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(join_error)) => Err(anyhow!("X11 query task failed: {join_error}")),
-        Err(_) => bail!("X server did not answer within {PROBE_TIMEOUT:?}"),
-    }
-}
-
 /// Replace wmctrl's double-counted x/y with the absolute client origin. When the
 /// X server cannot be asked, or a window vanished, the origin becomes unknown:
 /// a wrong origin would shift crops and relative clicks, while an unknown one
 /// makes them refuse.
 async fn correct_client_origins(windows: &mut [WindowInfo]) {
     let ids = windows.iter().map(x11_window_id).collect::<Vec<_>>();
-    let origins = with_x11_display(move |display| display.client_origins(&ids))
-        .await
-        .unwrap_or_else(|_| vec![None; windows.len()]);
+    let origins = with_x11_display(X11_QUERY_TIMEOUT, move |display| {
+        display.client_origins(&ids)
+    })
+    .await
+    .unwrap_or_else(|_| vec![None; windows.len()]);
     apply_client_origins(windows, &origins);
 }
 
@@ -301,7 +273,7 @@ async fn query_window_geometry(window_id: u64) -> Option<X11Geometry> {
         .find(|window| window.window_id == window_id)?;
     let id = x11_window_id(&window);
     let mut bounds = window.bounds?;
-    let (client_origin, extents) = with_x11_display(move |display| {
+    let (client_origin, extents) = with_x11_display(X11_QUERY_TIMEOUT, move |display| {
         let origin = display.client_origins(&[id]).into_iter().next().flatten();
         let extents = display.frame_extents(id).ok().flatten();
         (origin, extents)
@@ -498,13 +470,6 @@ fn next_field<'a>(rest: &mut &'a str) -> Option<&'a str> {
 fn clean(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty() && !value.eq_ignore_ascii_case("N/A")).then(|| value.to_string())
-}
-
-fn env_nonempty(name: &str) -> Option<String> {
-    env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 /// True if `cmd` is an executable found on `$PATH`. Used to gate focus
