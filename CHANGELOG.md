@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Helper spawns (ydotool, wtype, xdotool, gnome-screenshot, and every command
+  run through the supervised runner) retry a transient `ETXTBSY` ("Text file
+  busy") for up to 75 ms. The error appears when a helper binary is being
+  replaced, and it made xdotool fall back to ydotool as if it were missing.
+  It also made tests that write and exec fake helper scripts fail under the
+  parallel suite, which failed the first v0.7.2 tag run.
+
 ## [0.7.2] - 2026-09-26
 
 ### Added

@@ -426,13 +426,13 @@ async fn capture_with_gnome_screenshot() -> Result<RawScreenshotCapture> {
     // `-f <file>` writes a full-screen PNG without prompting; no portal, no
     // foreground window required. `tokio::process::Command` searches PATH and
     // provides an async, non-polling wait.
-    let mut child = match Command::new("gnome-screenshot")
+    let mut command = Command::new("gnome-screenshot");
+    command
         .args(["-f", filename])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
+        .stderr(Stdio::null());
+    let mut child = match crate::command_runner::spawn_retrying_busy(&mut command).await {
         Ok(child) => child,
         Err(error) => {
             cleanup_gnome_requested_path(&path);
