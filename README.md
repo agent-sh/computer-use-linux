@@ -139,7 +139,7 @@ Validated manually on Ubuntu 25.10 (GNOME Shell 50.1, Wayland). Other compositor
 | i3 | `i3-msg`; optional `xprop` for PID hydration | Lists and focuses i3 windows over the active i3 IPC socket. |
 | COSMIC Wayland | `computer-use-linux-cosmic` helper | Installed automatically by `./install.sh`, `cargo install`, and npm. For custom/manual layouts, put the helper next to the main binary, on `PATH`, or point `COMPUTER_USE_LINUX_COSMIC_HELPER` at it. |
 | Sway / generic wlroots | no dedicated backend yet | AT-SPI, screenshots, and global `ydotool` input can still work; exact window list/focus is currently unavailable unless another backend applies. |
-| Generic X11 / XFCE / other EWMH WMs | `wmctrl` plus `xprop` | Lists, focuses, moves, and resizes windows; keyboard input prefers `xdotool`/XTEST. |
+| Generic X11 / XFCE / other EWMH WMs | `wmctrl` plus `xprop` | Lists, focuses, moves, and resizes windows; keyboard input prefers `xdotool`/XTEST. Window origins are read from the X server, since `wmctrl -lG` counts the frame offset twice. |
 
 If you run on a desktop not covered above, or a covered backend does not come up cleanly, please open an issue with the output of `computer-use-linux doctor` so we can extend the matrix honestly.
 

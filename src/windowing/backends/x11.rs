@@ -7,6 +7,10 @@
 //! It is intentionally registered last so a session-native backend always wins
 //! when one is present.
 //!
+//! Window origins come from the X server, not from `wmctrl -lG`, whose x/y
+//! count the client's offset in its parent twice (#157). Width and height
+//! from wmctrl are the client size and stay. Bounds are the client area.
+//!
 //! [EWMH]: https://specifications.freedesktop.org/wm-spec/latest/
 //! [ICCCM]: https://tronche.com/gui/x/icccm/
 
@@ -14,12 +18,13 @@ use crate::command_runner;
 use crate::terminal::enrich_terminal_windows;
 use crate::windowing::registry::BackendProbe;
 use crate::windowing::types::{WindowBounds, WindowInfo};
-use anyhow::{bail, Result};
+use crate::x11_display::{frame_origin, X11Display};
+use anyhow::{anyhow, bail, Result};
 use std::env;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use tokio::process::Command as TokioCommand;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, timeout, Duration};
 
 pub const X11_BACKEND: &str = "x11";
 const GEOMETRY_VERIFY_ATTEMPTS: usize = 11;
@@ -123,8 +128,52 @@ async fn list_windows_with_focus_query(require_focus_query: bool) -> Result<Vec<
     let active_id =
         resolve_active_window_query(active_window_query_async().await, require_focus_query)?;
     let mut windows = parse_wmctrl_windows(&String::from_utf8_lossy(&output.stdout), active_id);
+    correct_client_origins(&mut windows).await;
     enrich_terminal_windows(&mut windows);
     Ok(windows)
+}
+
+/// Run `f` against a fresh X connection off the async runtime, bounded by
+/// `PROBE_TIMEOUT` so a wedged X server cannot hang a tool call.
+async fn with_x11_display<T, F>(f: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&X11Display) -> T + Send + 'static,
+{
+    let task =
+        tokio::task::spawn_blocking(move || X11Display::connect().map(|display| f(&display)));
+    match timeout(PROBE_TIMEOUT, task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(join_error)) => Err(anyhow!("X11 query task failed: {join_error}")),
+        Err(_) => bail!("X server did not answer within {PROBE_TIMEOUT:?}"),
+    }
+}
+
+/// Replace wmctrl's double-counted x/y with the absolute client origin. When the
+/// X server cannot be asked, or a window vanished, the origin becomes unknown:
+/// a wrong origin would shift crops and relative clicks, while an unknown one
+/// makes them refuse.
+async fn correct_client_origins(windows: &mut [WindowInfo]) {
+    let ids = windows.iter().map(x11_window_id).collect::<Vec<_>>();
+    let origins = with_x11_display(move |display| display.client_origins(&ids))
+        .await
+        .unwrap_or_else(|_| vec![None; windows.len()]);
+    apply_client_origins(windows, &origins);
+}
+
+fn x11_window_id(window: &WindowInfo) -> u32 {
+    // X resource ids are 29-bit; anything larger is not a window and the
+    // server answers with an error, which becomes an unknown origin.
+    u32::try_from(window.window_id).unwrap_or(0)
+}
+
+pub(crate) fn apply_client_origins(windows: &mut [WindowInfo], origins: &[Option<(i32, i32)>]) {
+    for (window, origin) in windows.iter_mut().zip(origins) {
+        if let Some(bounds) = window.bounds.as_mut() {
+            bounds.x = origin.map(|(x, _)| x);
+            bounds.y = origin.map(|(_, y)| y);
+        }
+    }
 }
 
 pub async fn activate_window(window_id: u64) -> Result<()> {
@@ -145,19 +194,20 @@ pub async fn move_window(window_id: u64, x: i32, y: i32) -> Result<String> {
         window_id,
     )
     .await?;
-    let expected_x = wmctrl_move_coord(x);
-    let expected_y = wmctrl_move_coord(y);
-    let (bounds, exact) = wait_for_window_geometry(window_id, |bounds| {
-        bounds_at_position(bounds, expected_x, expected_y)
-    })
-    .await?;
+    let expected = (wmctrl_move_coord(x), wmctrl_move_coord(y));
+    // `-e 0,x,y` uses the window's gravity; the default NorthWest places the
+    // frame's outer corner at x,y, so compare the frame origin, not the client.
+    let (geometry, exact) =
+        wait_for_window_geometry(window_id, |geometry| frame_at_position(geometry, expected))
+            .await?;
     if exact {
         Ok(format!("Moved window to ({x}, {y}) via X11/EWMH (wmctrl)."))
     } else {
         Ok(format!(
-            "Requested move to ({x}, {y}) via X11/EWMH; the window manager reported position ({}, {}).",
-            bounds.x.map_or_else(|| "unknown".to_string(), |value| value.to_string()),
-            bounds.y.map_or_else(|| "unknown".to_string(), |value| value.to_string())
+            "Requested move to ({x}, {y}) via X11/EWMH; the window manager reported frame position {}.",
+            geometry
+                .frame_origin
+                .map_or_else(|| "unknown".to_string(), |(fx, fy)| format!("({fx}, {fy})"))
         ))
     }
 }
@@ -189,10 +239,11 @@ pub async fn resize_window(window_id: u64, width: i32, height: i32) -> Result<St
         window_id,
     )
     .await?;
-    let (bounds, exact) = wait_for_window_geometry(window_id, |bounds| {
-        bounds_at_size(bounds, width as u32, height as u32)
+    let (geometry, exact) = wait_for_window_geometry(window_id, |geometry| {
+        bounds_at_size(&geometry.bounds, width as u32, height as u32)
     })
     .await?;
+    let bounds = geometry.bounds;
     if exact {
         Ok(format!(
             "Resized window to {width}x{height} via X11/EWMH (wmctrl)."
@@ -205,13 +256,20 @@ pub async fn resize_window(window_id: u64, width: i32, height: i32) -> Result<St
     }
 }
 
+/// Client-area bounds plus the frame origin derived from `_NET_FRAME_EXTENTS`.
+#[derive(Debug, Clone)]
+struct X11Geometry {
+    bounds: WindowBounds,
+    frame_origin: Option<(i32, i32)>,
+}
+
 async fn wait_for_window_geometry(
     window_id: u64,
-    matches: impl Fn(&WindowBounds) -> bool,
-) -> Result<(WindowBounds, bool)> {
+    matches: impl Fn(&X11Geometry) -> bool,
+) -> Result<(X11Geometry, bool)> {
     let mut last_bounds = None;
     for attempt in 0..GEOMETRY_VERIFY_ATTEMPTS {
-        if let Some(bounds) = query_window_bounds(window_id).await {
+        if let Some(bounds) = query_window_geometry(window_id).await {
             if matches(&bounds) {
                 return Ok((bounds, true));
             }
@@ -229,7 +287,7 @@ async fn wait_for_window_geometry(
     }
 }
 
-async fn query_window_bounds(window_id: u64) -> Option<WindowBounds> {
+async fn query_window_geometry(window_id: u64) -> Option<X11Geometry> {
     let mut command = wmctrl_async();
     command.args(["-l", "-p", "-G", "-x"]);
     let output = command_runner::output(command, "query X11 window geometry")
@@ -238,14 +296,30 @@ async fn query_window_bounds(window_id: u64) -> Option<WindowBounds> {
     if !output.status.success() {
         return None;
     }
-    parse_wmctrl_windows(&String::from_utf8_lossy(&output.stdout), None)
+    let window = parse_wmctrl_windows(&String::from_utf8_lossy(&output.stdout), None)
         .into_iter()
-        .find(|window| window.window_id == window_id)
-        .and_then(|window| window.bounds)
+        .find(|window| window.window_id == window_id)?;
+    let id = x11_window_id(&window);
+    let mut bounds = window.bounds?;
+    let (client_origin, extents) = with_x11_display(move |display| {
+        let origin = display.client_origins(&[id]).into_iter().next().flatten();
+        let extents = display.frame_extents(id).ok().flatten();
+        (origin, extents)
+    })
+    .await
+    .unwrap_or((None, None));
+    bounds.x = client_origin.map(|(x, _)| x);
+    bounds.y = client_origin.map(|(_, y)| y);
+    Some(X11Geometry {
+        bounds,
+        // No _NET_FRAME_EXTENTS means no decorations the WM will tell us about;
+        // the frame is then the client area.
+        frame_origin: client_origin.map(|origin| frame_origin(origin, extents.unwrap_or_default())),
+    })
 }
 
-fn bounds_at_position(bounds: &WindowBounds, x: i32, y: i32) -> bool {
-    bounds.x == Some(x) && bounds.y == Some(y)
+fn frame_at_position(geometry: &X11Geometry, expected: (i32, i32)) -> bool {
+    geometry.frame_origin == Some(expected)
 }
 
 fn bounds_at_size(bounds: &WindowBounds, width: u32, height: u32) -> bool {
@@ -541,10 +615,44 @@ mod tests {
             width: 800,
             height: 600,
         };
-        assert!(bounds_at_position(&bounds, 10, 20));
-        assert!(!bounds_at_position(&bounds, 11, 20));
         assert!(bounds_at_size(&bounds, 800, 600));
         assert!(!bounds_at_size(&bounds, 801, 600));
+
+        let geometry = X11Geometry {
+            bounds,
+            frame_origin: Some((9, -2)),
+        };
+        assert!(frame_at_position(&geometry, (9, -2)));
+        assert!(
+            !frame_at_position(&geometry, (10, 20)),
+            "the client origin is not the requested frame position"
+        );
+        let unknown = X11Geometry {
+            frame_origin: None,
+            ..geometry
+        };
+        assert!(!frame_at_position(&unknown, (9, -2)));
+    }
+
+    #[test]
+    fn client_origins_replace_wmctrl_positions_and_unknown_clears_them() {
+        // wmctrl -lG under MATE/marco (issue #157): x,y = absolute + relative.
+        let output = "0x05600003  0 4242   24   280  640  480  gtk3.Gtk3 host GTK3 test window\n\
+0x05800004  0 4243   1892 328  400  500  mate-calculator.Mate-calculator host Calculator\n";
+        let mut windows = parse_wmctrl_windows(output, None);
+        apply_client_origins(&mut windows, &[Some((2, 192)), None]);
+
+        let gtk = windows[0].bounds.as_ref().unwrap();
+        assert_eq!(
+            (gtk.x, gtk.y, gtk.width, gtk.height),
+            (Some(2), Some(192), 640, 480)
+        );
+        let calculator = windows[1].bounds.as_ref().unwrap();
+        assert_eq!(
+            (calculator.x, calculator.y, calculator.width),
+            (None, None, 400),
+            "a window the X server could not locate must not keep wmctrl's shifted origin"
+        );
     }
 
     #[test]

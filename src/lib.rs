@@ -16,6 +16,7 @@ mod server;
 mod terminal;
 mod windowing;
 mod windows;
+mod x11_display;
 mod ydotool;
 
 pub mod atspi_tree {
