@@ -109,6 +109,9 @@ pub struct PlatformReport {
     pub xdg_runtime_dir: Option<String>,
     pub gnome_shell_version: Check,
     pub gnome_screenshot: Check,
+    /// Native X11 display for the root-window screenshot route. Fails on
+    /// Wayland sessions, including XWayland, by design.
+    pub x11_display: Check,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -711,6 +714,25 @@ fn platform_report() -> PlatformReport {
         xdg_runtime_dir: xdg_runtime_dir().map(|path| path.display().to_string()),
         gnome_shell_version: command_check("gnome-shell", &["--version"]),
         gnome_screenshot: command_check("gnome-screenshot", &["--version"]),
+        x11_display: x11_display_check(),
+    }
+}
+
+fn x11_display_check() -> Check {
+    if !crate::x11_display::is_native_x11_session() {
+        return Check::fail("not a native X11 session");
+    }
+    // doctor runs on a blocking thread; connect directly with the same bound
+    // the async helper uses so a wedged server cannot stall the report.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = crate::x11_display::X11Display::connect().map(|display| display.describe());
+        let _ = sender.send(result);
+    });
+    match receiver.recv_timeout(crate::x11_display::X11_QUERY_TIMEOUT) {
+        Ok(Ok(detail)) => Check::ok(detail),
+        Ok(Err(error)) => Check::fail(format!("{error:#}")),
+        Err(_) => Check::fail("X server did not answer within 2s"),
     }
 }
 
@@ -854,6 +876,9 @@ fn screenshot_backends(platform: &PlatformReport, portals: &PortalReport) -> Vec
     if portals.screenshot.ok {
         backends.push("portal".to_string());
     }
+    if platform.x11_display.ok {
+        backends.push("x11".to_string());
+    }
     // Subprocess fallback for background/systemd contexts the DBus paths reject.
     if platform.gnome_screenshot.ok {
         backends.push("gnome_screenshot".to_string());
@@ -909,7 +934,7 @@ fn readiness_report_with_portal_keyboard(
 
     if !can_capture_screenshots {
         blockers.push(
-            "No screenshot route was detected: GNOME Shell is absent, the XDG portal does not export org.freedesktop.portal.Screenshot, and gnome-screenshot is not installed. get_app_state and screenshot return no image; element-aware actions from the accessibility tree still work."
+            "No screenshot route was detected: GNOME Shell is absent, the XDG portal does not export org.freedesktop.portal.Screenshot, this is not a native X11 session, and gnome-screenshot is not installed. get_app_state and screenshot return no image; element-aware actions from the accessibility tree still work."
                 .to_string(),
         );
     }
@@ -1556,6 +1581,7 @@ mod tests {
             xdg_runtime_dir: Some("/run/user/1000".to_string()),
             gnome_shell_version: Check::ok("GNOME Shell 46.0"),
             gnome_screenshot: Check::ok("gnome-screenshot 41.0"),
+            x11_display: Check::fail("not a native X11 session"),
         }
     }
 
@@ -2212,6 +2238,24 @@ mod tests {
         let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
         assert!(capabilities.screenshot.is_empty());
         assert_eq!(capabilities.preferred.screenshot, None);
+    }
+
+    #[test]
+    fn native_x11_display_is_a_screenshot_route_ahead_of_gnome_screenshot() {
+        let mut platform = platform_report();
+        platform.gnome_shell_version = Check::fail("missing");
+        platform.x11_display = Check::ok("native X11 root window 2880x1920, depth 24");
+        let portals = portal_report(Check::fail("missing"));
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let input = input_report(true);
+
+        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+        let readiness = readiness_report(&platform, &portals, &accessibility, &windowing, &input);
+
+        assert_eq!(capabilities.screenshot, ["x11", "gnome_screenshot"]);
+        assert_eq!(capabilities.preferred.screenshot.as_deref(), Some("x11"));
+        assert!(readiness.can_capture_screenshots);
     }
 
     #[test]

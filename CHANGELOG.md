@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Native X11 screenshot route: one `GetImage` on the root window over the
+  X11 connection, used only on a native X11 session (never XWayland) and
+  tried after GNOME Shell and the portal, before `gnome-screenshot`.
+  Pixels are device pixels, the space xdotool input and X11 window origins
+  use. MATE/X11 had no working route: xdg-desktop-portal-gtk has no
+  Screenshot, and gnome-screenshot 41 blacks out 3/4 of the frame at
+  window-scaling-factor 2. `doctor` reports the route as
+  `platform.x11_display` and `capabilities.screenshot` entry `x11`;
+  `COMPUTER_USE_LINUX_SCREENSHOT_BACKEND=x11` pins it. (#155)
+
 ### Fixed
 - `doctor` no longer reports the XDG Screenshot, ScreenCast, or InputCapture
   portal as available when the portal does not export that interface.

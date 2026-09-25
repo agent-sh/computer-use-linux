@@ -1,4 +1,5 @@
 use crate::diagnostics::hydrate_session_bus_env;
+use crate::x11_display::{is_native_x11_session, with_x11_display, X11_CAPTURE_TIMEOUT};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::StreamExt;
@@ -144,13 +145,14 @@ impl ScreenshotPayloadOptions {
 }
 
 /// Environment variable forcing a single capture backend, skipping the
-/// fallback chain. Accepts `gnome-shell`, `portal`, or `gnome-screenshot`.
+/// fallback chain. Accepts `gnome-shell`, `portal`, `x11`, or `gnome-screenshot`.
 const SCREENSHOT_BACKEND_ENV: &str = "COMPUTER_USE_LINUX_SCREENSHOT_BACKEND";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScreenshotBackend {
     GnomeShell,
     Portal,
+    X11,
     GnomeScreenshot,
 }
 
@@ -159,6 +161,7 @@ impl ScreenshotBackend {
         match value.trim().to_ascii_lowercase().as_str() {
             "gnome-shell" | "gnome_shell" | "shell" => Some(Self::GnomeShell),
             "portal" | "xdg-portal" | "xdg_portal" => Some(Self::Portal),
+            "x11" | "x11-native" | "x11_native" | "xgetimage" => Some(Self::X11),
             "gnome-screenshot" | "gnome_screenshot" => Some(Self::GnomeScreenshot),
             _ => None,
         }
@@ -168,6 +171,7 @@ impl ScreenshotBackend {
         match self {
             Self::GnomeShell => capture_with_gnome_shell().await,
             Self::Portal => capture_with_portal().await,
+            Self::X11 => capture_with_x11().await,
             Self::GnomeScreenshot => capture_with_gnome_screenshot().await,
         }
     }
@@ -197,6 +201,13 @@ pub async fn capture_screenshot_raw() -> Result<RawScreenshotCapture> {
         Ok(capture) => return Ok(capture),
         Err(error) => error,
     };
+    // Native X11 only, and ahead of gnome-screenshot: gnome-screenshot 41 masks
+    // everything outside the GDK monitor geometry, which is 1/4 of the frame at
+    // window-scaling-factor 2 on MATE (issue #155). GetImage has no GDK layer.
+    let x11_error = match capture_with_x11().await {
+        Ok(capture) => return Ok(capture),
+        Err(error) => error,
+    };
     let cli_error = match capture_with_gnome_screenshot().await {
         Ok(capture) => return Ok(capture),
         Err(error) => error,
@@ -205,8 +216,40 @@ pub async fn capture_screenshot_raw() -> Result<RawScreenshotCapture> {
     Err(anyhow!(
         "GNOME Shell screenshot failed: {gnome_error}; \
          XDG portal screenshot failed: {portal_error}; \
+         native X11 screenshot failed: {x11_error}; \
          gnome-screenshot fallback failed: {cli_error}"
     ))
+}
+
+/// `GetImage` on the root window of a native X11 session. Pixels are device
+/// pixels, the space xdotool/XTEST input and X11 window origins use.
+async fn capture_with_x11() -> Result<RawScreenshotCapture> {
+    if !is_native_x11_session() {
+        bail!("not a native X11 session (needs DISPLAY on an X11, not Wayland, session)");
+    }
+    let image = with_x11_display(X11_CAPTURE_TIMEOUT, |display| display.capture_root()).await??;
+    let (width, height) = (image.width, image.height);
+    let bytes =
+        tokio::task::spawn_blocking(move || encode_rgb_png(image.width, image.height, image.rgb))
+            .await
+            .context("X11 screenshot encoder task failed")??;
+    Ok(RawScreenshotCapture {
+        mime_type: "image/png".to_string(),
+        bytes,
+        source: "x11".to_string(),
+        width,
+        height,
+    })
+}
+
+fn encode_rgb_png(width: u32, height: u32, rgb: Vec<u8>) -> Result<Vec<u8>> {
+    let buffer = image::RgbImage::from_raw(width, height, rgb)
+        .context("X11 root image did not match its dimensions")?;
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgb8(buffer)
+        .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
+        .context("failed to encode X11 screenshot PNG")?;
+    Ok(out)
 }
 
 fn forced_backend() -> Result<Option<ScreenshotBackend>> {
@@ -215,7 +258,7 @@ fn forced_backend() -> Result<Option<ScreenshotBackend>> {
             ScreenshotBackend::parse(&value).map(Some).ok_or_else(|| {
                 anyhow!(
                     "{SCREENSHOT_BACKEND_ENV}={value:?} is not a recognized backend \
-                     (expected gnome-shell, portal, or gnome-screenshot)"
+                     (expected gnome-shell, portal, x11, or gnome-screenshot)"
                 )
             })
         }
@@ -743,6 +786,14 @@ mod tests {
         assert_eq!(
             ScreenshotBackend::parse("GNOME_SCREENSHOT"),
             Some(ScreenshotBackend::GnomeScreenshot)
+        );
+        assert_eq!(
+            ScreenshotBackend::parse("x11"),
+            Some(ScreenshotBackend::X11)
+        );
+        assert_eq!(
+            ScreenshotBackend::parse(" X11-Native "),
+            Some(ScreenshotBackend::X11)
         );
         assert_eq!(ScreenshotBackend::parse("nonsense"), None);
     }
