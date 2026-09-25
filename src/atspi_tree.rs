@@ -398,6 +398,11 @@ pub struct FocusedElementSummary {
     pub name: Option<String>,
     pub editable: bool,
     pub states: Vec<String>,
+    /// AT-SPI `Role::Terminal`, read from the role enum rather than the
+    /// localized role name. Internal routing only; not part of the output.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub is_terminal: bool,
 }
 
 const FOCUS_PROBE_MAX_NODES: usize = 400;
@@ -436,11 +441,13 @@ pub async fn focused_element_summary(
         };
         if state.contains(atspi::State::Focused) {
             let proxies = proxy.proxies().await.ok();
+            let is_terminal = matches!(proxy.get_role().await, Ok(atspi::Role::Terminal));
             return Ok(Some(FocusedElementSummary {
                 role: role_name(&proxy).await,
                 name: optional_string(proxy.name().await.ok()),
                 editable: supports_editable_text(proxies.as_ref()).await,
                 states: state_labels(state),
+                is_terminal,
             }));
         }
         if depth < FOCUS_PROBE_MAX_DEPTH {

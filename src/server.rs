@@ -15,7 +15,7 @@ use crate::screenshot::{
     capture_screenshot_raw, prepare_screenshot_payload, RawScreenshotCapture, ScreenshotCapture,
     ScreenshotOutputFormat, ScreenshotPayloadOptions,
 };
-use crate::terminal::uses_terminal_paste_shortcut;
+use crate::terminal::{terminal_paste_shortcut, TerminalPasteShortcut};
 use crate::windowing::registry;
 use crate::windows::{
     focus_window_target, focused_window, list_windows, resolve_window_target,
@@ -1648,11 +1648,10 @@ impl ComputerUseLinux {
                     } else {
                         focus.clone()
                     };
-                    let use_terminal_paste =
-                        kde_clipboard_uses_terminal_paste(&window_target, kde_focus.as_ref()).await;
+                    let paste_shortcut =
+                        kde_clipboard_paste_shortcut(&window_target, kde_focus.as_ref()).await;
                     let _clipboard_guard = self.kde_clipboard_lock.lock().await;
-                    match run_kde_clipboard_paste_text(&session, &params.text, use_terminal_paste)
-                        .await
+                    match run_kde_clipboard_paste_text(&session, &params.text, paste_shortcut).await
                     {
                         Ok(message) => {
                             let notes = self.input_landing_notes(kde_focus.as_ref(), true).await;
@@ -4908,6 +4907,7 @@ fn ydotool_type_timeout(text: &str) -> Duration {
 const EVDEV_KEY_LEFTCTRL: i32 = 29;
 const EVDEV_KEY_LEFTSHIFT: i32 = 42;
 const EVDEV_KEY_V: i32 = 47;
+const EVDEV_KEY_INSERT: i32 = 110;
 const KDE_CLIPBOARD_RESTORE_MIN_DELAY_MS: u64 = 1_500;
 const KDE_CLIPBOARD_RESTORE_MAX_DELAY_MS: u64 = 5_000;
 const KDE_CLIPBOARD_RESTORE_CHARS_PER_SECOND: u64 = 250;
@@ -4950,7 +4950,7 @@ impl KdeClipboardPasteError {
 async fn run_kde_clipboard_paste_text(
     session: &PortalKeyboardSession,
     text: &str,
-    use_terminal_paste: bool,
+    paste_shortcut: KdeClipboardPasteShortcut,
 ) -> std::result::Result<String, KdeClipboardPasteError> {
     let previous = kde_clipboard_contents()
         .await
@@ -4959,13 +4959,10 @@ async fn run_kde_clipboard_paste_text(
         .await
         .map_err(KdeClipboardPasteError::before_text_input)?;
 
-    let paste_result = press_keycode_chord(
-        session,
-        kde_clipboard_paste_modifiers(use_terminal_paste),
-        EVDEV_KEY_V,
-    )
-    .await
-    .map_err(|error| format!("{error:#}"));
+    let (modifiers, keycode) = kde_clipboard_paste_chord(paste_shortcut);
+    let paste_result = press_keycode_chord(session, modifiers, keycode)
+        .await
+        .map_err(|error| format!("{error:#}"));
 
     sleep(kde_clipboard_restore_delay(text)).await;
     let restore_result = kde_set_clipboard_contents(&previous).await;
@@ -4982,35 +4979,86 @@ async fn run_kde_clipboard_paste_text(
     }
 }
 
-async fn kde_clipboard_uses_terminal_paste(
+/// Paste chord for KDE clipboard text input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KdeClipboardPasteShortcut {
+    /// Ctrl+V, for ordinary widgets.
+    Standard,
+    /// Ctrl+Shift+V, for most terminal emulators.
+    CtrlShiftV,
+    /// Shift+Insert, for the xterm and rxvt families.
+    ShiftInsert,
+}
+
+async fn kde_clipboard_paste_shortcut(
     target: &WindowTarget,
     focus: Option<&WindowFocusResult>,
-) -> bool {
-    if let Some(focus) = focus {
-        let window = focus
-            .focused_window
-            .as_ref()
-            .unwrap_or(&focus.requested_window);
-        return kde_clipboard_target_is_terminal(target, Some(window));
+) -> KdeClipboardPasteShortcut {
+    let current = match focus {
+        Some(_) => None,
+        None => focused_window().await.ok().flatten(),
+    };
+    let window = focus
+        .map(|focus| {
+            focus
+                .focused_window
+                .as_ref()
+                .unwrap_or(&focus.requested_window)
+        })
+        .or(current.as_ref());
+    let terminal = kde_clipboard_terminal_shortcut(target, window);
+    if terminal.is_none() {
+        return KdeClipboardPasteShortcut::Standard;
     }
-    if let Ok(Some(current)) = focused_window().await {
-        return kde_clipboard_target_is_terminal(target, Some(&current));
-    }
-    kde_clipboard_target_is_terminal(target, None)
+    // A terminal window can hold focus on a non-terminal widget (a search
+    // field, a tab rename box) that pastes with plain Ctrl+V.
+    let pid = window.and_then(|window| window.pid);
+    let focused_element = timeout(Duration::from_millis(1_500), focused_element_summary(pid))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten();
+    kde_clipboard_shortcut_for_focus(terminal, focused_element.as_ref())
 }
 
-fn kde_clipboard_target_is_terminal(target: &WindowTarget, window: Option<&WindowInfo>) -> bool {
+/// The terminal chord for the resolved window, or for an explicit terminal
+/// selector when no window resolved. A resolved window always wins over a
+/// possibly stale selector.
+fn kde_clipboard_terminal_shortcut(
+    target: &WindowTarget,
+    window: Option<&WindowInfo>,
+) -> Option<TerminalPasteShortcut> {
     match window {
-        Some(window) => uses_terminal_paste_shortcut(window),
-        None => target.has_terminal_target(),
+        Some(window) => terminal_paste_shortcut(window),
+        None => target
+            .has_terminal_target()
+            .then_some(TerminalPasteShortcut::CtrlShiftV),
     }
 }
 
-fn kde_clipboard_paste_modifiers(use_terminal_paste: bool) -> &'static [i32] {
-    if use_terminal_paste {
-        &[EVDEV_KEY_LEFTCTRL, EVDEV_KEY_LEFTSHIFT]
-    } else {
-        &[EVDEV_KEY_LEFTCTRL]
+fn kde_clipboard_shortcut_for_focus(
+    terminal: Option<TerminalPasteShortcut>,
+    focused_element: Option<&FocusedElementSummary>,
+) -> KdeClipboardPasteShortcut {
+    // No AT-SPI answer (xterm exposes none) keeps the terminal chord; a
+    // concrete non-terminal focused element switches back to Ctrl+V.
+    if focused_element.is_some_and(|element| !element.is_terminal) {
+        return KdeClipboardPasteShortcut::Standard;
+    }
+    match terminal {
+        Some(TerminalPasteShortcut::CtrlShiftV) => KdeClipboardPasteShortcut::CtrlShiftV,
+        Some(TerminalPasteShortcut::ShiftInsert) => KdeClipboardPasteShortcut::ShiftInsert,
+        None => KdeClipboardPasteShortcut::Standard,
+    }
+}
+
+fn kde_clipboard_paste_chord(shortcut: KdeClipboardPasteShortcut) -> (&'static [i32], i32) {
+    match shortcut {
+        KdeClipboardPasteShortcut::Standard => (&[EVDEV_KEY_LEFTCTRL], EVDEV_KEY_V),
+        KdeClipboardPasteShortcut::CtrlShiftV => {
+            (&[EVDEV_KEY_LEFTCTRL, EVDEV_KEY_LEFTSHIFT], EVDEV_KEY_V)
+        }
+        KdeClipboardPasteShortcut::ShiftInsert => (&[EVDEV_KEY_LEFTSHIFT], EVDEV_KEY_INSERT),
     }
 }
 
@@ -6480,16 +6528,67 @@ mod tests {
     }
 
     #[test]
-    fn kde_clipboard_uses_terminal_paste_shortcut_for_terminals() {
+    fn kde_clipboard_maps_each_paste_shortcut_to_its_chord() {
         assert_eq!(
-            kde_clipboard_paste_modifiers(true),
-            &[EVDEV_KEY_LEFTCTRL, EVDEV_KEY_LEFTSHIFT]
+            kde_clipboard_paste_chord(KdeClipboardPasteShortcut::Standard),
+            (&[EVDEV_KEY_LEFTCTRL][..], EVDEV_KEY_V)
+        );
+        assert_eq!(
+            kde_clipboard_paste_chord(KdeClipboardPasteShortcut::CtrlShiftV),
+            (&[EVDEV_KEY_LEFTCTRL, EVDEV_KEY_LEFTSHIFT][..], EVDEV_KEY_V)
+        );
+        assert_eq!(
+            kde_clipboard_paste_chord(KdeClipboardPasteShortcut::ShiftInsert),
+            (&[EVDEV_KEY_LEFTSHIFT][..], EVDEV_KEY_INSERT)
+        );
+    }
+
+    fn focused(role: &str, is_terminal: bool) -> FocusedElementSummary {
+        FocusedElementSummary {
+            role: role.to_string(),
+            name: None,
+            editable: false,
+            states: vec!["focused".to_string()],
+            is_terminal,
+        }
+    }
+
+    #[test]
+    fn kde_clipboard_focus_fallback_uses_the_role_enum_not_the_name() {
+        let ctrl_shift_v = Some(TerminalPasteShortcut::CtrlShiftV);
+        let shift_insert = Some(TerminalPasteShortcut::ShiftInsert);
+
+        // No AT-SPI answer (xterm exposes none) keeps the terminal chord.
+        assert_eq!(
+            kde_clipboard_shortcut_for_focus(shift_insert, None),
+            KdeClipboardPasteShortcut::ShiftInsert
+        );
+        // A terminal widget keeps it, whatever its localized role name.
+        assert_eq!(
+            kde_clipboard_shortcut_for_focus(ctrl_shift_v, Some(&focused("терминал", true))),
+            KdeClipboardPasteShortcut::CtrlShiftV
+        );
+        // A focused search field inside the terminal window pastes with Ctrl+V.
+        assert_eq!(
+            kde_clipboard_shortcut_for_focus(ctrl_shift_v, Some(&focused("text", false))),
+            KdeClipboardPasteShortcut::Standard
+        );
+        assert_eq!(
+            kde_clipboard_shortcut_for_focus(None, None),
+            KdeClipboardPasteShortcut::Standard
         );
     }
 
     #[test]
-    fn kde_clipboard_keeps_standard_paste_shortcut_for_other_apps() {
-        assert_eq!(kde_clipboard_paste_modifiers(false), &[EVDEV_KEY_LEFTCTRL]);
+    fn kde_clipboard_routes_xterm_family_to_shift_insert() {
+        for wm_class in ["xterm", "UXTerm", "urxvt", "rxvt-unicode", "koi8rxterm"] {
+            let window = window_info(1, Some("user@host"), None, Some(wm_class), Some(100));
+            assert_eq!(
+                kde_clipboard_terminal_shortcut(&WindowTarget::default(), Some(&window)),
+                Some(TerminalPasteShortcut::ShiftInsert),
+                "{wm_class} should paste with Shift+Insert"
+            );
+        }
     }
 
     #[test]
@@ -6499,7 +6598,10 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(kde_clipboard_target_is_terminal(&target, None));
+        assert_eq!(
+            kde_clipboard_terminal_shortcut(&target, None),
+            Some(TerminalPasteShortcut::CtrlShiftV)
+        );
     }
 
     #[test]
@@ -6516,7 +6618,10 @@ mod tests {
             Some(100),
         );
 
-        assert!(!kde_clipboard_target_is_terminal(&target, Some(&window)));
+        assert_eq!(
+            kde_clipboard_terminal_shortcut(&target, Some(&window)),
+            None
+        );
     }
 
     #[tokio::test]
@@ -6541,7 +6646,10 @@ mod tests {
             note: "test".to_string(),
         };
 
-        assert!(!kde_clipboard_uses_terminal_paste(&target, Some(&focus)).await);
+        assert_eq!(
+            kde_clipboard_paste_shortcut(&target, Some(&focus)).await,
+            KdeClipboardPasteShortcut::Standard
+        );
     }
 
     #[test]
@@ -6554,10 +6662,10 @@ mod tests {
             Some(100),
         );
 
-        assert!(kde_clipboard_target_is_terminal(
-            &WindowTarget::default(),
-            Some(&window)
-        ));
+        assert_eq!(
+            kde_clipboard_terminal_shortcut(&WindowTarget::default(), Some(&window)),
+            Some(TerminalPasteShortcut::CtrlShiftV)
+        );
     }
 
     #[test]
@@ -6570,10 +6678,10 @@ mod tests {
             Some(100),
         );
 
-        assert!(!kde_clipboard_target_is_terminal(
-            &WindowTarget::default(),
-            Some(&window)
-        ));
+        assert_eq!(
+            kde_clipboard_terminal_shortcut(&WindowTarget::default(), Some(&window)),
+            None
+        );
     }
 
     #[tokio::test]
@@ -7737,6 +7845,7 @@ mod tests {
             name: Some("Message".to_string()),
             editable: true,
             states: vec!["focused".to_string()],
+            is_terminal: false,
         };
         let described = describe_focused_element(&element, true);
         assert!(described.contains("editable"));
@@ -7750,6 +7859,7 @@ mod tests {
             name: Some("OK".to_string()),
             editable: false,
             states: vec!["focused".to_string()],
+            is_terminal: false,
         };
         let described = describe_focused_element(&element, true);
         assert!(described.contains("WARNING"));
@@ -7763,6 +7873,7 @@ mod tests {
             name: None,
             editable: false,
             states: vec![],
+            is_terminal: false,
         };
         let described = describe_focused_element(&element, false);
         assert!(!described.contains("WARNING"));
