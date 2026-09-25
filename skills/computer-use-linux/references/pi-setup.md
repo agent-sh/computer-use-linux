@@ -131,4 +131,5 @@ Ready output has:
 - `can_build_accessibility_tree: true`
 - `can_query_windows: true`
 - `can_send_development_input: true`
+- `can_capture_screenshots: true`
 - `blockers: []`

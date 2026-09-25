@@ -5887,6 +5887,7 @@ mod tests {
                 can_focus_apps: true,
                 can_focus_windows: true,
                 can_send_development_input: true,
+                can_capture_screenshots: true,
                 recommended_next_step: String::new(),
                 blockers: Vec::new(),
             },
