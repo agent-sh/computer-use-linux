@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- KDE Plasma clipboard paste into xterm, uxterm, rxvt, urxvt, and koi8rxterm
+  now sends Shift+Insert. Those terminals have no Ctrl+Shift+V binding by
+  default, so the paste was dropped; Klipper sets the selection as well as
+  the clipboard, so Shift+Insert pastes the new text. When AT-SPI reports a
+  focused element that is not a terminal (a search field in a terminal
+  window), paste falls back to Ctrl+V. The check reads the AT-SPI role enum,
+  not the localized role name. Behavior ported from
+  ilysenko/codex-desktop-linux#1413.
 - Helper spawns (ydotool, wtype, xdotool, gnome-screenshot, and every command
   run through the supervised runner) retry a transient `ETXTBSY` ("Text file
   busy") for up to 75 ms. The error appears when a helper binary is being

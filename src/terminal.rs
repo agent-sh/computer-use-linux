@@ -225,21 +225,57 @@ fn looks_like_terminal_window(window: &WindowInfo) -> bool {
         })
 }
 
-pub(crate) fn uses_terminal_paste_shortcut(window: &WindowInfo) -> bool {
-    window.terminal.is_some()
-        || [window.app_id.as_deref(), window.wm_class.as_deref()]
-            .into_iter()
-            .flatten()
-            .any(terminal_identity_matches)
+/// Which paste chord a terminal emulator accepts. The xterm and rxvt families
+/// have no Ctrl+Shift+V binding by default and paste the clipboard with
+/// Shift+Insert; the others use Ctrl+Shift+V.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalPasteShortcut {
+    CtrlShiftV,
+    ShiftInsert,
 }
 
-fn terminal_identity_matches(value: &str) -> bool {
+pub(crate) fn uses_terminal_paste_shortcut(window: &WindowInfo) -> bool {
+    terminal_paste_shortcut(window).is_some()
+}
+
+/// The paste chord for a terminal window, or `None` for anything else. A known
+/// app id or WM_CLASS decides the chord; a window that only carries PTY
+/// enrichment is treated as a Ctrl+Shift+V terminal.
+pub(crate) fn terminal_paste_shortcut(window: &WindowInfo) -> Option<TerminalPasteShortcut> {
+    [window.app_id.as_deref(), window.wm_class.as_deref()]
+        .into_iter()
+        .flatten()
+        .find_map(terminal_identity_shortcut)
+        .or_else(|| {
+            window
+                .terminal
+                .is_some()
+                .then_some(TerminalPasteShortcut::CtrlShiftV)
+        })
+}
+
+fn terminal_identity_shortcut(value: &str) -> Option<TerminalPasteShortcut> {
     let identity = value.trim().to_ascii_lowercase();
     let identity = identity.strip_suffix(".desktop").unwrap_or(&identity);
-    TERMINAL_IDENTITIES.contains(&identity)
+    if SHIFT_INSERT_TERMINAL_IDENTITIES.contains(&identity) {
+        Some(TerminalPasteShortcut::ShiftInsert)
+    } else if CTRL_SHIFT_V_TERMINAL_IDENTITIES.contains(&identity) {
+        Some(TerminalPasteShortcut::CtrlShiftV)
+    } else {
+        None
+    }
 }
 
-const TERMINAL_IDENTITIES: &[&str] = &[
+const SHIFT_INSERT_TERMINAL_IDENTITIES: &[&str] = &[
+    "koi8rxterm",
+    "rxvt",
+    "rxvt-unicode",
+    "urxvt",
+    "uxterm",
+    "xterm",
+];
+
+const CTRL_SHIFT_V_TERMINAL_IDENTITIES: &[&str] = &[
     "alacritty",
     "com.gexperts.tilix",
     "com.mitchellh.ghostty",
@@ -263,17 +299,12 @@ const TERMINAL_IDENTITIES: &[&str] = &[
     "org.wezfurlong.wezterm",
     "ptyxis",
     "qterminal",
-    "rxvt",
-    "rxvt-unicode",
     "sakura",
     "terminator",
     "tilix",
-    "urxvt",
-    "uxterm",
     "wezterm",
     "wezterm-gui",
     "xfce4-terminal",
-    "xterm",
     "yakuake",
 ];
 
@@ -494,6 +525,31 @@ mod tests {
     }
 
     #[test]
+    fn terminal_paste_picks_shift_insert_for_the_xterm_family_only() {
+        for (identity, expected) in [
+            ("xterm", TerminalPasteShortcut::ShiftInsert),
+            ("uxterm", TerminalPasteShortcut::ShiftInsert),
+            ("URxvt", TerminalPasteShortcut::ShiftInsert),
+            ("koi8rxterm", TerminalPasteShortcut::ShiftInsert),
+            ("org.kde.konsole", TerminalPasteShortcut::CtrlShiftV),
+            ("kitty", TerminalPasteShortcut::CtrlShiftV),
+            (
+                "org.gnome.Ptyxis.desktop",
+                TerminalPasteShortcut::CtrlShiftV,
+            ),
+        ] {
+            let mut window = terminal_window(11, 100);
+            window.app_id = None;
+            window.wm_class = Some(identity.to_string());
+            assert_eq!(
+                terminal_paste_shortcut(&window),
+                Some(expected),
+                "{identity} chose the wrong paste chord"
+            );
+        }
+    }
+
+    #[test]
     fn terminal_paste_accepts_wm_class_or_enriched_pty_metadata() {
         let mut window = terminal_window(11, 100);
         window.app_id = None;
@@ -515,6 +571,11 @@ mod tests {
             match_reason: "test".to_string(),
         });
         assert!(uses_terminal_paste_shortcut(&window));
+        assert_eq!(
+            terminal_paste_shortcut(&window),
+            Some(TerminalPasteShortcut::CtrlShiftV),
+            "PTY enrichment without a known identity defaults to Ctrl+Shift+V"
+        );
     }
 
     #[test]

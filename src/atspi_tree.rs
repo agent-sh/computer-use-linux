@@ -398,6 +398,11 @@ pub struct FocusedElementSummary {
     pub name: Option<String>,
     pub editable: bool,
     pub states: Vec<String>,
+    /// AT-SPI `Role::Terminal`, read from the role enum rather than the
+    /// localized role name. Internal routing only; not part of the output.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub is_terminal: bool,
 }
 
 const FOCUS_PROBE_MAX_NODES: usize = 400;
@@ -410,6 +415,24 @@ const FOCUS_PROBE_MAX_DEPTH: u32 = 16;
 pub async fn focused_element_summary(
     target_pid: Option<u32>,
 ) -> Result<Option<FocusedElementSummary>> {
+    focused_element_summary_scoped(target_pid, false).await
+}
+
+/// Like [`focused_element_summary`], but only answers from the app that owns
+/// `target_pid`. When no AT-SPI root belongs to that pid (xterm, urxvt, and
+/// other apps without accessibility), the unscoped fallback would search
+/// every other app and return whichever widget last kept the Focused state;
+/// this returns `Ok(None)` instead.
+pub(crate) async fn focused_element_summary_in_app(
+    target_pid: u32,
+) -> Result<Option<FocusedElementSummary>> {
+    focused_element_summary_scoped(Some(target_pid), true).await
+}
+
+async fn focused_element_summary_scoped(
+    target_pid: Option<u32>,
+    require_scoped: bool,
+) -> Result<Option<FocusedElementSummary>> {
     let conn = connect().await?;
     let mut remaining_registry_reads = MAX_DISCOVERY_ROOTS;
     let roots =
@@ -417,6 +440,9 @@ pub async fn focused_element_summary(
     let mut remaining_filter_reads = MAX_DISCOVERY_CHILD_READS;
     let selected_roots =
         select_roots(&conn, roots, None, target_pid, &mut remaining_filter_reads).await;
+    if require_scoped && !selected_roots.scoped {
+        return Ok(None);
+    }
     let mut traversal = BoundedTraversal::new(FOCUS_PROBE_MAX_NODES);
     let mut remaining_traversal_reads = FOCUS_PROBE_MAX_NODES;
 
@@ -436,11 +462,13 @@ pub async fn focused_element_summary(
         };
         if state.contains(atspi::State::Focused) {
             let proxies = proxy.proxies().await.ok();
+            let is_terminal = matches!(proxy.get_role().await, Ok(atspi::Role::Terminal));
             return Ok(Some(FocusedElementSummary {
                 role: role_name(&proxy).await,
                 name: optional_string(proxy.name().await.ok()),
                 editable: supports_editable_text(proxies.as_ref()).await,
                 states: state_labels(state),
+                is_terminal,
             }));
         }
         if depth < FOCUS_PROBE_MAX_DEPTH {
