@@ -20,6 +20,45 @@ const MAX_COMMAND_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const BLOCKING_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_BLOCKING_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_BLOCKING_DRAIN_BYTES: usize = 64 * 1024;
+/// `exec` fails with ETXTBSY while any process holds a write handle on the
+/// program file. That happens when a helper binary is being replaced, and in
+/// tests when another thread forks while a fake script is still open for
+/// writing: the child inherits the O_CLOEXEC handle until its own exec. The
+/// window is short, so retry a few times with a growing pause (75 ms total).
+const TEXT_FILE_BUSY_RETRIES: u32 = 5;
+const TEXT_FILE_BUSY_BACKOFF: Duration = Duration::from_millis(5);
+
+fn is_text_file_busy(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ETXTBSY)
+}
+
+/// `StdCommand::spawn` that retries a transient ETXTBSY.
+pub(crate) fn spawn_std_retrying_busy(command: &mut StdCommand) -> io::Result<std::process::Child> {
+    let mut attempt = 0;
+    loop {
+        match command.spawn() {
+            Err(error) if is_text_file_busy(&error) && attempt < TEXT_FILE_BUSY_RETRIES => {
+                attempt += 1;
+                thread::sleep(TEXT_FILE_BUSY_BACKOFF * attempt);
+            }
+            result => return result,
+        }
+    }
+}
+
+/// Tokio `Command::spawn` that retries a transient ETXTBSY.
+pub(crate) async fn spawn_retrying_busy(command: &mut Command) -> io::Result<Child> {
+    let mut attempt = 0;
+    loop {
+        match command.spawn() {
+            Err(error) if is_text_file_busy(&error) && attempt < TEXT_FILE_BUSY_RETRIES => {
+                attempt += 1;
+                tokio::time::sleep(TEXT_FILE_BUSY_BACKOFF * attempt).await;
+            }
+            result => return result,
+        }
+    }
+}
 
 pub(crate) async fn output(command: Command, action: &str) -> Result<Output> {
     output_with_timeout(command, action, COMMAND_TIMEOUT).await
@@ -56,9 +95,8 @@ pub(crate) fn output_blocking_with_timeout(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("failed to {action}"))?;
+    let mut child =
+        spawn_std_retrying_busy(command).with_context(|| format!("failed to {action}"))?;
     let pgid = i32::try_from(child.id()).context("child process id did not fit in i32")?;
     let mut stdout = child
         .stdout
@@ -141,8 +179,8 @@ async fn output_with_input(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let child = command
-        .spawn()
+    let child = spawn_retrying_busy(&mut command)
+        .await
         .with_context(|| format!("failed to {action}"))?;
     supervise_child(child, action, timeout, input).await
 }
@@ -447,6 +485,78 @@ impl Drop for CancelOnDrop {
 mod tests {
     use super::*;
     use std::{fs, path::PathBuf, time::Instant};
+
+    /// A script whose own write handle is still open: `exec` must fail with
+    /// ETXTBSY until the handle closes.
+    fn busy_script(label: &str) -> (PathBuf, std::fs::File) {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = std::env::temp_dir().join(format!(
+            "computer-use-linux-busy-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+        file.flush().unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        (path, file)
+    }
+
+    #[test]
+    fn blocking_spawn_waits_out_a_transient_text_file_busy() {
+        let (path, writer) = busy_script("std");
+        let direct = StdCommand::new(&path).spawn();
+        assert!(
+            direct.as_ref().err().is_some_and(is_text_file_busy),
+            "an open write handle must make exec fail with ETXTBSY: {direct:?}"
+        );
+        let release = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            drop(writer);
+        });
+
+        let mut child = spawn_std_retrying_busy(&mut StdCommand::new(&path))
+            .expect("retry must outlast a 20 ms busy window");
+        assert!(child.wait().unwrap().success());
+        release.join().unwrap();
+        let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn async_spawn_waits_out_a_transient_text_file_busy() {
+        let (path, writer) = busy_script("tokio");
+        let release = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            drop(writer);
+        });
+
+        let mut child = spawn_retrying_busy(&mut Command::new(&path))
+            .await
+            .expect("retry must outlast a 20 ms busy window");
+        assert!(child.wait().await.unwrap().success());
+        release.join().unwrap();
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn persistent_text_file_busy_is_still_reported() {
+        let (path, writer) = busy_script("persistent");
+        let started = Instant::now();
+
+        let error = spawn_std_retrying_busy(&mut StdCommand::new(&path)).unwrap_err();
+
+        assert!(is_text_file_busy(&error));
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the retry budget must stay short"
+        );
+        drop(writer);
+        let _ = fs::remove_file(path);
+    }
 
     #[tokio::test]
     async fn timeout_kills_the_child_process() {

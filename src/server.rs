@@ -5125,7 +5125,9 @@ async fn run_xdotool_with_timeout(
     command.kill_on_drop(true);
     command.process_group(0);
 
-    match command.spawn() {
+    // A busy-file spawn error is transient, not "xdotool is unavailable"; do
+    // not let it route input to the ydotool fallback.
+    match crate::command_runner::spawn_retrying_busy(&mut command).await {
         Ok(child) => XdotoolAttempt::Finished(
             match crate::command_runner::output_child(child, "run xdotool", command_timeout)
                 .await
