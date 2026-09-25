@@ -14,6 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so each entry now requires its methods (Screenshot: `Screenshot`). Readiness
   gains `can_capture_screenshots` and a blocker when no screenshot route is
   detected; this is detection, not a test capture. (#156)
+- X11/EWMH window origins now come from the X server
+  (`TranslateCoordinates` to the root window) instead of `wmctrl -lG`, which
+  counts the client's offset inside its frame twice. Window-targeted
+  screenshots cropped the wrong area, relative clicks were offset by the same
+  amount, off-screen warnings misfired on maximized windows, and
+  `move_window` reported a mismatch after a correct move. Bounds are the
+  client area; `move_window` now verifies the frame origin it requested. When
+  the X server cannot be asked, the origin is reported unknown instead of the
+  shifted wmctrl value. (#157)
 
 ## [0.7.1] - 2026-09-19
 
