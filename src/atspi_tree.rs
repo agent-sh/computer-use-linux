@@ -415,6 +415,24 @@ const FOCUS_PROBE_MAX_DEPTH: u32 = 16;
 pub async fn focused_element_summary(
     target_pid: Option<u32>,
 ) -> Result<Option<FocusedElementSummary>> {
+    focused_element_summary_scoped(target_pid, false).await
+}
+
+/// Like [`focused_element_summary`], but only answers from the app that owns
+/// `target_pid`. When no AT-SPI root belongs to that pid (xterm, urxvt, and
+/// other apps without accessibility), the unscoped fallback would search
+/// every other app and return whichever widget last kept the Focused state;
+/// this returns `Ok(None)` instead.
+pub(crate) async fn focused_element_summary_in_app(
+    target_pid: u32,
+) -> Result<Option<FocusedElementSummary>> {
+    focused_element_summary_scoped(Some(target_pid), true).await
+}
+
+async fn focused_element_summary_scoped(
+    target_pid: Option<u32>,
+    require_scoped: bool,
+) -> Result<Option<FocusedElementSummary>> {
     let conn = connect().await?;
     let mut remaining_registry_reads = MAX_DISCOVERY_ROOTS;
     let roots =
@@ -422,6 +440,9 @@ pub async fn focused_element_summary(
     let mut remaining_filter_reads = MAX_DISCOVERY_CHILD_READS;
     let selected_roots =
         select_roots(&conn, roots, None, target_pid, &mut remaining_filter_reads).await;
+    if require_scoped && !selected_roots.scoped {
+        return Ok(None);
+    }
     let mut traversal = BoundedTraversal::new(FOCUS_PROBE_MAX_NODES);
     let mut remaining_traversal_reads = FOCUS_PROBE_MAX_NODES;
 

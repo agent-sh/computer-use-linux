@@ -1,7 +1,8 @@
 use crate::atspi_tree::{
-    focused_element_summary, list_accessible_apps, perform_action as invoke_accessibility_action,
-    perform_named_action, set_element_value, snapshot_accessibility_tree, AccessibilityAction,
-    AccessibilityNode, AccessibleAppSummary, Bounds, FocusedElementSummary, ValueSetInvocation,
+    focused_element_summary, focused_element_summary_in_app, list_accessible_apps,
+    perform_action as invoke_accessibility_action, perform_named_action, set_element_value,
+    snapshot_accessibility_tree, AccessibilityAction, AccessibilityNode, AccessibleAppSummary,
+    Bounds, FocusedElementSummary, ValueSetInvocation,
 };
 use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
@@ -5011,13 +5012,20 @@ async fn kde_clipboard_paste_shortcut(
         return KdeClipboardPasteShortcut::Standard;
     }
     // A terminal window can hold focus on a non-terminal widget (a search
-    // field, a tab rename box) that pastes with plain Ctrl+V.
-    let pid = window.and_then(|window| window.pid);
-    let focused_element = timeout(Duration::from_millis(1_500), focused_element_summary(pid))
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .flatten();
+    // field, a tab rename box) that pastes with plain Ctrl+V. Only an answer
+    // from the terminal's own AT-SPI app may override the chord: without a pid,
+    // or when the terminal exposes no AT-SPI root, keep the terminal chord.
+    let Some(pid) = window.and_then(|window| window.pid) else {
+        return kde_clipboard_shortcut_for_focus(terminal, None);
+    };
+    let focused_element = timeout(
+        Duration::from_millis(1_500),
+        focused_element_summary_in_app(pid),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .flatten();
     kde_clipboard_shortcut_for_focus(terminal, focused_element.as_ref())
 }
 
