@@ -102,6 +102,12 @@ The extension looks for `computer-use-linux` in this order:
 
 1. `COMPUTER_USE_LINUX_BIN`
 2. The binary downloaded inside the installed npm package
+3. `computer-use-linux` on `PATH`, from `npm install -g` or `cargo install`
+
+A temporary extension (`pi -e npm:@agent-sh/computer-use-linux`) is staged
+without the downloaded binary, so it relies on the `PATH` step. The extension
+still checks that the server version and tool catalog match, so a mismatched
+install fails with that reason instead of starting.
 
 Reinstall the package if the bundled binary is missing:
 
