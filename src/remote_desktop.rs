@@ -74,6 +74,11 @@ struct PortalStream {
     node_id: u32,
     position: Option<(i32, i32)>,
     size: Option<(i32, i32)>,
+    /// Stream pixels per logical pixel for NotifyPointerMotionAbsolute. mutter
+    /// divides stream coordinates by the monitor scale when its stage views
+    /// are scaled (logical layout mode), so a logical point must be multiplied
+    /// back; 1.0 everywhere else (#169).
+    pixel_scale: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -152,6 +157,12 @@ pub async fn start_portal_pointer_session() -> Result<PortalPointerSession> {
     }
 
     let desktop_layout = logical_desktop_layout().await;
+    let mut streams = streams;
+    if env_token_contains("XDG_CURRENT_DESKTOP", "gnome")
+        && mutter_stage_views_scaled(&connection).await
+    {
+        assign_stream_pixel_scales(&mut streams, desktop_layout.as_deref());
+    }
     cleanup.disarm();
 
     Ok(PortalPointerSession {
@@ -1094,8 +1105,8 @@ impl PortalStream {
     fn relative_point(&self, x: i32, y: i32) -> (u32, f64, f64) {
         let (stream_x, stream_y) = self.position.unwrap_or((0, 0));
         let (width, height) = self.size.unwrap_or((i32::MAX, i32::MAX));
-        let rel_x = (x - stream_x).clamp(0, width.saturating_sub(1)) as f64;
-        let rel_y = (y - stream_y).clamp(0, height.saturating_sub(1)) as f64;
+        let rel_x = (x - stream_x).clamp(0, width.saturating_sub(1)) as f64 * self.pixel_scale;
+        let rel_y = (y - stream_y).clamp(0, height.saturating_sub(1)) as f64 * self.pixel_scale;
         (self.node_id, rel_x, rel_y)
     }
 }
@@ -1462,6 +1473,69 @@ async fn await_portal_response(
         .context("failed to decode portal response")
 }
 
+const MUTTER_DISPLAY_CONFIG: &str = "org.gnome.Mutter.DisplayConfig";
+const MUTTER_DISPLAY_CONFIG_PATH: &str = "/org/gnome/Mutter/DisplayConfig";
+/// `layout-mode` in DisplayConfig.GetCurrentState: 1 logical, 2 physical.
+const MUTTER_LAYOUT_MODE_LOGICAL: u32 = 1;
+
+/// Whether mutter's stage views are scaled, i.e. its layout mode is logical.
+/// meta_screen_cast_monitor_stream_transform_position() then maps a stream
+/// point to `monitor.x + stream_x / scale`. Any failure reads as unscaled,
+/// which keeps the previous behavior.
+async fn mutter_stage_views_scaled(connection: &Connection) -> bool {
+    let reply = tokio::time::timeout(
+        PORTAL_CALL_TIMEOUT,
+        connection.call_method(
+            Some(MUTTER_DISPLAY_CONFIG),
+            MUTTER_DISPLAY_CONFIG_PATH,
+            Some(MUTTER_DISPLAY_CONFIG),
+            "GetCurrentState",
+            &(),
+        ),
+    )
+    .await;
+    let Ok(Ok(message)) = reply else {
+        return false;
+    };
+    current_state_properties(&message).is_some_and(|properties| layout_mode_is_logical(&properties))
+}
+
+/// The trailing `a{sv}` of GetCurrentState's `(ua(...)a(...)a{sv})` reply.
+fn current_state_properties(message: &zbus::Message) -> Option<HashMap<String, OwnedValue>> {
+    let body = message.body();
+    let state: zbus::zvariant::Structure = body.deserialize().ok()?;
+    let properties = state.fields().get(3)?.try_clone().ok()?;
+    OwnedValue::try_from(properties).ok()?.try_into().ok()
+}
+
+fn layout_mode_is_logical(properties: &HashMap<String, OwnedValue>) -> bool {
+    properties
+        .get("layout-mode")
+        .and_then(|value| value.try_clone().ok())
+        .and_then(|value| u32::try_from(value).ok())
+        == Some(MUTTER_LAYOUT_MODE_LOGICAL)
+}
+
+/// Give each stream its monitor's scale, matched by identical logical rect.
+/// A stream with no matching monitor, or an unusable scale, keeps 1.0.
+fn assign_stream_pixel_scales(streams: &mut [PortalStream], layout: Option<&[LogicalMonitor]>) {
+    let Some(layout) = layout else {
+        return;
+    };
+    for stream in streams {
+        let (Some((x, y)), Some((width, height))) = (stream.position, stream.size) else {
+            continue;
+        };
+        if let Some(monitor) = layout.iter().find(|monitor| {
+            (monitor.x, monitor.y, monitor.width, monitor.height) == (x, y, width, height)
+        }) {
+            if monitor.scale.is_finite() && monitor.scale > 0.0 {
+                stream.pixel_scale = monitor.scale;
+            }
+        }
+    }
+}
+
 fn parse_streams(value: &OwnedValue) -> Result<Vec<PortalStream>> {
     let streams: Vec<(u32, HashMap<String, OwnedValue>)> = value
         .try_clone()
@@ -1474,6 +1548,7 @@ fn parse_streams(value: &OwnedValue) -> Result<Vec<PortalStream>> {
             node_id,
             position: get_pair_i32(&properties, "position"),
             size: get_pair_i32(&properties, "size"),
+            pixel_scale: 1.0,
         })
         .collect())
 }
@@ -1802,6 +1877,7 @@ mod tests {
             node_id: 1,
             position: Some((0, 0)),
             size: Some((1920, 1200)),
+            pixel_scale: 1.0,
         }];
         let layout = [LogicalMonitor {
             x: 0,
@@ -1824,11 +1900,13 @@ mod tests {
                 node_id: 1,
                 position: Some((-1920, 0)),
                 size: Some((1920, 1080)),
+                pixel_scale: 1.0,
             },
             PortalStream {
                 node_id: 2,
                 position: Some((0, 0)),
                 size: Some((1920, 1080)),
+                pixel_scale: 1.0,
             },
         ];
         let layout = [
@@ -1864,6 +1942,7 @@ mod tests {
             node_id: 1,
             position: None,
             size: None,
+            pixel_scale: 1.0,
         }];
         let layout = [LogicalMonitor {
             x: 0,
@@ -1885,6 +1964,7 @@ mod tests {
             node_id: 1,
             position: Some((0, 0)),
             size: Some((1920, 1080)),
+            pixel_scale: 1.0,
         }];
         let layout = [
             LogicalMonitor {
@@ -1915,6 +1995,7 @@ mod tests {
             node_id: 1,
             position: Some((0, 0)),
             size: Some((1920, 1080)),
+            pixel_scale: 1.0,
         }];
         let layout = [
             LogicalMonitor {
@@ -1946,11 +2027,13 @@ mod tests {
                 node_id: 1,
                 position: Some((0, 0)),
                 size: Some((1920, 1080)),
+                pixel_scale: 1.0,
             },
             PortalStream {
                 node_id: 2,
                 position: Some((1920, 0)),
                 size: Some((1920, 1080)),
+                pixel_scale: 1.0,
             },
         ];
         let layout = [
@@ -1983,11 +2066,13 @@ mod tests {
                 node_id: 1,
                 position: Some((0, 0)),
                 size: Some((1920, 1080)),
+                pixel_scale: 1.0,
             },
             PortalStream {
                 node_id: 2,
                 position: Some((1920, 0)),
                 size: Some((1920, 1080)),
+                pixel_scale: 1.0,
             },
         ];
         let layout = [
@@ -2015,5 +2100,86 @@ mod tests {
             map_capture_point_to_stream_layout(&streams, &layout, 5000, 1000, 7680, 2160),
             None
         );
+    }
+
+    #[test]
+    fn scaled_gnome_stream_gets_physical_coordinates() {
+        // Issue #169: 1920x1200 at 125 % is a 1536x960 logical monitor. mutter
+        // maps stream_x to monitor.x + stream_x / 1.25, so a logical point
+        // must be sent multiplied by 1.25 to land where it was aimed.
+        let mut streams = [PortalStream {
+            node_id: 7,
+            position: Some((0, 0)),
+            size: Some((1536, 960)),
+            pixel_scale: 1.0,
+        }];
+        let layout = [LogicalMonitor {
+            x: 0,
+            y: 0,
+            width: 1536,
+            height: 960,
+            scale: 1.25,
+        }];
+        assign_stream_pixel_scales(&mut streams, Some(&layout));
+        assert_eq!(streams[0].pixel_scale, 1.25);
+
+        // Calculator "7" at logical (632, 626).
+        let (node, x, y) = streams[0].relative_point(632, 626);
+        assert_eq!(node, 7);
+        assert_eq!(
+            (x / 1.25, y / 1.25),
+            (632.0, 626.0),
+            "mutter's divide must undo the scale"
+        );
+        assert_eq!((x, y), (790.0, 782.5));
+    }
+
+    #[test]
+    fn unmatched_monitor_or_bad_scale_keeps_unit_stream_scale() {
+        let mut streams = [
+            PortalStream {
+                node_id: 1,
+                position: Some((0, 0)),
+                size: Some((1536, 960)),
+                pixel_scale: 1.0,
+            },
+            PortalStream {
+                node_id: 2,
+                position: Some((1536, 0)),
+                size: Some((1920, 1080)),
+                pixel_scale: 1.0,
+            },
+        ];
+        let layout = [
+            LogicalMonitor {
+                x: 0,
+                y: 0,
+                width: 1536,
+                height: 960,
+                scale: f64::NAN,
+            },
+            LogicalMonitor {
+                x: 5000,
+                y: 0,
+                width: 1920,
+                height: 1080,
+                scale: 2.0,
+            },
+        ];
+        assign_stream_pixel_scales(&mut streams, Some(&layout));
+        assert_eq!(streams[0].pixel_scale, 1.0, "non-finite scale is ignored");
+        assert_eq!(streams[1].pixel_scale, 1.0, "no monitor with this rect");
+
+        assign_stream_pixel_scales(&mut streams, None);
+        assert_eq!(streams[0].relative_point(10, 20), (1, 10.0, 20.0));
+    }
+
+    #[test]
+    fn only_mutter_logical_layout_mode_counts_as_scaled_stage_views() {
+        let mode =
+            |value: u32| HashMap::from([("layout-mode".to_string(), OwnedValue::from(value))]);
+        assert!(layout_mode_is_logical(&mode(1)));
+        assert!(!layout_mode_is_logical(&mode(2)));
+        assert!(!layout_mode_is_logical(&HashMap::new()));
     }
 }

@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   app's node and reporting `ok: true`. An untargeted snapshot mixes apps, so
   its node is checked against the pid that owns it on the accessibility bus.
   (#167)
+- Portal pointer input on scaled GNOME Wayland (for example 125 %) now lands
+  where it is aimed. mutter maps a stream point to `monitor.x + stream_x /
+  scale` when its layout mode is logical, which is the GNOME 50 default, so
+  logical coordinates arrived at 1/scale of the target and still reported
+  success. The pointer path reads the layout mode from
+  `org.gnome.Mutter.DisplayConfig` and sends each stream's point multiplied
+  by its monitor scale. Click, scroll, and drag share the path. Unscaled
+  monitors, physical layout mode, and other compositors are unchanged. (#169)
 - The Pi extension falls back to `computer-use-linux` on `PATH` when neither
   `COMPUTER_USE_LINUX_BIN` nor the downloaded package binary is available.
   Temporary extensions (`pi -e npm:@agent-sh/computer-use-linux`) are staged
