@@ -433,11 +433,9 @@ pub(crate) async fn probe_focused_element(target_pid: Option<u32>) -> Result<Foc
     focused_element_probe(target_pid, target_pid.is_some()).await
 }
 
-/// Like [`focused_element_summary`], but only answers from the app that owns
-/// `target_pid`. When no AT-SPI root belongs to that pid (xterm, urxvt, and
-/// other apps without accessibility), the unscoped fallback would search
-/// every other app and return whichever widget last kept the Focused state;
-/// this returns `Ok(None)` instead.
+/// The focused element in the app that owns `target_pid`, for callers that
+/// only need an answer when one exists. Every non-`Found` probe result maps to
+/// `None`; see [`probe_focused_element`] for the distinctions.
 pub(crate) async fn focused_element_summary_in_app(
     target_pid: u32,
 ) -> Result<Option<FocusedElementSummary>> {
@@ -496,6 +494,13 @@ async fn focused_element_probe(
                 children_up_to(&proxy, remaining, &mut remaining_traversal_reads).await
             {
                 incomplete |= batch.incomplete;
+                // An exhausted shared read budget takes children_up_to's
+                // I/O-free path (attempted 0, incomplete false), so the node's
+                // own child count has to say whether children went unread.
+                // With budget left, attempted 0 just means a leaf: no read.
+                if batch.attempted == 0 && remaining_traversal_reads == 0 && !incomplete {
+                    incomplete = proxy.child_count().await.is_ok_and(|count| count > 0);
+                }
                 traversal.enqueue(batch.items.into_iter().map(|child| (child, depth + 1)));
             }
         } else if !incomplete {
