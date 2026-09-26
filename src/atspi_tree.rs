@@ -412,10 +412,25 @@ const FOCUS_PROBE_MAX_DEPTH: u32 = 16;
 /// across all apps. Best-effort and bounded: returns Ok(None) when no focused
 /// element is reachable through AT-SPI (common for apps without accessibility
 /// support, e.g. Electron without --force-renderer-accessibility).
-pub async fn focused_element_summary(
-    target_pid: Option<u32>,
-) -> Result<Option<FocusedElementSummary>> {
-    focused_element_summary_scoped(target_pid, false).await
+/// Outcome of the bounded focused-element search.
+#[derive(Debug, Clone)]
+pub(crate) enum FocusProbe {
+    Found(FocusedElementSummary),
+    /// The search covered the target's whole tree and nothing holds focus.
+    NoneFocused,
+    /// A node, depth, or read limit stopped the search before it finished, so
+    /// the focused element may exist past the limit.
+    Incomplete,
+    /// A pid was given but no AT-SPI app belongs to it (xterm, or Electron
+    /// without --force-renderer-accessibility), so focus cannot be read.
+    NoAccessibleApp,
+}
+
+/// Focused element in the app owning `target_pid`, or across all apps when no
+/// pid is given. With a pid, only that app's tree is searched: falling back to
+/// every other app would report some unrelated widget as the focus.
+pub(crate) async fn probe_focused_element(target_pid: Option<u32>) -> Result<FocusProbe> {
+    focused_element_probe(target_pid, target_pid.is_some()).await
 }
 
 /// Like [`focused_element_summary`], but only answers from the app that owns
@@ -426,13 +441,16 @@ pub async fn focused_element_summary(
 pub(crate) async fn focused_element_summary_in_app(
     target_pid: u32,
 ) -> Result<Option<FocusedElementSummary>> {
-    focused_element_summary_scoped(Some(target_pid), true).await
+    Ok(match focused_element_probe(Some(target_pid), true).await? {
+        FocusProbe::Found(summary) => Some(summary),
+        _ => None,
+    })
 }
 
-async fn focused_element_summary_scoped(
+async fn focused_element_probe(
     target_pid: Option<u32>,
     require_scoped: bool,
-) -> Result<Option<FocusedElementSummary>> {
+) -> Result<FocusProbe> {
     let conn = connect().await?;
     let mut remaining_registry_reads = MAX_DISCOVERY_ROOTS;
     let roots =
@@ -441,10 +459,11 @@ async fn focused_element_summary_scoped(
     let selected_roots =
         select_roots(&conn, roots, None, target_pid, &mut remaining_filter_reads).await;
     if require_scoped && !selected_roots.scoped {
-        return Ok(None);
+        return Ok(FocusProbe::NoAccessibleApp);
     }
     let mut traversal = BoundedTraversal::new(FOCUS_PROBE_MAX_NODES);
     let mut remaining_traversal_reads = FOCUS_PROBE_MAX_NODES;
+    let mut incomplete = false;
 
     traversal.enqueue(
         selected_roots
@@ -463,7 +482,7 @@ async fn focused_element_summary_scoped(
         if state.contains(atspi::State::Focused) {
             let proxies = proxy.proxies().await.ok();
             let is_terminal = matches!(proxy.get_role().await, Ok(atspi::Role::Terminal));
-            return Ok(Some(FocusedElementSummary {
+            return Ok(FocusProbe::Found(FocusedElementSummary {
                 role: role_name(&proxy).await,
                 name: optional_string(proxy.name().await.ok()),
                 editable: supports_editable_text(proxies.as_ref()).await,
@@ -471,17 +490,25 @@ async fn focused_element_summary_scoped(
                 is_terminal,
             }));
         }
-        if depth < FOCUS_PROBE_MAX_DEPTH {
-            let remaining = traversal.remaining_capacity();
-            let children = children_up_to(&proxy, remaining, &mut remaining_traversal_reads)
-                .await
-                .map(|batch| batch.items)
-                .unwrap_or_default();
-            traversal.enqueue(children.into_iter().map(|child| (child, depth + 1)));
+        let remaining = traversal.remaining_capacity();
+        if depth < FOCUS_PROBE_MAX_DEPTH && remaining > 0 {
+            if let Ok(batch) =
+                children_up_to(&proxy, remaining, &mut remaining_traversal_reads).await
+            {
+                incomplete |= batch.incomplete;
+                traversal.enqueue(batch.items.into_iter().map(|child| (child, depth + 1)));
+            }
+        } else if !incomplete {
+            // Depth or node cap: any child this node reports goes unread. One
+            // child-count read settles it, and only until the first cut is seen.
+            incomplete = proxy.child_count().await.is_ok_and(|count| count > 0);
         }
     }
+    if incomplete || traversal.truncated() {
+        return Ok(FocusProbe::Incomplete);
+    }
 
-    Ok(None)
+    Ok(FocusProbe::NoneFocused)
 }
 
 pub async fn perform_action(

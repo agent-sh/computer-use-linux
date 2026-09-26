@@ -1,8 +1,8 @@
 use crate::atspi_tree::{
-    focused_element_summary, focused_element_summary_in_app, list_accessible_apps,
-    perform_action as invoke_accessibility_action, perform_named_action, set_element_value,
-    snapshot_accessibility_tree, AccessibilityAction, AccessibilityNode, AccessibleAppSummary,
-    Bounds, FocusedElementSummary, ValueSetInvocation,
+    focused_element_summary_in_app, list_accessible_apps,
+    perform_action as invoke_accessibility_action, perform_named_action, probe_focused_element,
+    set_element_value, snapshot_accessibility_tree, AccessibilityAction, AccessibilityNode,
+    AccessibleAppSummary, Bounds, FocusProbe, FocusedElementSummary, ValueSetInvocation,
 };
 use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
@@ -3428,17 +3428,15 @@ impl ComputerUseLinux {
             .as_ref()
             .and_then(|window| window.pid)
             .or(focus.requested_window.pid);
-        match timeout(Duration::from_millis(1500), focused_element_summary(pid)).await {
-            Ok(Ok(Some(element))) => Some(describe_focused_element(&element, expects_editable)),
-            Ok(Ok(None)) => Some(
-                "WARNING: AT-SPI reports no focused element in the target app — the input may have landed nowhere. If this is an Electron app, launch it with --force-renderer-accessibility to expose its UI tree."
-                    .to_string(),
-            ),
+        match timeout(Duration::from_millis(1500), probe_focused_element(pid)).await {
+            Ok(Ok(probe)) => Some(focus_probe_feedback(&probe, expects_editable)),
             Ok(Err(error)) => Some(format!(
                 "Focused-element feedback unavailable ({}).",
                 first_line(&format!("{error:#}"))
             )),
-            Err(_) => Some("Focused-element feedback unavailable (AT-SPI probe timed out).".to_string()),
+            Err(_) => {
+                Some("Focused-element feedback unavailable (AT-SPI probe timed out).".to_string())
+            }
         }
     }
 
@@ -4620,6 +4618,18 @@ fn with_focus_context(mut output: ActionOutput, focus: Option<WindowFocusResult>
         }
     }
     output
+}
+
+/// Post-input focus feedback. Only a complete search that finds nothing is a
+/// warning; a search that hit a limit, or an app without an AT-SPI tree, cannot
+/// tell whether the input landed, so it says that instead.
+fn focus_probe_feedback(probe: &FocusProbe, expects_editable: bool) -> String {
+    match probe {
+        FocusProbe::Found(element) => describe_focused_element(element, expects_editable),
+        FocusProbe::NoneFocused => "WARNING: AT-SPI reports no focused element in the target app; the input may have landed nowhere.".to_string(),
+        FocusProbe::Incomplete => "Focused-element feedback unavailable: the focused element was not reached within the AT-SPI search limits, so the input could not be verified. Its absence here does not mean the input was lost.".to_string(),
+        FocusProbe::NoAccessibleApp => "Focused-element feedback unavailable: the target app exposes no AT-SPI tree, so the input could not be verified. Electron apps need --force-renderer-accessibility.".to_string(),
+    }
 }
 
 fn describe_focused_element(element: &FocusedElementSummary, expects_editable: bool) -> String {
@@ -8092,5 +8102,42 @@ mod accessibility_tree_note_tests {
             "shrinking the cap belongs to the unscoped warning, not the truncation note"
         );
         assert!(truncated_accessibility_tree_note(false).is_none());
+    }
+}
+
+#[cfg(test)]
+mod focus_probe_feedback_tests {
+    use super::{focus_probe_feedback, FocusProbe, FocusedElementSummary};
+
+    #[test]
+    fn only_a_complete_empty_search_warns() {
+        let none = focus_probe_feedback(&FocusProbe::NoneFocused, true);
+        assert!(none.starts_with("WARNING:"), "{none}");
+
+        for probe in [FocusProbe::Incomplete, FocusProbe::NoAccessibleApp] {
+            let text = focus_probe_feedback(&probe, true);
+            assert!(
+                !text.contains("WARNING"),
+                "{probe:?} must not claim lost input: {text}"
+            );
+            assert!(text.contains("could not be verified"), "{text}");
+        }
+        assert!(focus_probe_feedback(&FocusProbe::Incomplete, true).contains("search limits"));
+        assert!(focus_probe_feedback(&FocusProbe::NoAccessibleApp, true)
+            .contains("--force-renderer-accessibility"));
+    }
+
+    #[test]
+    fn found_element_is_described() {
+        let element = FocusedElementSummary {
+            role: "text".to_string(),
+            name: None,
+            editable: true,
+            states: vec!["focused".to_string()],
+            is_terminal: false,
+        };
+        let text = focus_probe_feedback(&FocusProbe::Found(element), true);
+        assert!(text.contains("text"), "{text}");
+        assert!(!text.starts_with("WARNING"), "{text}");
     }
 }
