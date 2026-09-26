@@ -3,11 +3,21 @@ import type {
 	ToolDefinition,
 	ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createComputerUseLinuxExtension } from "../extension/index.ts";
+import {
+	createComputerUseLinuxExtension,
+	findExecutableOnPath,
+} from "../extension/index.ts";
 import { GENERATED_MCP_TOOLS } from "../extension/generated-tools.ts";
 
 type Handler = (event: any, ctx: any) => unknown;
@@ -394,3 +404,42 @@ describe("native Pi extension", () => {
 		);
 	});
 });
+
+describe("findExecutableOnPath", () => {
+	let root: string;
+	beforeEach(() => {
+		root = mkdtempSync(join(tmpdir(), "cul-path-"));
+	});
+	afterEach(() => {
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	const script = (dir: string, mode: number) => {
+		mkdirSync(dir, { recursive: true });
+		const file = join(dir, "computer-use-linux");
+		writeFileSync(file, "#!/bin/sh\nexit 0\n");
+		chmodSync(file, mode);
+		return file;
+	};
+
+	it("returns the first executable in PATH order", () => {
+		const first = script(join(root, "a"), 0o755);
+		script(join(root, "b"), 0o755);
+		const path = [join(root, "a"), join(root, "b")].join(":");
+		expect(findExecutableOnPath(path, "computer-use-linux")).toBe(first);
+	});
+
+	it("skips non-executable files, directories, and empty segments", () => {
+		script(join(root, "noexec"), 0o644);
+		mkdirSync(join(root, "dir", "computer-use-linux"), { recursive: true });
+		const wanted = script(join(root, "ok"), 0o755);
+		const path = ["", join(root, "noexec"), join(root, "dir"), "", join(root, "ok")].join(":");
+		expect(findExecutableOnPath(path, "computer-use-linux")).toBe(wanted);
+	});
+
+	it("returns null when nothing on PATH matches", () => {
+		expect(findExecutableOnPath(join(root, "missing"), "computer-use-linux")).toBeNull();
+		expect(findExecutableOnPath(undefined, "computer-use-linux")).toBeNull();
+	});
+});
+

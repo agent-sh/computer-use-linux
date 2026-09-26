@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- The Pi extension falls back to `computer-use-linux` on `PATH` when neither
+  `COMPUTER_USE_LINUX_BIN` nor the downloaded package binary is available.
+  Temporary extensions (`pi -e npm:@agent-sh/computer-use-linux`) are staged
+  without that binary and warned "binary not found" even with a global
+  install. The PATH lookup was dropped in the native-tools rewrite. (#170)
 - KDE Plasma clipboard paste into xterm, uxterm, rxvt, urxvt, and koi8rxterm
   now sends Shift+Insert. Those terminals have no Ctrl+Shift+V binding by
   default, so the paste was dropped; Klipper sets the selection as well as

@@ -18,10 +18,11 @@ import {
 	constants,
 	existsSync,
 	readFileSync,
+	statSync,
 } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { Type, type TSchema } from "typebox";
 import {
 	GENERATED_MCP_TOOLS,
@@ -154,11 +155,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function executable(path: string): boolean {
 	try {
+		// A directory on PATH also passes X_OK; only a regular file can be spawned.
+		if (!statSync(path).isFile()) return false;
 		accessSync(path, constants.X_OK);
 		return true;
 	} catch {
 		return false;
 	}
+}
+
+/**
+ * First executable `name` in a PATH-style list, or `null`. Empty segments are
+ * skipped rather than read as the current directory.
+ */
+export function findExecutableOnPath(
+	pathValue: string | undefined,
+	name: string,
+	isExecutable: (path: string) => boolean = executable,
+): string | null {
+	for (const dir of (pathValue ?? "").split(delimiter)) {
+		if (!dir) continue;
+		const candidate = join(dir, name);
+		if (isExecutable(candidate)) return candidate;
+	}
+	return null;
 }
 
 function runtimeEnvironment(): Record<string, string> {
@@ -245,6 +265,15 @@ function defaultFindBinary(): BinaryLaunch | null {
 			env.COMPUTER_USE_LINUX_COSMIC_HELPER = cosmicHelper;
 		}
 		return { binaryPath: bundledBinary, env };
+	}
+
+	// A temporary extension (`pi -e npm:@agent-sh/computer-use-linux`) is staged
+	// without the postinstall-downloaded platform binary, so fall back to a
+	// global npm or cargo install. The MCP client still checks the server
+	// version and tool catalog, so a mismatched install fails with that reason.
+	const onPath = findExecutableOnPath(process.env.PATH, "computer-use-linux");
+	if (onPath) {
+		return { binaryPath: onPath, env };
 	}
 
 	return null;
@@ -504,7 +533,7 @@ export function createComputerUseLinuxExtension(
 			if (!resolved) {
 				throw new Error(
 					"computer-use-linux binary was not found. Reinstall " +
-						`${PACKAGE_NAME} or set COMPUTER_USE_LINUX_BIN.`,
+						`${PACKAGE_NAME}, install computer-use-linux on PATH, or set COMPUTER_USE_LINUX_BIN.`,
 				);
 			}
 			const { ComputerUseMcpClient } = loadClientModule();
@@ -622,7 +651,7 @@ export function createComputerUseLinuxExtension(
 
 			if (!resolveLaunch() && ctx.hasUI) {
 				ctx.ui.notify(
-					`${PACKAGE_NAME}: binary not found; reinstall the package or set COMPUTER_USE_LINUX_BIN.`,
+					`${PACKAGE_NAME}: binary not found; reinstall the package, install computer-use-linux on PATH, or set COMPUTER_USE_LINUX_BIN.`,
 					"warning",
 				);
 			}
