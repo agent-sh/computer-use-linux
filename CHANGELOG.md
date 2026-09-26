@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Temporary extensions (`pi -e npm:@agent-sh/computer-use-linux`) are staged
   without that binary and warned "binary not found" even with a global
   install. The PATH lookup was dropped in the native-tools rewrite. (#170)
+- `type_text` and `press_key` no longer warn "no focused element" when the
+  focus probe merely ran out of budget. The 400-node search now reports when a
+  node, depth, or read limit stopped it, and the feedback says the input could
+  not be verified instead. With a target pid, the probe searches only that
+  app; when no AT-SPI app belongs to it (xterm, Electron without
+  `--force-renderer-accessibility`), feedback says so instead of warning or
+  reporting another app's focused widget. (#168)
 - KDE Plasma clipboard paste into xterm, uxterm, rxvt, urxvt, and koi8rxterm
   now sends Shift+Insert. Those terminals have no Ctrl+Shift+V binding by
   default, so the paste was dropped; Klipper sets the selection as well as
