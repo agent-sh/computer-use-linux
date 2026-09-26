@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The #167 index check no longer trusts a pid the snapshot did not match.
+  When `get_app_state` named a pid with no accessibility root plus an app
+  name, the tree came from the app-name match but was recorded under the
+  requested pid. An index from that tree then passed a click aimed at the
+  requested pid and was refused for the app that owns it. The snapshot now
+  records a pid only when its roots were selected by that pid; otherwise each
+  node is checked against its owner on the accessibility bus.
+
 ## [0.7.3] - 2026-09-26
 
 ### Fixed

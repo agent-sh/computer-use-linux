@@ -275,6 +275,10 @@ pub(crate) struct AccessibilitySnapshot {
     pub nodes: Vec<AccessibilityNode>,
     /// True when registry roots were filtered to an app name and/or pid.
     pub scoped: bool,
+    /// The pid every root belongs to, when roots were matched by pid. None
+    /// when they were matched by app name alone or not filtered at all: those
+    /// roots can belong to any app, so no single pid describes the tree.
+    pub root_pid: Option<u32>,
     /// True when max_nodes, max_depth, or the child read budget stopped
     /// traversal with unread elements left. Failed element reads do not count.
     pub truncated: bool,
@@ -338,6 +342,7 @@ async fn snapshot_tree_inner(
     )
     .await;
     let scoped = selected_roots.scoped;
+    let root_pid = selected_roots.pid;
     let mut nodes = Vec::new();
     let mut truncated = false;
     let mut traversal = BoundedTraversal::new(max_nodes);
@@ -386,6 +391,7 @@ async fn snapshot_tree_inner(
     Ok(AccessibilitySnapshot {
         nodes,
         scoped,
+        root_pid,
         truncated,
     })
 }
@@ -660,6 +666,8 @@ async fn registry_children(
 struct SelectedRoots {
     roots: Vec<ObjectRefOwned>,
     scoped: bool,
+    /// Set only when the roots were chosen because they belong to this pid.
+    pid: Option<u32>,
 }
 
 /// Normalized app-name filter, or `None` when the caller passed nothing usable.
@@ -707,12 +715,14 @@ async fn select_roots(
             return SelectedRoots {
                 roots: pid_and_filter_matches,
                 scoped: true,
+                pid: Some(target_pid),
             };
         }
         if !pid_matches.is_empty() {
             return SelectedRoots {
                 roots: pid_matches,
                 scoped: true,
+                pid: Some(target_pid),
             };
         }
 
@@ -723,6 +733,7 @@ async fn select_roots(
         return SelectedRoots {
             roots: remaining,
             scoped: false,
+            pid: None,
         };
     };
 
@@ -736,6 +747,7 @@ async fn select_roots(
     SelectedRoots {
         roots: selected,
         scoped: true,
+        pid: None,
     }
 }
 
