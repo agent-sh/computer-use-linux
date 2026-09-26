@@ -433,10 +433,15 @@ impl ComputerUseLinux {
                 )
             };
         if accessibility_error.is_none() {
-            let snapshot_pid = window_context
-                .as_ref()
-                .and_then(|window| window.pid)
-                .or(params.pid);
+            // Record the target only when the tree was actually scoped. A pid
+            // with no AT-SPI root falls back to every app (tree_scoped false);
+            // recording the pid then would let another app's index pass the
+            // target check instead of taking the per-node owner lookup.
+            let snapshot_pid = snapshot_target_pid(
+                tree_scoped,
+                window_context.as_ref().and_then(|window| window.pid),
+                params.pid,
+            );
             self.cache_snapshot(&accessibility_tree, snapshot_pid);
         } else {
             self.clear_cached_nodes();
@@ -4724,6 +4729,16 @@ fn focus_probe_feedback(probe: &FocusProbe, expects_editable: bool) -> String {
     }
 }
 
+/// The pid a get_app_state snapshot is recorded as belonging to: the target's
+/// window pid, else the requested pid, and only when the tree was scoped.
+fn snapshot_target_pid(
+    tree_scoped: bool,
+    window_pid: Option<u32>,
+    requested_pid: Option<u32>,
+) -> Option<u32> {
+    tree_scoped.then(|| window_pid.or(requested_pid)).flatten()
+}
+
 fn node_target_mismatch_message(element_index: u32, owner_pid: u32, target_pid: u32) -> String {
     format!(
         "element_index {element_index} comes from the latest get_app_state snapshot of pid {owner_pid}, not the target pid {target_pid}. Call get_app_state for the target app and use an index from that result."
@@ -8312,6 +8327,16 @@ mod node_target_scope_tests {
         backend.cache_snapshot(std::slice::from_ref(&node), None);
 
         assert!(backend.check_node_target(&node, Some(1)).await.is_ok());
+    }
+
+    #[test]
+    fn only_a_scoped_tree_records_its_target_pid() {
+        assert_eq!(snapshot_target_pid(true, Some(10), Some(20)), Some(10));
+        assert_eq!(snapshot_target_pid(true, None, Some(20)), Some(20));
+        assert_eq!(snapshot_target_pid(true, None, None), None);
+        // A pid with no AT-SPI root falls back to every app: record nothing,
+        // so each node is checked against its real owner instead.
+        assert_eq!(snapshot_target_pid(false, Some(10), Some(20)), None);
     }
 
     #[test]
