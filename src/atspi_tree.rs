@@ -842,6 +842,15 @@ async fn bounds(proxy: &AccessibleProxy<'_>) -> Option<Bounds> {
     bounds_from_proxies(proxy.proxies().await.ok().as_ref(), proxy).await
 }
 
+/// Pid of the process that owns an AT-SPI object ref (`:bus/path`), from the
+/// accessibility bus. `None` when the owner is gone or the bus cannot say.
+pub(crate) async fn object_ref_owner_pid(object_ref_id: &str) -> Result<Option<u32>> {
+    let object_ref = object_ref_from_id(object_ref_id)?;
+    let conn = connect().await?;
+    let dbus = DBusProxy::new(conn.connection()).await.ok();
+    Ok(object_ref_pid(dbus.as_ref(), &object_ref).await)
+}
+
 async fn object_ref_pid(dbus: Option<&DBusProxy<'_>>, object_ref: &ObjectRefOwned) -> Option<u32> {
     let dbus = dbus?;
     let bus_name = BusName::try_from(object_ref.name_as_str()?.to_string()).ok()?;

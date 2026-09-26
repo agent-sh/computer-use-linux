@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `click` and `scroll` by `element_index` or selector now refuse an index from
+  another app's snapshot. `get_app_state` records the pid it snapshotted;
+  when the action's target resolves to a different pid, the call fails and
+  asks for a `get_app_state` of the target, instead of acting on the other
+  app's node and reporting `ok: true`. An untargeted snapshot mixes apps, so
+  its node is checked against the pid that owns it on the accessibility bus.
+  (#167)
 - The Pi extension falls back to `computer-use-linux` on `PATH` when neither
   `COMPUTER_USE_LINUX_BIN` nor the downloaded package binary is available.
   Temporary extensions (`pi -e npm:@agent-sh/computer-use-linux`) are staged

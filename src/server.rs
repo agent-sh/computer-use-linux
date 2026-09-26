@@ -1,5 +1,5 @@
 use crate::atspi_tree::{
-    focused_element_summary_in_app, list_accessible_apps,
+    focused_element_summary_in_app, list_accessible_apps, object_ref_owner_pid,
     perform_action as invoke_accessibility_action, perform_named_action, probe_focused_element,
     set_element_value, snapshot_accessibility_tree, AccessibilityAction, AccessibilityNode,
     AccessibleAppSummary, Bounds, FocusProbe, FocusedElementSummary, ValueSetInvocation,
@@ -69,6 +69,9 @@ const SHELL_RESPONSE_STREAM_BYTES: usize = 512 * 1024;
 #[derive(Clone, Default)]
 pub struct ComputerUseLinux {
     last_nodes: Arc<Mutex<Vec<AccessibilityNode>>>,
+    /// Pid the cached snapshot was taken for, when get_app_state had a target.
+    /// Element indices are only meaningful against that app (#167).
+    last_snapshot_pid: Arc<Mutex<Option<u32>>>,
     portal_pointer_session: Arc<Mutex<Option<PortalPointerSession>>>,
     portal_keyboard_session: Arc<Mutex<Option<PortalKeyboardSession>>>,
     /// Lazily-created uinput absolute pointer (preferred coordinate backend).
@@ -430,7 +433,11 @@ impl ComputerUseLinux {
                 )
             };
         if accessibility_error.is_none() {
-            self.cache_nodes(&accessibility_tree);
+            let snapshot_pid = window_context
+                .as_ref()
+                .and_then(|window| window.pid)
+                .or(params.pid);
+            self.cache_snapshot(&accessibility_tree, snapshot_pid);
         } else {
             self.clear_cached_nodes();
         }
@@ -693,6 +700,7 @@ impl ComputerUseLinux {
         let received = Some(serde_json::json!(params.clone()));
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let mut portal_target_point = None;
+        let mut target_pid = params.pid;
         // Raise the target window first (if specified) so the click lands on the
         // intended app rather than whatever is stacked on top at that pixel.
         let window_target = params.window_target();
@@ -718,6 +726,7 @@ impl ComputerUseLinux {
                     });
                 }
             };
+            target_pid = focus_target_pid(focus.as_ref()).or(target_pid);
             tokio::time::sleep(Duration::from_millis(120)).await;
             // Window-relative coordinates: translate by the window's top-left so
             // the agent can click the pixel it saw in a window-cropped screenshot.
@@ -760,6 +769,23 @@ impl ComputerUseLinux {
                     .x
                     .zip(params.y)
                     .and_then(|(x, y)| coordinate_map.portal_point(x, y));
+            }
+        }
+        if params.x.zip(params.y).is_none() {
+            if let Some(node) = self.cached_node_for(
+                params.element_index,
+                &params.selector(),
+                ElementResolvePurpose::Click,
+            ) {
+                if let Err(message) = self.check_node_target(&node, target_pid).await {
+                    return Json(ActionOutput {
+                        ok: false,
+                        implemented: true,
+                        action: "click".to_string(),
+                        message,
+                        received,
+                    });
+                }
             }
         }
         let target = match self.resolve_click_target(&params) {
@@ -1088,6 +1114,7 @@ impl ComputerUseLinux {
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let mut portal_target_point = None;
         let units = ((params.pages.unwrap_or(1.0).abs().max(0.1) * 5.0).round() as i32).max(1);
+        let mut target_pid = params.pid;
         // Raise/focus the target window first (parity with click) so wheel
         // events land on the intended app.
         let window_target = params.window_target();
@@ -1113,6 +1140,7 @@ impl ComputerUseLinux {
                     });
                 }
             };
+            target_pid = focus_target_pid(focus.as_ref()).or(target_pid);
             tokio::time::sleep(Duration::from_millis(120)).await;
             if params.relative == Some(true) {
                 let Some(focus) = focus.as_ref() else {
@@ -1196,6 +1224,23 @@ impl ComputerUseLinux {
                     .x
                     .zip(params.y)
                     .and_then(|(x, y)| coordinate_map.portal_point(x, y));
+            }
+        }
+        if params.x.is_none() && params.y.is_none() {
+            if let Some(node) = self.cached_node_for(
+                params.element_index,
+                &ElementSelector::default(),
+                ElementResolvePurpose::Click,
+            ) {
+                if let Err(message) = self.check_node_target(&node, target_pid).await {
+                    return Json(ActionOutput {
+                        ok: false,
+                        implemented: true,
+                        action: "scroll".to_string(),
+                        message,
+                        received,
+                    });
+                }
             }
         }
         let target_point =
@@ -3549,17 +3594,64 @@ impl ComputerUseLinux {
         notes
     }
 
+    #[cfg(test)]
     fn cache_nodes(&self, nodes: &[AccessibilityNode]) {
+        self.cache_snapshot(nodes, None);
+    }
+
+    fn cache_snapshot(&self, nodes: &[AccessibilityNode], target_pid: Option<u32>) {
         if let Ok(mut cached) = self.last_nodes.lock() {
             cached.clear();
             cached.extend_from_slice(nodes);
         }
+        if let Ok(mut pid) = self.last_snapshot_pid.lock() {
+            *pid = target_pid;
+        }
     }
 
     fn clear_cached_nodes(&self) {
-        if let Ok(mut cached) = self.last_nodes.lock() {
-            cached.clear();
+        self.cache_snapshot(&[], None);
+    }
+
+    /// Reject an element-targeted action whose cached node belongs to a
+    /// different app than the action's target. A snapshot taken for a pid is
+    /// judged by that pid; an untargeted snapshot mixes apps, so its node is
+    /// judged by the pid that owns it on the accessibility bus. When neither is
+    /// known the action proceeds, since a mismatch cannot be shown.
+    async fn check_node_target(
+        &self,
+        node: &AccessibilityNode,
+        target_pid: Option<u32>,
+    ) -> std::result::Result<(), String> {
+        let Some(target_pid) = target_pid else {
+            return Ok(());
+        };
+        let snapshot_pid = self.last_snapshot_pid.lock().ok().and_then(|pid| *pid);
+        let owner_pid = match snapshot_pid {
+            Some(pid) => Some(pid),
+            None => object_ref_owner_pid(&node.object_ref).await.ok().flatten(),
+        };
+        match owner_pid {
+            Some(owner_pid) if owner_pid != target_pid => Err(node_target_mismatch_message(
+                node.index, owner_pid, target_pid,
+            )),
+            _ => Ok(()),
         }
+    }
+
+    /// The cached node an element-targeted click or scroll would act on, when
+    /// the call names one. Resolution errors are left to the tool's own path.
+    fn cached_node_for(
+        &self,
+        element_index: Option<u32>,
+        selector: &ElementSelector<'_>,
+        purpose: ElementResolvePurpose,
+    ) -> Option<AccessibilityNode> {
+        if element_index.is_none() && selector.is_empty() {
+            return None;
+        }
+        self.resolve_cached_node(element_index, selector, purpose)
+            .ok()
     }
 
     fn resolve_optional_target_point(
@@ -4630,6 +4722,21 @@ fn focus_probe_feedback(probe: &FocusProbe, expects_editable: bool) -> String {
         FocusProbe::Incomplete => "Focused-element feedback unavailable: the focused element was not reached within the AT-SPI search limits, so the input could not be verified. Its absence here does not mean the input was lost.".to_string(),
         FocusProbe::NoAccessibleApp => "Focused-element feedback unavailable: the target app exposes no AT-SPI tree, so the input could not be verified. Electron apps need --force-renderer-accessibility.".to_string(),
     }
+}
+
+fn node_target_mismatch_message(element_index: u32, owner_pid: u32, target_pid: u32) -> String {
+    format!(
+        "element_index {element_index} comes from the latest get_app_state snapshot of pid {owner_pid}, not the target pid {target_pid}. Call get_app_state for the target app and use an index from that result."
+    )
+}
+
+fn focus_target_pid(focus: Option<&WindowFocusResult>) -> Option<u32> {
+    let focus = focus?;
+    focus
+        .focused_window
+        .as_ref()
+        .and_then(|window| window.pid)
+        .or(focus.requested_window.pid)
 }
 
 fn describe_focused_element(element: &FocusedElementSummary, expects_editable: bool) -> String {
@@ -8139,5 +8246,82 @@ mod focus_probe_feedback_tests {
         let text = focus_probe_feedback(&FocusProbe::Found(element), true);
         assert!(text.contains("text"), "{text}");
         assert!(!text.starts_with("WARNING"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod node_target_scope_tests {
+    use super::*;
+
+    fn cached_node(index: u32, object_ref: &str) -> AccessibilityNode {
+        AccessibilityNode {
+            index,
+            parent_index: None,
+            depth: 1,
+            object_ref: object_ref.to_string(),
+            role: "push button".to_string(),
+            name: Some("Hit me".to_string()),
+            description: None,
+            child_count: 0,
+            bounds: None,
+            states: vec!["enabled".to_string()],
+            actions: Vec::new(),
+            value: None,
+            text: None,
+            supports_editable_text: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn index_from_another_apps_snapshot_is_rejected() {
+        let backend = ComputerUseLinux::default();
+        let node = cached_node(2, ":1.9/org/a11y/atspi/accessible/42");
+        backend.cache_snapshot(std::slice::from_ref(&node), Some(2_690_687));
+
+        let error = backend
+            .check_node_target(&node, Some(2_690_664))
+            .await
+            .unwrap_err();
+        assert!(error.contains("pid 2690687"), "{error}");
+        assert!(error.contains("target pid 2690664"), "{error}");
+        assert!(
+            error.contains("Call get_app_state for the target app"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_target_or_no_target_is_allowed() {
+        let backend = ComputerUseLinux::default();
+        let node = cached_node(2, ":1.9/org/a11y/atspi/accessible/42");
+        backend.cache_snapshot(std::slice::from_ref(&node), Some(2_690_664));
+
+        assert!(backend
+            .check_node_target(&node, Some(2_690_664))
+            .await
+            .is_ok());
+        assert!(backend.check_node_target(&node, None).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn unscoped_snapshot_with_unknown_owner_is_allowed() {
+        // No snapshot pid, and the owner lookup cannot resolve this ref here,
+        // so a mismatch cannot be shown and the action proceeds.
+        let backend = ComputerUseLinux::default();
+        let node = cached_node(2, ":1.9999/org/a11y/atspi/accessible/42");
+        backend.cache_snapshot(std::slice::from_ref(&node), None);
+
+        assert!(backend.check_node_target(&node, Some(1)).await.is_ok());
+    }
+
+    #[test]
+    fn a_new_snapshot_replaces_the_recorded_pid() {
+        let backend = ComputerUseLinux::default();
+        backend.cache_snapshot(&[], Some(10));
+        backend.cache_snapshot(&[], None);
+        assert_eq!(*backend.last_snapshot_pid.lock().unwrap(), None);
+        backend.cache_snapshot(&[], Some(11));
+        backend.clear_cached_nodes();
+        assert_eq!(*backend.last_snapshot_pid.lock().unwrap(), None);
     }
 }
