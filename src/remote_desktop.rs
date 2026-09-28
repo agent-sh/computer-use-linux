@@ -1163,6 +1163,12 @@ const PERSIST_MODE_UNTIL_REVOKED: u32 = 2;
 /// `persist_mode` and `restore_token` were added in version 2.
 const REMOTE_DESKTOP_PERSIST_VERSION: u32 = 2;
 const RESTORE_TOKEN_MAX_LEN: usize = 4096;
+/// How long a second process waits for the restore-token lock.
+///
+/// Long enough for another process to finish a silent restore. Short enough
+/// that an open portal dialog, or a stopped holder, cannot stall input.
+const RESTORE_LOCK_WAIT: Duration = Duration::from_secs(3);
+const RESTORE_LOCK_POLL: Duration = Duration::from_millis(20);
 
 #[derive(Clone, Copy)]
 enum PortalDeviceKind {
@@ -1214,7 +1220,8 @@ struct DeviceSelectPersistence {
 /// Pointer and keyboard are separate portal sessions (different device
 /// masks, and only the pointer session selects monitors), so they do not
 /// share a token. The token is single-use: the lock is held from the read
-/// through `Start`, then the file is replaced. `_lock` is unread on purpose.
+/// through `Start`, then the file is replaced. Waiting for a busy lock is
+/// bounded. `_lock` is unread on purpose.
 struct RestorePermit {
     _lock: fs::File,
     restore_token: Option<String>,
@@ -1236,9 +1243,17 @@ impl RestorePermit {
     }
 
     fn acquire_in(directory: &Path, kind: PortalDeviceKind) -> io::Result<Self> {
+        Self::acquire_in_for(directory, kind, RESTORE_LOCK_WAIT)
+    }
+
+    fn acquire_in_for(
+        directory: &Path,
+        kind: PortalDeviceKind,
+        wait: Duration,
+    ) -> io::Result<Self> {
         ensure_private_dir(directory)?;
         let lock = open_lock_file(&directory.join(kind.lock_file_name()))?;
-        lock_exclusive(&lock)?;
+        lock_exclusive(&lock, wait)?;
         let restore_token = read_token_file(&directory.join(kind.token_file_name()))?;
         Ok(Self {
             _lock: lock,
@@ -1499,15 +1514,34 @@ fn open_lock_file_once(path: &Path) -> io::Result<fs::File> {
     Ok(file)
 }
 
-fn lock_exclusive(file: &fs::File) -> io::Result<()> {
-    // SAFETY: `file` owns this fd for the duration of the call. LOCK_EX waits
-    // until this open-file description holds the only exclusive flock.
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
+fn lock_exclusive(file: &fs::File, wait: Duration) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        // SAFETY: `file` owns this fd. LOCK_NB returns instead of waiting
+        // inside the kernel, so a stopped holder cannot block this call.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if !flock_would_block(&error) {
+            return Err(error);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "timed out waiting for the restore-token lock",
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        std::thread::sleep(RESTORE_LOCK_POLL.min(remaining));
     }
+}
+
+fn flock_would_block(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || error.raw_os_error() == Some(libc::EAGAIN)
+        || error.raw_os_error() == Some(libc::EWOULDBLOCK)
 }
 
 fn read_token_file(path: &Path) -> io::Result<Option<String>> {
@@ -2848,6 +2882,31 @@ mod tests {
         assert_eq!(keyboard.token(), Some("keyboard-token"));
         keyboard.commit(ParsedRestoreToken::Rejected).unwrap();
         assert!(!keyboard_path.exists());
+    }
+
+    #[test]
+    fn restore_token_lock_wait_is_bounded() {
+        let dir = TempState::new();
+        let _held = RestorePermit::acquire_in(&dir.path, PortalDeviceKind::Pointer).unwrap();
+        let started = std::time::Instant::now();
+        let error = match RestorePermit::acquire_in_for(
+            &dir.path,
+            PortalDeviceKind::Pointer,
+            std::time::Duration::from_millis(80),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("second permit acquired a held lock"),
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_millis(80),
+            "gave up too early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "lock wait was not bounded: {elapsed:?}"
+        );
     }
 
     #[test]
