@@ -156,9 +156,12 @@ pub async fn start_portal_pointer_session() -> Result<PortalPointerSession> {
     select_monitor_sources(&connection, &session_handle).await?;
     let (devices, streams, restore_token) =
         start_remote_desktop_session(&connection, &session_handle).await?;
-    // Start consumed any restore token we sent. Store the replacement, or
-    // delete the old one, before bailing on a session that did not actually
-    // grant pointer access.
+    // A grant with no pointer or no monitors must not be restored. The next
+    // process would skip the dialog and fail the same way.
+    let restore_token = restore_token_to_keep(
+        devices & DEVICE_POINTER != 0 && !streams.is_empty(),
+        restore_token,
+    );
     commit_restore_permit(permit, restore_token).await;
 
     if devices & DEVICE_POINTER == 0 {
@@ -200,6 +203,7 @@ pub async fn start_portal_keyboard_session() -> Result<PortalKeyboardSession> {
     select_keyboard_devices(&connection, &session_handle, permit.as_ref()).await?;
     let (devices, _, restore_token) =
         start_remote_desktop_session(&connection, &session_handle).await?;
+    let restore_token = restore_token_to_keep(devices & DEVICE_KEYBOARD != 0, restore_token);
     commit_restore_permit(permit, restore_token).await;
 
     if devices & DEVICE_KEYBOARD == 0 {
@@ -1281,6 +1285,14 @@ fn acceptable_restore_token(token: &str) -> bool {
         && !token
             .chars()
             .any(|ch| ch.is_control() || ch.is_whitespace())
+}
+
+fn restore_token_to_keep(granted: bool, parsed: ParsedRestoreToken) -> ParsedRestoreToken {
+    if granted {
+        parsed
+    } else {
+        ParsedRestoreToken::Absent
+    }
 }
 
 fn parse_restore_token(results: &HashMap<String, OwnedValue>) -> ParsedRestoreToken {
@@ -2720,6 +2732,19 @@ mod tests {
         assert!(options.contains_key("cursor_mode"));
         assert!(!options.contains_key("persist_mode"));
         assert!(!options.contains_key("restore_token"));
+    }
+
+    #[test]
+    fn an_unusable_grant_drops_the_restore_token() {
+        let kept = ParsedRestoreToken::Usable("good-token".to_string());
+        match restore_token_to_keep(true, kept) {
+            ParsedRestoreToken::Usable(token) => assert_eq!(token, "good-token"),
+            _ => panic!("a usable grant should keep its restore token"),
+        }
+        assert!(matches!(
+            restore_token_to_keep(false, ParsedRestoreToken::Usable("good-token".to_string())),
+            ParsedRestoreToken::Absent
+        ));
     }
 
     #[test]
