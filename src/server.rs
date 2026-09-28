@@ -1355,27 +1355,46 @@ impl ComputerUseLinux {
                 Err(_) => {}
             }
         }
-        let (dx, dy) = match params.direction.to_ascii_lowercase().as_str() {
-            "up" => (0, units),
-            "down" => (0, -units),
-            "left" => (units, 0),
-            "right" => (-units, 0),
-            _ => {
-                return Json(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "scroll".to_string(),
-                    message: "Unsupported scroll direction; expected up, down, left, or right."
-                        .to_string(),
-                    received,
-                });
-            }
+        let (dx, dy) = match direction {
+            ScrollDirection::Up => (0, units),
+            ScrollDirection::Down => (0, -units),
+            ScrollDirection::Left => (units, 0),
+            ScrollDirection::Right => (-units, 0),
         };
         let mut sequence = Vec::new();
         if let Some((x, y)) = target_point {
             sequence.push(absolute_mousemove_args(x, y));
         }
         sequence.push(wheel_mousemove_args(dx, dy));
+        // X11: ydotool's absolute move warps through (0, 0), so the pointer
+        // re-enters the window. GTK 3 resets its XI2 scroll valuators on that
+        // enter, and the one wheel event only re-baselines them (delta 0).
+        // The call reported success while the window did not move (#184).
+        // XTEST wheel buttons have no valuators, so GTK takes the button path.
+        if self.should_prefer_xdotool_pointer() {
+            let repeat = u32::try_from(units.max(1)).unwrap_or(1);
+            let xdotool_args = xdotool_pointer_scroll_args(target_point, repeat, direction);
+            let command_timeout = xdotool_scroll_timeout(repeat, XDOTOOL_SCROLL_CLICK_DELAY_MS);
+            let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
+                run_xdotool_pointer_or_fallback_with_timeout(
+                    Path::new("xdotool"),
+                    &xdotool_args,
+                    command_timeout,
+                    || async { run_ydotool_sequence(&sequence).await },
+                )
+                .await
+            })
+            .await;
+            let _input_guard = input_guard;
+            let used_xdotool = result
+                .as_ref()
+                .is_ok_and(|result| result.backend == KeyboardCommandBackend::Xdotool);
+            let mut output = action_result("scroll", result.map(|result| result.outputs), received);
+            if output.ok && used_xdotool {
+                output.message = "Action sent through xdotool (X11 XTEST).".to_string();
+            }
+            return Json(with_notes(output, off_screen_note));
+        }
         let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
             run_ydotool_sequence(&sequence).await
         })
@@ -4863,6 +4882,54 @@ fn xdotool_pointer_button_code(button: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// Gap between XTEST wheel-button clicks, in milliseconds.
+///
+/// xdotool's own default is 100ms. One page is five clicks and `pages` is
+/// not capped, so that default blows the flat input timeout past about 20
+/// pages. 12ms is the same pacing as `xdotool type`.
+const XDOTOOL_SCROLL_CLICK_DELAY_MS: u64 = 12;
+
+/// X11 wheel buttons: 4 up, 5 down, 6 left, 7 right. `repeat` is the notch
+/// count, the same number ydotool would pass to `mousemove --wheel`.
+fn xdotool_pointer_scroll_args(
+    point: Option<(i32, i32)>,
+    repeat: u32,
+    direction: ScrollDirection,
+) -> Vec<String> {
+    let button = match direction {
+        ScrollDirection::Up => "4",
+        ScrollDirection::Down => "5",
+        ScrollDirection::Left => "6",
+        ScrollDirection::Right => "7",
+    };
+    let mut args = Vec::new();
+    if let Some((x, y)) = point {
+        args.extend([
+            "mousemove".to_string(),
+            "--".to_string(),
+            x.to_string(),
+            y.to_string(),
+        ]);
+    }
+    args.extend([
+        "click".to_string(),
+        "--delay".to_string(),
+        XDOTOOL_SCROLL_CLICK_DELAY_MS.to_string(),
+        "--repeat".to_string(),
+        repeat.max(1).to_string(),
+        button.to_string(),
+    ]);
+    args
+}
+
+/// `xdotool click --repeat` sleeps `--delay` after every click, including
+/// the last, so the command timeout has to cover that gap.
+fn xdotool_scroll_timeout(repeat: u32, delay_ms: u64) -> Duration {
+    INPUT_COMMAND_TIMEOUT.saturating_add(Duration::from_millis(
+        u64::from(repeat.max(1)).saturating_mul(delay_ms),
+    ))
+}
+
 #[derive(Debug)]
 struct PointerCommandResult {
     outputs: Vec<Output>,
@@ -4879,6 +4946,28 @@ where
     Fut: Future<Output = std::result::Result<Vec<Output>, String>>,
 {
     match run_xdotool(program, args).await {
+        XdotoolAttempt::Unavailable => fallback().await.map(|outputs| PointerCommandResult {
+            outputs,
+            backend: KeyboardCommandBackend::Ydotool,
+        }),
+        XdotoolAttempt::Finished(result) => result.map(|output| PointerCommandResult {
+            outputs: vec![output],
+            backend: KeyboardCommandBackend::Xdotool,
+        }),
+    }
+}
+
+async fn run_xdotool_pointer_or_fallback_with_timeout<F, Fut>(
+    program: &Path,
+    args: &[String],
+    command_timeout: Duration,
+    fallback: F,
+) -> std::result::Result<PointerCommandResult, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::result::Result<Vec<Output>, String>>,
+{
+    match run_xdotool_with_timeout(program, args, command_timeout).await {
         XdotoolAttempt::Unavailable => fallback().await.map(|outputs| PointerCommandResult {
             outputs,
             backend: KeyboardCommandBackend::Ydotool,
@@ -7300,6 +7389,78 @@ mod tests {
 
         let error = result.expect_err("launched nonzero xdotool must be terminal");
         assert!(!error.contains("fallback called"));
+    }
+
+    #[test]
+    fn xdotool_scroll_uses_wheel_buttons_instead_of_a_valuator_event() {
+        assert_eq!(
+            xdotool_pointer_scroll_args(Some((1550, 930)), 5, ScrollDirection::Up),
+            vec![
+                "mousemove".to_string(),
+                "--".to_string(),
+                "1550".to_string(),
+                "930".to_string(),
+                "click".to_string(),
+                "--delay".to_string(),
+                "12".to_string(),
+                "--repeat".to_string(),
+                "5".to_string(),
+                "4".to_string(),
+            ]
+        );
+        assert_eq!(
+            xdotool_pointer_scroll_args(Some((-20, 15)), 1, ScrollDirection::Down),
+            vec![
+                "mousemove".to_string(),
+                "--".to_string(),
+                "-20".to_string(),
+                "15".to_string(),
+                "click".to_string(),
+                "--delay".to_string(),
+                "12".to_string(),
+                "--repeat".to_string(),
+                "1".to_string(),
+                "5".to_string(),
+            ]
+        );
+        assert_eq!(
+            xdotool_pointer_scroll_args(None, 3, ScrollDirection::Left),
+            vec![
+                "click".to_string(),
+                "--delay".to_string(),
+                "12".to_string(),
+                "--repeat".to_string(),
+                "3".to_string(),
+                "6".to_string(),
+            ]
+        );
+        assert_eq!(
+            xdotool_pointer_scroll_args(None, 0, ScrollDirection::Right),
+            vec![
+                "click".to_string(),
+                "--delay".to_string(),
+                "12".to_string(),
+                "--repeat".to_string(),
+                "1".to_string(),
+                "7".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn xdotool_scroll_timeout_covers_the_gap_after_every_click() {
+        assert_eq!(
+            xdotool_scroll_timeout(1, 12),
+            INPUT_COMMAND_TIMEOUT + Duration::from_millis(12)
+        );
+        assert_eq!(
+            xdotool_scroll_timeout(5, 100),
+            INPUT_COMMAND_TIMEOUT + Duration::from_millis(500)
+        );
+        assert_eq!(
+            xdotool_scroll_timeout(0, 12),
+            INPUT_COMMAND_TIMEOUT + Duration::from_millis(12)
+        );
     }
 
     #[test]

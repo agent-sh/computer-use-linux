@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- X11 `scroll` no longer follows ydotool's absolute move with a single wheel
+  event. That move warps the pointer through (0, 0). GTK 3 resets its XI2
+  scroll valuators when the pointer re-enters the window, so the one wheel
+  event only re-baselines them and the window does not move, while the tool
+  still returns success. Native X11 now sends the same notch count as XTEST
+  wheel buttons through xdotool (4 up, 5 down, 6 left, 7 right), which have
+  no scroll valuators. Wayland portal scroll is unchanged. (#184)
+
 ## [0.7.4] - 2026-09-27
 
 ### Fixed
