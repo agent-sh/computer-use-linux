@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-09-28
+
 ### Added
 - Opt-in persistence for the Wayland remote-desktop portal. Set
   `COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP=1` to send `persist_mode=2`
@@ -653,7 +655,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.4...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.5...HEAD
+[0.7.5]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.1...v0.7.2
