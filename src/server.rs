@@ -2925,12 +2925,12 @@ impl ComputerUseLinux {
         session_is_wayland(session_type.as_deref(), wayland_display.as_deref())
     }
 
-    // The Wayland remote-desktop portal is now a *fallback* for input: when a
-    // compatible ydotool CLI and working `ydotoold` socket are present we prefer
-    // ydotool, because it injects input without a permission prompt. GNOME
-    // refuses to persist remote-desktop
-    // grants (`org.freedesktop.portal.Error: Remote desktop sessions cannot
-    // persist`), so the portal would otherwise re-prompt on every new session.
+    // The Wayland remote-desktop portal is a fallback for input: when a
+    // compatible ydotool CLI and working `ydotoold` socket are present we
+    // prefer ydotool, because it injects input without a permission prompt.
+    // Without `COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP=1` the portal asks
+    // again on every new process. That opt-in sends `persist_mode=2` on
+    // RemoteDesktop SelectDevices and reuses the single-use restore token.
     // `COMPUTER_USE_LINUX_FORCE_YDOTOOL_*=1` always uses ydotool;
     // `COMPUTER_USE_LINUX_FORCE_PORTAL_*=1` always uses the portal.
     async fn should_prefer_portal_pointer_backend(&self) -> bool {

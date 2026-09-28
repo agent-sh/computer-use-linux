@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Opt-in persistence for the Wayland remote-desktop portal. Set
+  `COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP=1` to send `persist_mode=2`
+  on `RemoteDesktop.SelectDevices` and reuse the single-use `restore_token`
+  returned by `Start`. Nothing persistence-related is sent on
+  `ScreenCast.SelectSources` (that call rejects it for a remote-desktop
+  session). Pointer and keyboard sessions store separate tokens, mode
+  `0600`, under `$XDG_STATE_HOME/computer-use-linux/` or
+  `~/.local/state/computer-use-linux/`. The first grant still shows the
+  dialog. Later processes restore until the desktop revokes the grant, or
+  until the token cannot be restored, which falls back to a prompt.
+  Interface version 2 is required. Unset, behavior is unchanged. (#185)
+
 ### Fixed
 - X11 `scroll` no longer follows ydotool's absolute move with a single wheel
   event. That move warps the pointer through (0, 0). GTK 3 resets its XI2

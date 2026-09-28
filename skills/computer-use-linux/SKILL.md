@@ -147,6 +147,7 @@ directly to a window-relative click.
 
 - Already-running GTK, Qt, and Electron apps may need a restart after AT-SPI is enabled.
 - GNOME may show a portal prompt on the first screenshot or `get_app_state` call with screenshots enabled.
+- On GNOME Wayland, the remote-control portal asks on each new `computer-use-linux` process. `COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP=1` in the server environment asks the portal to remember the grant (GNOME starts with the remember box checked). Later processes reuse a single-use restore token stored mode 0600 in the user state directory. Unset is the default and prompts every time. The flag does nothing when ydotool, not the portal, is the input backend.
 - Desktop input is stateful. Avoid concurrent tool calls against this MCP server.
 - Pi serializes the native Computer Use tools and keeps one process for the session. If that process exits, do not replay an ambiguous mutating call; obtain a fresh `get_app_state` before another element-based action.
 - `click`, `drag`, `press_key`, `type_text`, `perform_action`, and `set_value` can change real application state.

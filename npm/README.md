@@ -39,6 +39,12 @@ and does not provide exclusive desktop ownership.
 This cue is available only to directly spawned MCP hosts; the native Pi extension
 does not yet forward the flag or include the tool in its catalog.
 
+On GNOME Wayland the remote-control portal asks again for every new server
+process. Set `COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP=1` in that process's
+environment to reuse a restore token instead. The first dialog still appears.
+Leave it unset to keep the prompt. The repository README records where the
+token is stored and who can read it.
+
 If accessibility is disabled, run `computer-use-linux setup`. Setup writes and
 reads back GNOME's `toolkit-accessibility` setting and warns if only runtime
 accessibility is available. Restart target apps if their trees remain empty.

@@ -3,8 +3,13 @@ use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use std::{
     collections::HashMap,
+    fs::{self, OpenOptions},
+    io::{self, Read, Write},
+    os::fd::AsRawFd,
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, OnceLock,
     },
     time::Duration,
@@ -143,11 +148,18 @@ pub async fn start_portal_pointer_session() -> Result<PortalPointerSession> {
     let connection = Connection::session()
         .await
         .context("failed to connect to session bus for remote desktop portal")?;
+    let persistence = remote_desktop_persistence(&connection).await;
+    let permit = claim_restore_permit(&persistence, PortalDeviceKind::Pointer).await;
     let session_handle = create_remote_desktop_session(&connection).await?;
     let mut cleanup = PortalSessionCleanup::new(connection.clone(), session_handle.clone());
-    select_pointer_devices(&connection, &session_handle).await?;
+    select_pointer_devices(&connection, &session_handle, permit.as_ref()).await?;
     select_monitor_sources(&connection, &session_handle).await?;
-    let (devices, streams) = start_remote_desktop_session(&connection, &session_handle).await?;
+    let (devices, streams, restore_token) =
+        start_remote_desktop_session(&connection, &session_handle).await?;
+    // Start consumed any restore token we sent. Store the replacement, or
+    // delete the old one, before bailing on a session that did not actually
+    // grant pointer access.
+    commit_restore_permit(permit, restore_token).await;
 
     if devices & DEVICE_POINTER == 0 {
         bail!("remote desktop portal session started without pointer access");
@@ -181,10 +193,14 @@ pub async fn start_portal_keyboard_session() -> Result<PortalKeyboardSession> {
     let connection = Connection::session()
         .await
         .context("failed to connect to session bus for remote desktop portal")?;
+    let persistence = remote_desktop_persistence(&connection).await;
+    let permit = claim_restore_permit(&persistence, PortalDeviceKind::Keyboard).await;
     let session_handle = create_remote_desktop_session(&connection).await?;
     let mut cleanup = PortalSessionCleanup::new(connection.clone(), session_handle.clone());
-    select_keyboard_devices(&connection, &session_handle).await?;
-    let (devices, _) = start_remote_desktop_session(&connection, &session_handle).await?;
+    select_keyboard_devices(&connection, &session_handle, permit.as_ref()).await?;
+    let (devices, _, restore_token) =
+        start_remote_desktop_session(&connection, &session_handle).await?;
+    commit_restore_permit(permit, restore_token).await;
 
     if devices & DEVICE_KEYBOARD == 0 {
         bail!("remote desktop portal session started without keyboard access");
@@ -1137,6 +1153,447 @@ impl PointerButton {
     }
 }
 
+const PERSIST_REMOTE_DESKTOP_ENV: &str = "COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP";
+/// `SelectDevices` persist_mode: keep the grant until the user revokes it.
+const PERSIST_MODE_UNTIL_REVOKED: u32 = 2;
+/// `persist_mode` and `restore_token` were added in version 2.
+const REMOTE_DESKTOP_PERSIST_VERSION: u32 = 2;
+const RESTORE_TOKEN_MAX_LEN: usize = 4096;
+
+#[derive(Clone, Copy)]
+enum PortalDeviceKind {
+    Pointer,
+    Keyboard,
+}
+
+impl PortalDeviceKind {
+    fn token_file_name(self) -> &'static str {
+        match self {
+            Self::Pointer => "remote-desktop-pointer.token",
+            Self::Keyboard => "remote-desktop-keyboard.token",
+        }
+    }
+
+    fn lock_file_name(self) -> &'static str {
+        match self {
+            Self::Pointer => "remote-desktop-pointer.lock",
+            Self::Keyboard => "remote-desktop-keyboard.lock",
+        }
+    }
+}
+
+enum RemoteDesktopPersistence {
+    Off,
+    On,
+}
+
+impl RemoteDesktopPersistence {
+    fn is_on(&self) -> bool {
+        matches!(self, Self::On)
+    }
+}
+
+enum ParsedRestoreToken {
+    Absent,
+    Usable(String),
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceSelectPersistence {
+    persist_mode: Option<u32>,
+    restore_token: Option<String>,
+}
+
+/// Exclusive hold on one device kind's restore token.
+///
+/// Pointer and keyboard are separate portal sessions (different device
+/// masks, and only the pointer session selects monitors), so they do not
+/// share a token. The token is single-use: the lock is held from the read
+/// through `Start`, then the file is replaced. `_lock` is unread on purpose.
+struct RestorePermit {
+    _lock: fs::File,
+    restore_token: Option<String>,
+    directory: PathBuf,
+    kind: PortalDeviceKind,
+}
+
+impl RestorePermit {
+    async fn acquire(kind: PortalDeviceKind) -> io::Result<Self> {
+        match tokio::task::spawn_blocking(move || Self::acquire_blocking(kind)).await {
+            Ok(result) => result,
+            Err(error) => Err(io::Error::other(error)),
+        }
+    }
+
+    fn acquire_blocking(kind: PortalDeviceKind) -> io::Result<Self> {
+        let directory = remote_desktop_state_dir_from_env()?;
+        Self::acquire_in(&directory, kind)
+    }
+
+    fn acquire_in(directory: &Path, kind: PortalDeviceKind) -> io::Result<Self> {
+        ensure_private_dir(directory)?;
+        let lock = open_lock_file(&directory.join(kind.lock_file_name()))?;
+        lock_exclusive(&lock)?;
+        let restore_token = read_token_file(&directory.join(kind.token_file_name()))?;
+        Ok(Self {
+            _lock: lock,
+            restore_token,
+            directory: directory.to_path_buf(),
+            kind,
+        })
+    }
+
+    fn token(&self) -> Option<&str> {
+        self.restore_token.as_deref()
+    }
+
+    fn commit(self, parsed: ParsedRestoreToken) -> io::Result<()> {
+        let token = match parsed {
+            ParsedRestoreToken::Usable(token) if acceptable_restore_token(&token) => Some(token),
+            _ => None,
+        };
+        write_token_file(&self.directory, self.kind, token.as_deref())
+    }
+}
+
+fn device_select_persistence(
+    persist: bool,
+    restore_token: Option<&str>,
+) -> DeviceSelectPersistence {
+    if !persist {
+        return DeviceSelectPersistence {
+            persist_mode: None,
+            restore_token: None,
+        };
+    }
+    DeviceSelectPersistence {
+        persist_mode: Some(PERSIST_MODE_UNTIL_REVOKED),
+        restore_token: restore_token
+            .filter(|token| acceptable_restore_token(token))
+            .map(ToString::to_string),
+    }
+}
+
+fn acceptable_restore_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= RESTORE_TOKEN_MAX_LEN
+        && !token
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
+}
+
+fn parse_restore_token(results: &HashMap<String, OwnedValue>) -> ParsedRestoreToken {
+    let Some(value) = results.get("restore_token") else {
+        return ParsedRestoreToken::Absent;
+    };
+    let Ok(cloned) = value.try_clone() else {
+        return ParsedRestoreToken::Rejected;
+    };
+    match String::try_from(cloned) {
+        Ok(token) if acceptable_restore_token(&token) => ParsedRestoreToken::Usable(token),
+        _ => ParsedRestoreToken::Rejected,
+    }
+}
+
+async fn remote_desktop_persistence(connection: &Connection) -> RemoteDesktopPersistence {
+    if std::env::var(PERSIST_REMOTE_DESKTOP_ENV).ok().as_deref() != Some("1") {
+        return RemoteDesktopPersistence::Off;
+    }
+    match remote_desktop_interface_version(connection).await {
+        Ok(version) if version >= REMOTE_DESKTOP_PERSIST_VERSION => RemoteDesktopPersistence::On,
+        Ok(version) => {
+            warn_persist_disabled_once(&format!(
+                "RemoteDesktop version {version} does not support persist_mode (need {REMOTE_DESKTOP_PERSIST_VERSION})"
+            ));
+            RemoteDesktopPersistence::Off
+        }
+        Err(error) => {
+            warn_persist_disabled_once(&format!(
+                "could not read RemoteDesktop version ({error:#})"
+            ));
+            RemoteDesktopPersistence::Off
+        }
+    }
+}
+
+async fn remote_desktop_interface_version(connection: &Connection) -> Result<u32> {
+    let proxy = remote_desktop_proxy(connection).await?;
+    tokio::time::timeout(PORTAL_CALL_TIMEOUT, proxy.get_property::<u32>("version"))
+        .await
+        .context("RemoteDesktop version property timed out")?
+        .context("RemoteDesktop version property failed")
+}
+
+async fn claim_restore_permit(
+    persistence: &RemoteDesktopPersistence,
+    kind: PortalDeviceKind,
+) -> Option<RestorePermit> {
+    if !persistence.is_on() {
+        return None;
+    }
+    match RestorePermit::acquire(kind).await {
+        Ok(permit) => Some(permit),
+        Err(error) => {
+            warn_persist_store_once(&error);
+            None
+        }
+    }
+}
+
+async fn commit_restore_permit(permit: Option<RestorePermit>, parsed: ParsedRestoreToken) {
+    let Some(permit) = permit else {
+        return;
+    };
+    if matches!(parsed, ParsedRestoreToken::Rejected) {
+        warn_rejected_restore_token_once();
+    }
+    let joined = tokio::task::spawn_blocking(move || permit.commit(parsed)).await;
+    match joined {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => warn_persist_commit_once(&error),
+        Err(error) => warn_persist_commit_once(&io::Error::other(error)),
+    }
+}
+
+fn warn_persist_disabled_once(reason: &str) {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    if ONCE.set(()).is_ok() {
+        eprintln!("[computer-use-linux] remote desktop persistence disabled: {reason}");
+    }
+}
+
+fn warn_persist_store_once(error: &io::Error) {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    if ONCE.set(()).is_ok() {
+        eprintln!(
+            "[computer-use-linux] remote desktop persistence disabled: could not open the restore-token store ({error})"
+        );
+    }
+}
+
+fn warn_persist_commit_once(error: &io::Error) {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    if ONCE.set(()).is_ok() {
+        eprintln!("[computer-use-linux] could not store the remote desktop restore token: {error}");
+    }
+}
+
+fn warn_rejected_restore_token_once() {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    if ONCE.set(()).is_ok() {
+        eprintln!(
+            "[computer-use-linux] RemoteDesktop returned a restore token this process will not store (empty, too long, or it contains whitespace or control characters). The next portal session will prompt again."
+        );
+    }
+}
+
+fn remote_desktop_state_dir_from_env() -> io::Result<PathBuf> {
+    remote_desktop_state_dir(
+        std::env::var("XDG_STATE_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    )
+    .ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "no XDG state directory is available for the restore token",
+        )
+    })
+}
+
+fn remote_desktop_state_dir(xdg_state_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+    if let Some(path) = absolute_dir_component(xdg_state_home) {
+        return Some(path.join("computer-use-linux"));
+    }
+    absolute_dir_component(home).map(|path| path.join(".local/state/computer-use-linux"))
+}
+
+fn absolute_dir_component(value: Option<&str>) -> Option<PathBuf> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty())?;
+    let path = PathBuf::from(value);
+    path.is_absolute().then_some(path)
+}
+
+fn ensure_private_dir(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "restore-token directory is a symlink",
+            ));
+        }
+        Ok(meta) if !meta.is_dir() => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "restore-token path is not a directory",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    fs::create_dir_all(parent)?;
+                }
+            }
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder.create(path)?;
+        }
+        Err(error) => return Err(error),
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    let meta = fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "restore-token path is not a private directory",
+        ));
+    }
+    if meta.permissions().mode() & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "could not restrict the restore-token directory to mode 0700",
+        ));
+    }
+    Ok(())
+}
+
+fn open_lock_file(path: &Path) -> io::Result<fs::File> {
+    match open_lock_file_once(path) {
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            fs::remove_file(path)?;
+            open_lock_file_once(path)
+        }
+        other => other,
+    }
+}
+
+fn open_lock_file_once(path: &Path) -> io::Result<fs::File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() || meta.permissions().mode() & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "restore-token lock is not a private file",
+        ));
+    }
+    Ok(file)
+}
+
+fn lock_exclusive(file: &fs::File) -> io::Result<()> {
+    // SAFETY: `file` owns this fd for the duration of the call. LOCK_EX waits
+    // until this open-file description holds the only exclusive flock.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn read_token_file(path: &Path) -> io::Result<Option<String>> {
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            remove_token_file(path)?;
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let token = read_private_token(file)?;
+    if token.is_none() {
+        remove_token_file(path)?;
+    }
+    Ok(token)
+}
+
+fn read_private_token(file: fs::File) -> io::Result<Option<String>> {
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() || meta.permissions().mode() & 0o077 != 0 {
+        return Ok(None);
+    }
+    let mut buf = Vec::new();
+    file.take((RESTORE_TOKEN_MAX_LEN as u64).saturating_add(1))
+        .read_to_end(&mut buf)?;
+    match String::from_utf8(buf) {
+        Ok(token) if acceptable_restore_token(&token) => Ok(Some(token)),
+        _ => Ok(None),
+    }
+}
+
+fn write_token_file(
+    directory: &Path,
+    kind: PortalDeviceKind,
+    token: Option<&str>,
+) -> io::Result<()> {
+    let path = directory.join(kind.token_file_name());
+    let Some(token) = token else {
+        return remove_token_file(&path);
+    };
+    let tmp = temp_token_path(directory, kind);
+    if let Err(error) = write_private_file(&tmp, token.as_bytes()) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&tmp, &path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    let mode = fs::symlink_metadata(&path)?.permissions().mode();
+    if mode & 0o077 != 0 {
+        remove_token_file(&path)?;
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "restore token was not private after replace",
+        ));
+    }
+    Ok(())
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+fn temp_token_path(directory: &Path, kind: PortalDeviceKind) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let nonce = NEXT.fetch_add(1, Ordering::Relaxed);
+    directory.join(format!(
+        ".{}.{}.{nonce}.tmp",
+        kind.token_file_name(),
+        std::process::id()
+    ))
+}
+
+fn remove_token_file(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 async fn create_remote_desktop_session(connection: &Connection) -> Result<OwnedObjectPath> {
     let remote_proxy = remote_desktop_proxy(connection).await?;
     let (request_path, mut response_stream) =
@@ -1173,12 +1630,27 @@ async fn create_remote_desktop_session(connection: &Connection) -> Result<OwnedO
         .context("RemoteDesktop session_handle was not a valid object path")
 }
 
-async fn select_pointer_devices(connection: &Connection, session: &OwnedObjectPath) -> Result<()> {
-    select_devices(connection, session, DEVICE_POINTER, "rd_devices").await
+async fn select_pointer_devices(
+    connection: &Connection,
+    session: &OwnedObjectPath,
+    permit: Option<&RestorePermit>,
+) -> Result<()> {
+    select_devices(connection, session, DEVICE_POINTER, "rd_devices", permit).await
 }
 
-async fn select_keyboard_devices(connection: &Connection, session: &OwnedObjectPath) -> Result<()> {
-    select_devices(connection, session, DEVICE_KEYBOARD, "rd_keyboard_devices").await
+async fn select_keyboard_devices(
+    connection: &Connection,
+    session: &OwnedObjectPath,
+    permit: Option<&RestorePermit>,
+) -> Result<()> {
+    select_devices(
+        connection,
+        session,
+        DEVICE_KEYBOARD,
+        "rd_keyboard_devices",
+        permit,
+    )
+    .await
 }
 
 async fn select_devices(
@@ -1186,16 +1658,25 @@ async fn select_devices(
     session: &OwnedObjectPath,
     device_types: u32,
     request_prefix: &str,
+    permit: Option<&RestorePermit>,
 ) -> Result<()> {
     let remote_proxy = remote_desktop_proxy(connection).await?;
     let (request_path, mut response_stream) =
         portal_request_stream(connection, request_prefix).await?;
+    let requested =
+        device_select_persistence(permit.is_some(), permit.and_then(RestorePermit::token));
     let mut options: HashMap<&str, Value<'_>> = HashMap::new();
     options.insert(
         "handle_token",
         Value::from(last_path_component(&request_path)),
     );
     options.insert("types", Value::from(device_types));
+    if let Some(mode) = requested.persist_mode {
+        options.insert("persist_mode", Value::from(mode));
+    }
+    if let Some(token) = requested.restore_token.as_deref() {
+        options.insert("restore_token", Value::from(token));
+    }
 
     let handle: OwnedObjectPath = tokio::time::timeout(
         PORTAL_CALL_TIMEOUT,
@@ -1212,18 +1693,25 @@ async fn select_devices(
     Ok(())
 }
 
+fn insert_screencast_source_options<'a>(
+    options: &mut HashMap<&'a str, Value<'a>>,
+    handle_token: &'a str,
+) {
+    options.insert("handle_token", Value::from(handle_token));
+    options.insert("types", Value::from(SOURCE_MONITOR));
+    options.insert("multiple", Value::from(true));
+    options.insert("cursor_mode", Value::from(CURSOR_MODE_HIDDEN));
+}
+
 async fn select_monitor_sources(connection: &Connection, session: &OwnedObjectPath) -> Result<()> {
     let screencast_proxy = screencast_proxy(connection).await?;
     let (request_path, mut response_stream) =
         portal_request_stream(connection, "rd_sources").await?;
+    // Persistence stays on RemoteDesktop.SelectDevices. persist_mode or
+    // restore_token here makes the portal reject the call: "Remote desktop
+    // sessions cannot persist".
     let mut options: HashMap<&str, Value<'_>> = HashMap::new();
-    options.insert(
-        "handle_token",
-        Value::from(last_path_component(&request_path)),
-    );
-    options.insert("types", Value::from(SOURCE_MONITOR));
-    options.insert("multiple", Value::from(true));
-    options.insert("cursor_mode", Value::from(CURSOR_MODE_HIDDEN));
+    insert_screencast_source_options(&mut options, last_path_component(&request_path));
 
     let handle: OwnedObjectPath = tokio::time::timeout(
         PORTAL_CALL_TIMEOUT,
@@ -1243,7 +1731,7 @@ async fn select_monitor_sources(connection: &Connection, session: &OwnedObjectPa
 async fn start_remote_desktop_session(
     connection: &Connection,
     session: &OwnedObjectPath,
-) -> Result<(u32, Vec<PortalStream>)> {
+) -> Result<(u32, Vec<PortalStream>, ParsedRestoreToken)> {
     let remote_proxy = remote_desktop_proxy(connection).await?;
     let (request_path, mut response_stream) = portal_request_stream(connection, "rd_start").await?;
     let mut options: HashMap<&str, Value<'_>> = HashMap::new();
@@ -1274,7 +1762,7 @@ async fn start_remote_desktop_session(
         .map(parse_streams)
         .transpose()?
         .unwrap_or_default();
-    Ok((devices, streams))
+    Ok((devices, streams, parse_restore_token(&results)))
 }
 
 async fn notify_pointer_motion_absolute(
@@ -1598,6 +2086,9 @@ fn request_token(prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use xkeysym::key;
 
     #[test]
@@ -2181,5 +2672,256 @@ mod tests {
         assert!(layout_mode_is_logical(&mode(1)));
         assert!(!layout_mode_is_logical(&mode(2)));
         assert!(!layout_mode_is_logical(&HashMap::new()));
+    }
+
+    #[test]
+    fn device_select_persistence_is_opt_in_and_drops_unusable_tokens() {
+        assert_eq!(
+            device_select_persistence(false, Some("abcDEF-123")),
+            DeviceSelectPersistence {
+                persist_mode: None,
+                restore_token: None,
+            }
+        );
+        assert_eq!(
+            device_select_persistence(true, None),
+            DeviceSelectPersistence {
+                persist_mode: Some(PERSIST_MODE_UNTIL_REVOKED),
+                restore_token: None,
+            }
+        );
+        assert_eq!(
+            device_select_persistence(true, Some("abcDEF-123_+/=.")),
+            DeviceSelectPersistence {
+                persist_mode: Some(PERSIST_MODE_UNTIL_REVOKED),
+                restore_token: Some("abcDEF-123_+/=.".to_string()),
+            }
+        );
+        assert_eq!(
+            device_select_persistence(true, Some("has space")).restore_token,
+            None
+        );
+        assert!(acceptable_restore_token("tökën"));
+        assert!(acceptable_restore_token(&"a".repeat(RESTORE_TOKEN_MAX_LEN)));
+        assert!(!acceptable_restore_token(""));
+        assert!(!acceptable_restore_token("line\nbreak"));
+        assert!(!acceptable_restore_token("tab\there"));
+        assert!(!acceptable_restore_token(
+            &"a".repeat(RESTORE_TOKEN_MAX_LEN + 1)
+        ));
+    }
+
+    #[test]
+    fn remote_desktop_screencast_options_omit_persistence() {
+        let mut options = HashMap::new();
+        insert_screencast_source_options(&mut options, "handle");
+        assert!(options.contains_key("types"));
+        assert!(options.contains_key("multiple"));
+        assert!(options.contains_key("cursor_mode"));
+        assert!(!options.contains_key("persist_mode"));
+        assert!(!options.contains_key("restore_token"));
+    }
+
+    #[test]
+    fn start_results_keep_only_a_usable_restore_token() {
+        let mut results = HashMap::from([(
+            "restore_token".to_string(),
+            owned_portal_string("good-token"),
+        )]);
+        match parse_restore_token(&results) {
+            ParsedRestoreToken::Usable(token) => assert_eq!(token, "good-token"),
+            _ => panic!("expected a usable restore token"),
+        }
+
+        results.insert(
+            "restore_token".to_string(),
+            owned_portal_string("bad token"),
+        );
+        assert!(matches!(
+            parse_restore_token(&results),
+            ParsedRestoreToken::Rejected
+        ));
+
+        results.insert("restore_token".to_string(), OwnedValue::from(1u32));
+        assert!(matches!(
+            parse_restore_token(&results),
+            ParsedRestoreToken::Rejected
+        ));
+
+        results.remove("restore_token");
+        assert!(matches!(
+            parse_restore_token(&results),
+            ParsedRestoreToken::Absent
+        ));
+    }
+
+    #[test]
+    fn restore_token_state_dir_uses_an_absolute_xdg_state_home_only() {
+        assert_eq!(
+            remote_desktop_state_dir(Some("/var/state"), Some("/home/user")).unwrap(),
+            PathBuf::from("/var/state/computer-use-linux")
+        );
+        assert_eq!(
+            remote_desktop_state_dir(Some(" /var/state "), Some("/home/user")).unwrap(),
+            PathBuf::from("/var/state/computer-use-linux")
+        );
+        assert_eq!(
+            remote_desktop_state_dir(Some("relative"), Some("/home/user")).unwrap(),
+            PathBuf::from("/home/user/.local/state/computer-use-linux")
+        );
+        assert_eq!(
+            remote_desktop_state_dir(Some(""), Some("/home/user")).unwrap(),
+            PathBuf::from("/home/user/.local/state/computer-use-linux")
+        );
+        assert!(remote_desktop_state_dir(Some("  "), None).is_none());
+        assert!(remote_desktop_state_dir(None, Some("relative")).is_none());
+        assert!(remote_desktop_state_dir(None, None).is_none());
+    }
+
+    #[test]
+    fn restore_tokens_are_private_single_use_and_per_device() {
+        let dir = TempState::new();
+        let pointer = RestorePermit::acquire_in(&dir.path, PortalDeviceKind::Pointer).unwrap();
+        let keyboard = RestorePermit::acquire_in(&dir.path, PortalDeviceKind::Keyboard).unwrap();
+        assert_eq!(pointer.token(), None);
+        assert_eq!(keyboard.token(), None);
+        let dir_mode = std::fs::metadata(&dir.path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700);
+
+        pointer
+            .commit(ParsedRestoreToken::Usable("pointer-token".to_string()))
+            .unwrap();
+        keyboard
+            .commit(ParsedRestoreToken::Usable("keyboard-token".to_string()))
+            .unwrap();
+
+        let pointer_path = dir.path.join("remote-desktop-pointer.token");
+        let keyboard_path = dir.path.join("remote-desktop-keyboard.token");
+        assert_eq!(
+            std::fs::metadata(&pointer_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::read_to_string(&pointer_path).unwrap(),
+            "pointer-token"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&keyboard_path).unwrap(),
+            "keyboard-token"
+        );
+
+        let pointer = RestorePermit::acquire_in(&dir.path, PortalDeviceKind::Pointer).unwrap();
+        assert_eq!(pointer.token(), Some("pointer-token"));
+        pointer.commit(ParsedRestoreToken::Absent).unwrap();
+        assert!(!pointer_path.exists());
+
+        let keyboard = RestorePermit::acquire_in(&dir.path, PortalDeviceKind::Keyboard).unwrap();
+        assert_eq!(keyboard.token(), Some("keyboard-token"));
+        keyboard.commit(ParsedRestoreToken::Rejected).unwrap();
+        assert!(!keyboard_path.exists());
+    }
+
+    #[test]
+    fn a_second_reader_waits_for_the_replacement_token() {
+        let dir = TempState::new();
+        RestorePermit::acquire_in(&dir.path, PortalDeviceKind::Pointer)
+            .unwrap()
+            .commit(ParsedRestoreToken::Usable("first-token".to_string()))
+            .unwrap();
+        let held = RestorePermit::acquire_in(&dir.path, PortalDeviceKind::Pointer).unwrap();
+        assert_eq!(held.token(), Some("first-token"));
+
+        let path = dir.path.clone();
+        let reader = std::thread::spawn(move || {
+            RestorePermit::acquire_in(&path, PortalDeviceKind::Pointer).unwrap()
+        });
+        held.commit(ParsedRestoreToken::Usable("second-token".to_string()))
+            .unwrap();
+        let next = reader.join().expect("second reader");
+        assert_eq!(next.token(), Some("second-token"));
+    }
+
+    #[test]
+    fn loose_invalid_or_symlinked_restore_tokens_are_not_used() {
+        let dir = TempState::new();
+        RestorePermit::acquire_in(&dir.path, PortalDeviceKind::Pointer)
+            .unwrap()
+            .commit(ParsedRestoreToken::Usable("pointer-token".to_string()))
+            .unwrap();
+        let token_path = dir.path.join("remote-desktop-pointer.token");
+        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let permit = RestorePermit::acquire_in(&dir.path, PortalDeviceKind::Pointer).unwrap();
+        assert_eq!(permit.token(), None);
+        assert!(!token_path.exists());
+        permit
+            .commit(ParsedRestoreToken::Usable("pointer-token".to_string()))
+            .unwrap();
+
+        std::fs::write(&token_path, "bad token\n").unwrap();
+        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let permit = RestorePermit::acquire_in(&dir.path, PortalDeviceKind::Pointer).unwrap();
+        assert_eq!(permit.token(), None);
+        assert!(!token_path.exists());
+        drop(permit);
+
+        let outside = dir.path.join("outside-secret");
+        std::fs::write(&outside, "super-secret-token").unwrap();
+        std::os::unix::fs::symlink(&outside, &token_path).unwrap();
+        let permit = RestorePermit::acquire_in(&dir.path, PortalDeviceKind::Pointer).unwrap();
+        assert_eq!(permit.token(), None);
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "super-secret-token"
+        );
+        assert!(!token_path.exists());
+    }
+
+    #[test]
+    fn a_symlinked_state_directory_is_refused() {
+        let parent = TempState::new();
+        let real = parent.path.join("real");
+        let linked = parent.path.join("linked");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &linked).unwrap();
+        let Err(error) = RestorePermit::acquire_in(&linked, PortalDeviceKind::Pointer) else {
+            panic!("symlinked state directory was accepted");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(std::fs::read_dir(&real).unwrap().next().is_none());
+    }
+
+    fn owned_portal_string(value: &str) -> OwnedValue {
+        OwnedValue::try_from(zbus::zvariant::Value::from(value)).expect("string portal value")
+    }
+
+    struct TempState {
+        path: PathBuf,
+    }
+
+    impl TempState {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(1);
+            let nonce = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "cul-rd-persist-{}-{}-{nonce}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or(0)
+            ));
+            std::fs::create_dir_all(&path).expect("create temp state dir");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempState {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
     }
 }
