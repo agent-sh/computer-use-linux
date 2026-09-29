@@ -7,7 +7,7 @@ export interface GeneratedMcpToolDefinition {
 	annotations: Record<string, unknown>;
 }
 
-export const GENERATED_SERVER_VERSION = "0.7.6";
+export const GENERATED_SERVER_VERSION = "0.7.7";
 export const GENERATED_TOOL_CATALOG_HASH = "24c86d5a758f000674ea2a44d843779d7af28f75d57ce8c401bb01215a61d9fc";
 export const GENERATED_SHELL_TOOL_CATALOG_HASH = "08ebd9d8ed7177921c880a99ca5ce13ab1fcad6c88bec61dff93019a84fabcd2";
 export const GENERATED_MCP_TOOLS =
