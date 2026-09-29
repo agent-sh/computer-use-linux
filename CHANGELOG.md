@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-09-29
+
 ### Fixed
 - Wayland `press_key` on the remote-desktop portal now sends modifiers and
   named keys (Enter, arrows, F-keys and the rest) as keysyms, so the
@@ -666,7 +668,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.5...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.6...HEAD
+[0.7.6]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.2...v0.7.3
