@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Wayland `press_key` on the remote-desktop portal now sends modifiers and
+  named keys (Enter, arrows, F-keys and the rest) as keysyms, so the
+  compositor resolves them against the active keymap. With Caps Lock and
+  Control swapped, `Ctrl+A` used to press the physical Control position,
+  which toggled Caps Lock and typed `A`. It now selects all. Letters and
+  digits stay physical keycodes: mutter drops a keysym missing from the
+  current layout group, so a keysym `a` would vanish under a Hebrew or
+  Cyrillic layout, and GTK and Qt match shortcuts on those layouts by the
+  US keycode. KDE Plasma keeps keycodes for now. (#191)
+
 ## [0.7.5] - 2026-09-28
 
 ### Added
