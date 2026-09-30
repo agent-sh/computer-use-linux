@@ -16,14 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no resolver; a remote hostname in `DISPLAY` resolves through
   `getent ahosts` under the same bound, and a missing or failing lookup
   reports the X11 route as unavailable. Fix by Gary Lysenko (ilysenko),
-  from ilysenko/codex-desktop-linux#1532.
+  from ilysenko/codex-desktop-linux#1532. (#203)
 - Accessibility snapshots stay stable during input. The cached nodes and
   the pid that owns them are now one snapshot, and `get_app_state`
   publishes a new one only after in-flight input finishes. An index that
   passed the owner check can no longer resolve to another app's node
   mid-action. `perform_action` and `set_value` now take the input lock that
   `click` and `scroll` already held. Fix by Gary Lysenko (ilysenko), from
-  ilysenko/codex-desktop-linux#1532.
+  ilysenko/codex-desktop-linux#1532. (#203)
 - PTY metadata alone no longer makes a window a paste-capable terminal. The
   paste chord comes only from a known terminal app id or WM_CLASS, so an
   IDE with an integrated terminal keeps the standard paste shortcut. PTY
@@ -32,12 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   X11 windows with a custom class and a plain title. This replaces the
   earlier rule that defaulted an enriched window with no known identity to
   Ctrl+Shift+V. Fix by Gary Lysenko (ilysenko), from
-  ilysenko/codex-desktop-linux#1532.
+  ilysenko/codex-desktop-linux#1532. (#203)
 - The bounded process runner no longer sleeps after every chunk while a
   command is still producing output. Each drain stays capped and the
   deadline is still checked every pass, so continuous output cannot starve
   stderr or bypass the output limit. Fix by Gary Lysenko (ilysenko), from
-  ilysenko/codex-desktop-linux#1532.
+  ilysenko/codex-desktop-linux#1532. (#203)
 
 ## [0.7.7] - 2026-09-30
 
