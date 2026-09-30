@@ -96,7 +96,7 @@ fi
 # plus staging dirs left by a killed download.
 touch "$cache_dir"
 find "$cache_root" -mindepth 1 -maxdepth 1 \
-  \( -name 'v*' ! -path "$cache_dir" -mtime +30 \) -o \( -name '.download.*' -mmin +60 \) \
+  \( \( -name 'v*' ! -path "$cache_dir" -mtime +30 \) -o \( -name '.download.*' -mmin +60 \) \) \
   -exec rm -rf {} + 2>/dev/null || true
 
 if [ -z "${COMPUTER_USE_LINUX_COSMIC_HELPER:-}" ]; then

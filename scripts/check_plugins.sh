@@ -92,9 +92,12 @@ scripts/mcp_safety_check.py --binary "$launcher" >/dev/null ||
   fail "launcher did not reuse the cached binaries"
 stale="$tmp/cache/computer-use-linux/plugin/v0.0.0"
 recent="$tmp/cache/computer-use-linux/plugin/v0.0.1"
-mkdir -p "$stale" "$recent"
+staging="$tmp/cache/computer-use-linux/plugin/.download.killed"
+mkdir -p "$stale" "$recent" "$staging"
 touch -d '40 days ago' "$stale"
+touch -d '2 hours ago' "$staging"
 scripts/mcp_safety_check.py --binary "$launcher" >/dev/null
 [ ! -e "$stale" ] || fail "launcher kept a version unused for 40 days"
 [ -e "$recent" ] || fail "launcher pruned a recently used version"
+[ ! -e "$staging" ] || fail "launcher kept a stale download staging dir"
 echo "plugin launcher ok: download, tamper rejection, cache reuse, pruning"
