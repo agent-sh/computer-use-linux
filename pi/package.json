@@ -11,7 +11,7 @@
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "0.84.4",
-    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.99.2",
     "@modelcontextprotocol/client": "2.0.0",
     "@types/node": "26.4.0",
     "esbuild": "0.28.2",
