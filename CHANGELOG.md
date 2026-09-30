@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.8] - 2026-10-01
+
 ### Added
 - Official Claude Code and Codex plugin. The repo is a marketplace for both
   hosts: `claude plugin marketplace add agent-sh/computer-use-linux` or
@@ -14,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the skill and a launcher that downloads the release binaries pinned to the
   plugin version, verifies their sha256, and caches them per version. The
   Codex manifest forwards the desktop session variables that Codex strips
-  from MCP server environments. `COMPUTER_USE_LINUX_BIN` runs a local build.
+  from MCP server environments. `COMPUTER_USE_LINUX_BIN` runs a local build. (#202)
 
 ### Fixed
 - Native X11 queries now enforce one deadline in the transport itself.
@@ -720,7 +722,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.7...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.8...HEAD
+[0.7.8]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.7...v0.7.8
 [0.7.7]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.6...v0.7.7
 [0.7.6]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.4...v0.7.5
