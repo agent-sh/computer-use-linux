@@ -104,6 +104,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - run: cargo build --locked
       - run: scripts/mcp_safety_check.py --binary target/debug/computer-use-linux
+      - run: scripts/check_plugins.sh --binary target/debug/computer-use-linux
 
   agent-config:
     name: agnix

@@ -1,0 +1,101 @@
+#!/bin/sh
+# Plugin launcher for Claude Code and Codex. Downloads the pinned release
+# binaries on first use, verifies their published sha256, caches them per
+# version, then execs the server. stdout is left to the MCP stream; every
+# message goes to stderr.
+set -eu
+
+version=0.7.7
+
+say() {
+  echo "computer-use-linux plugin: $*" >&2
+}
+
+if [ -n "${COMPUTER_USE_LINUX_BIN:-}" ]; then
+  exec "$COMPUTER_USE_LINUX_BIN" "$@"
+fi
+
+case "$(uname -s)" in
+  Linux) ;;
+  *)
+    say "unsupported platform: $(uname -s). This plugin only supports Linux."
+    exit 64
+    ;;
+esac
+
+case "$(uname -m)" in
+  x86_64 | amd64) target=x86_64-unknown-linux-gnu ;;
+  aarch64 | arm64) target=aarch64-unknown-linux-gnu ;;
+  *)
+    say "unsupported CPU architecture: $(uname -m). Supported: x86_64, aarch64."
+    exit 64
+    ;;
+esac
+
+cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/computer-use-linux/plugin"
+cache_dir="$cache_root/v$version"
+binary="$cache_dir/computer-use-linux"
+helper="$cache_dir/computer-use-linux-cosmic"
+
+fetch() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --retry 2 -o "$2" "$1"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -O "$2" "$1"
+  else
+    say "curl or wget is required to download the server binary"
+    return 1
+  fi
+}
+
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+install_release() {
+  base="${COMPUTER_USE_LINUX_DOWNLOAD_BASE:-https://github.com/agent-sh/computer-use-linux/releases/download/v$version}"
+  mkdir -p "$cache_root"
+  tmp=$(mktemp -d "$cache_root/.download.XXXXXX")
+  trap 'rm -rf "$tmp"' EXIT INT TERM
+
+  for name in computer-use-linux computer-use-linux-cosmic; do
+    asset="$name-$target"
+    say "downloading $asset v$version"
+    fetch "$base/$asset" "$tmp/$name"
+    fetch "$base/$asset.sha256" "$tmp/$name.sha256"
+    expected=$(grep -o -E '[0-9a-fA-F]{64}' "$tmp/$name.sha256" | head -n 1 | tr 'A-F' 'a-f')
+    actual=$(sha256 "$tmp/$name")
+    if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+      say "sha256 mismatch for $asset: expected ${expected:-<none>}, got $actual"
+      exit 1
+    fi
+    chmod 0755 "$tmp/$name"
+  done
+
+  # Concurrent first starts each stage their own copy; rename keeps the swap
+  # atomic, and the helper lands before the main binary that gates reuse.
+  mkdir -p "$cache_dir"
+  mv -f "$tmp/computer-use-linux-cosmic" "$helper"
+  mv -f "$tmp/computer-use-linux" "$binary"
+  rm -rf "$tmp"
+  trap - EXIT INT TERM
+
+  for old in "$cache_root"/v*; do
+    [ "$old" = "$cache_dir" ] || rm -rf "$old"
+  done
+}
+
+if [ ! -x "$binary" ] || [ ! -x "$helper" ]; then
+  install_release
+fi
+
+if [ -z "${COMPUTER_USE_LINUX_COSMIC_HELPER:-}" ]; then
+  COMPUTER_USE_LINUX_COSMIC_HELPER="$helper"
+  export COMPUTER_USE_LINUX_COSMIC_HELPER
+fi
+
+exec "$binary" "$@"

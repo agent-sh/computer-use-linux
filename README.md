@@ -222,13 +222,45 @@ You will still need `ydotoold` running and AT-SPI enabled (run `computer-use-lin
 
 The binary speaks the `rmcp` 2024-11-05 stdio protocol. Pass `mcp` as the only argument; everything else is configured through MCP tool calls.
 
+### Claude Code and Codex plugin
+
+This repo is a plugin marketplace for both Claude Code and Codex. The plugin
+registers the MCP server and ships the `computer-use-linux` skill. On first
+start it downloads the release binaries pinned to the plugin version, checks
+each against its published `.sha256`, and caches them under
+`~/.cache/computer-use-linux/plugin/`. It needs `curl` or `wget`, and nothing
+else is installed.
+
+Claude Code:
+
+```bash
+claude plugin marketplace add agent-sh/computer-use-linux
+claude plugin install computer-use-linux@computer-use-linux
+```
+
+Codex CLI:
+
+```bash
+codex plugin marketplace add agent-sh/computer-use-linux
+codex plugin add computer-use-linux@computer-use-linux
+```
+
+Start a new session afterwards. To run your own build instead of the pinned
+release, set `COMPUTER_USE_LINUX_BIN` to its path in the host's environment.
+System setup (`computer-use-linux setup`, `setup-window-targeting`, ydotoold)
+still applies; ask the agent to run the `doctor` tool to see what is missing.
+Codex passes only a short allowlist of environment variables to MCP servers,
+so the Codex manifest forwards the desktop session variables and the
+`COMPUTER_USE_LINUX_*` settings below explicitly. Codex Desktop's Linux build
+already bundles Computer Use; do not install both there.
+
 ### Codex Desktop (Linux build)
 
 The Linux build of Codex Desktop already bundles this binary as a plugin. You don't need to wire it up manually — the plugin definition lives in [`codex-desktop-linux`](https://github.com/avifenesh/codex-desktop-linux) under its `plugins/` directory and is enabled by default. To upgrade the plugin in place, replace the binary it ships with the one from this repo's release assets.
 
 ### Claude Code (CLI)
 
-Use the `claude mcp add` command to register the binary as a stdio MCP server. Pick a scope:
+The plugin above is the simplest route. To wire a binary you installed yourself, use the `claude mcp add` command to register the binary as a stdio MCP server. Pick a scope:
 
 - `--scope user` — available across all projects for your user.
 - `--scope project` — written to `.mcp.json` at the project root for team sharing.

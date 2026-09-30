@@ -1,0 +1,19 @@
+{
+  "name": "computer-use-linux",
+  "version": "0.7.7",
+  "description": "Linux desktop control: AT-SPI accessibility trees, screenshots, compositor window targeting, and Wayland/X11 input.",
+  "author": {
+    "name": "agent-sh",
+    "url": "https://github.com/agent-sh"
+  },
+  "homepage": "https://github.com/agent-sh/computer-use-linux",
+  "repository": "https://github.com/agent-sh/computer-use-linux",
+  "license": "MIT",
+  "keywords": ["linux", "computer-use", "desktop-control", "mcp", "accessibility", "wayland", "x11"],
+  "mcpServers": {
+    "computer-use-linux": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/computer-use-linux",
+      "args": ["mcp"]
+    }
+  }
+}

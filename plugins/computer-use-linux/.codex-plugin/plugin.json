@@ -1,0 +1,29 @@
+{
+  "name": "computer-use-linux",
+  "version": "0.7.7",
+  "description": "Linux desktop control: AT-SPI accessibility trees, screenshots, compositor window targeting, and Wayland/X11 input.",
+  "author": {
+    "name": "agent-sh",
+    "url": "https://github.com/agent-sh"
+  },
+  "homepage": "https://github.com/agent-sh/computer-use-linux",
+  "repository": "https://github.com/agent-sh/computer-use-linux",
+  "license": "MIT",
+  "keywords": ["linux", "computer-use", "desktop-control", "mcp", "accessibility", "wayland", "x11"],
+  "skills": "./skills/",
+  "mcpServers": "./codex-mcp.json",
+  "interface": {
+    "displayName": "Computer Use for Linux",
+    "shortDescription": "Control Linux desktop apps through accessibility trees and native input.",
+    "longDescription": "Inspect and control local Linux applications through AT-SPI, desktop portals, and compositor-aware window targeting on GNOME, KDE, Hyprland, niri, i3, COSMIC, and X11. Screenshots and accessibility trees can contain private data, and input reaches real applications.",
+    "developerName": "agent-sh",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Write"],
+    "websiteURL": "https://github.com/agent-sh/computer-use-linux",
+    "defaultPrompt": [
+      "Check whether Linux Computer Use is ready",
+      "List the open desktop windows",
+      "Inspect the focused window"
+    ]
+  }
+}

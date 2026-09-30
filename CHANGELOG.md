@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Official Claude Code and Codex plugin. The repo is a marketplace for both
+  hosts: `claude plugin marketplace add agent-sh/computer-use-linux` or
+  `codex plugin marketplace add agent-sh/computer-use-linux`. The plugin ships
+  the skill and a launcher that downloads the release binaries pinned to the
+  plugin version, verifies their sha256, and caches them per version. The
+  Codex manifest forwards the desktop session variables that Codex strips
+  from MCP server environments. `COMPUTER_USE_LINUX_BIN` runs a local build.
+
 ### Fixed
 - Native X11 queries now enforce one deadline in the transport itself.
   Connect, handshake, and every reply share a 2-second bound, so a stalled
@@ -38,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deadline is still checked every pass, so continuous output cannot starve
   stderr or bypass the output limit. Fix by Gary Lysenko (ilysenko), from
   ilysenko/codex-desktop-linux#1532. (#203)
+||||||| parent of 1954063 (feat: official Claude Code and Codex plugin)
 
 ## [0.7.7] - 2026-09-30
 

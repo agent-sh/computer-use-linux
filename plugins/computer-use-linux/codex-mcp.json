@@ -1,0 +1,41 @@
+{
+  "mcpServers": {
+    "computer-use-linux": {
+      "command": "./bin/computer-use-linux",
+      "args": ["mcp"],
+      "cwd": ".",
+      "env_vars": [
+        "DBUS_SESSION_BUS_ADDRESS",
+        "DESKTOP_SESSION",
+        "DISPLAY",
+        "HYPRLAND_INSTANCE_SIGNATURE",
+        "I3SOCK",
+        "NIRI_SOCKET",
+        "SWAYSOCK",
+        "WAYLAND_DISPLAY",
+        "XAUTHORITY",
+        "XDG_CACHE_HOME",
+        "XDG_CURRENT_DESKTOP",
+        "XDG_RUNTIME_DIR",
+        "XDG_SESSION_DESKTOP",
+        "XDG_SESSION_TYPE",
+        "XDG_STATE_HOME",
+        "YDOTOOL_SOCKET",
+        "CU_DISABLE_ABS_POINTER",
+        "COMPUTER_USE_LINUX_BIN",
+        "COMPUTER_USE_LINUX_COSMIC_HELPER",
+        "COMPUTER_USE_LINUX_DOWNLOAD_BASE",
+        "COMPUTER_USE_LINUX_ENABLE_SHELL",
+        "COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD",
+        "COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER",
+        "COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD",
+        "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
+        "COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER",
+        "COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE",
+        "COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP",
+        "COMPUTER_USE_LINUX_SCREENSHOT_BACKEND",
+        "COMPUTER_USE_LINUX_XDOTOOL_TYPE_DELAY_MS"
+      ]
+    }
+  }
+}
