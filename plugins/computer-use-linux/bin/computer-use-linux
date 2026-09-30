@@ -60,7 +60,9 @@ install_release() {
   base="${COMPUTER_USE_LINUX_DOWNLOAD_BASE:-https://github.com/agent-sh/computer-use-linux/releases/download/v$version}"
   mkdir -p "$cache_root"
   tmp=$(mktemp -d "$cache_root/.download.XXXXXX")
-  trap 'rm -rf "$tmp"' EXIT INT TERM
+  trap 'rm -rf "$tmp"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
   for name in computer-use-linux computer-use-linux-cosmic; do
     asset="$name-$target"
@@ -83,15 +85,19 @@ install_release() {
   mv -f "$tmp/computer-use-linux" "$binary"
   rm -rf "$tmp"
   trap - EXIT INT TERM
-
-  for old in "$cache_root"/v*; do
-    [ "$old" = "$cache_dir" ] || rm -rf "$old"
-  done
 }
 
 if [ ! -x "$binary" ] || [ ! -x "$helper" ]; then
   install_release
 fi
+
+# Claude Code and Codex update plugins independently, so another version may
+# still be in use. Mark this one live and drop versions unused for 30 days,
+# plus staging dirs left by a killed download.
+touch "$cache_dir"
+find "$cache_root" -mindepth 1 -maxdepth 1 \
+  \( -name 'v*' ! -path "$cache_dir" -mtime +30 \) -o \( -name '.download.*' -mmin +60 \) \
+  -exec rm -rf {} + 2>/dev/null || true
 
 if [ -z "${COMPUTER_USE_LINUX_COSMIC_HELPER:-}" ]; then
   COMPUTER_USE_LINUX_COSMIC_HELPER="$helper"

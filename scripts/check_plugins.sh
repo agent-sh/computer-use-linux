@@ -76,9 +76,11 @@ unset COMPUTER_USE_LINUX_BIN COMPUTER_USE_LINUX_COSMIC_HELPER
 good_sha=$(cat "$tmp/release/computer-use-linux-cosmic-$target.sha256")
 echo "0000000000000000000000000000000000000000000000000000000000000000  x" \
   >"$tmp/release/computer-use-linux-cosmic-$target.sha256"
-if "$launcher" windows >/dev/null 2>&1; then
+if "$launcher" windows >/dev/null 2>"$tmp/tamper.err"; then
   fail "launcher accepted a tampered sha256"
 fi
+grep -q 'sha256 mismatch' "$tmp/tamper.err" ||
+  fail "tampered download failed for another reason: $(cat "$tmp/tamper.err")"
 [ ! -e "$tmp/cache/computer-use-linux/plugin/v$cargo_version/computer-use-linux" ] ||
   fail "tampered download reached the cache"
 echo "$good_sha" >"$tmp/release/computer-use-linux-cosmic-$target.sha256"
@@ -88,4 +90,11 @@ scripts/mcp_safety_check.py --binary "$launcher"
 export COMPUTER_USE_LINUX_DOWNLOAD_BASE="file://$tmp/missing"
 scripts/mcp_safety_check.py --binary "$launcher" >/dev/null ||
   fail "launcher did not reuse the cached binaries"
-echo "plugin launcher ok: download, tamper rejection, cache reuse"
+stale="$tmp/cache/computer-use-linux/plugin/v0.0.0"
+recent="$tmp/cache/computer-use-linux/plugin/v0.0.1"
+mkdir -p "$stale" "$recent"
+touch -d '40 days ago' "$stale"
+scripts/mcp_safety_check.py --binary "$launcher" >/dev/null
+[ ! -e "$stale" ] || fail "launcher kept a version unused for 40 days"
+[ -e "$recent" ] || fail "launcher pruned a recently used version"
+echo "plugin launcher ok: download, tamper rejection, cache reuse, pruning"
