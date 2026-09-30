@@ -119,6 +119,7 @@ pub(crate) fn output_blocking_with_timeout(
     let mut stdout_eof = false;
     let mut stderr_eof = false;
     loop {
+        let previous_bytes = stdout_bytes.len() + stderr_bytes.len();
         if !stdout_eof {
             match drain_nonblocking(&mut stdout, &mut stdout_bytes) {
                 Ok(eof) => stdout_eof = eof,
@@ -159,7 +160,12 @@ pub(crate) fn output_blocking_with_timeout(
             terminate_blocking_process(&mut child, pgid);
             return Err(timeout_error(action, timeout));
         }
-        thread::sleep(BLOCKING_POLL_INTERVAL);
+        // Continue draining a busy producer without a fixed pause after every
+        // chunk. Each drain is still capped and the deadline is checked above,
+        // so continuous output cannot starve stderr or bypass the output limit.
+        if stdout_bytes.len() + stderr_bytes.len() == previous_bytes {
+            thread::sleep(BLOCKING_POLL_INTERVAL);
+        }
     }
 }
 

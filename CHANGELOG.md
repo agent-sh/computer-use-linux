@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Native X11 queries now enforce one deadline in the transport itself.
+  Connect, handshake, and every reply share a 2-second bound, so a stalled
+  X server closes the query connection instead of leaving a blocked worker
+  running after a timeout. The `doctor` X11 check no longer spawns a
+  detached thread. Unix sockets, literal IP addresses, and `localhost` need
+  no resolver; a remote hostname in `DISPLAY` resolves through
+  `getent ahosts` under the same bound, and a missing or failing lookup
+  reports the X11 route as unavailable. Fix by Gary Lysenko (ilysenko),
+  from ilysenko/codex-desktop-linux#1532.
+- Accessibility snapshots stay stable during input. The cached nodes and
+  the pid that owns them are now one snapshot, and `get_app_state`
+  publishes a new one only after in-flight input finishes. An index that
+  passed the owner check can no longer resolve to another app's node
+  mid-action. `perform_action` and `set_value` now take the input lock that
+  `click` and `scroll` already held. Fix by Gary Lysenko (ilysenko), from
+  ilysenko/codex-desktop-linux#1532.
+- PTY metadata alone no longer makes a window a paste-capable terminal. The
+  paste chord comes only from a known terminal app id or WM_CLASS, so an
+  IDE with an integrated terminal keeps the standard paste shortcut. PTY
+  enrichment now also recognizes Ghostty, GNOME Terminal, and KGX by app
+  id or WM_CLASS, not only by title, which keeps enrichment working for
+  X11 windows with a custom class and a plain title. This replaces the
+  earlier rule that defaulted an enriched window with no known identity to
+  Ctrl+Shift+V. Fix by Gary Lysenko (ilysenko), from
+  ilysenko/codex-desktop-linux#1532.
+- The bounded process runner no longer sleeps after every chunk while a
+  command is still producing output. Each drain stays capped and the
+  deadline is still checked every pass, so continuous output cannot starve
+  stderr or bypass the output limit. Fix by Gary Lysenko (ilysenko), from
+  ilysenko/codex-desktop-linux#1532.
+
 ## [0.7.7] - 2026-09-30
 
 ### Added

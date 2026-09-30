@@ -726,17 +726,11 @@ fn x11_display_check() -> Check {
     if !crate::x11_display::is_native_x11_session() {
         return Check::fail("not a native X11 session");
     }
-    // doctor runs on a blocking thread; connect directly with the same bound
-    // the async helper uses so a wedged server cannot stall the report.
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = crate::x11_display::X11Display::connect().map(|display| display.describe());
-        let _ = sender.send(result);
-    });
-    match receiver.recv_timeout(crate::x11_display::X11_QUERY_TIMEOUT) {
-        Ok(Ok(detail)) => Check::ok(detail),
-        Ok(Err(error)) => Check::fail(format!("{error:#}")),
-        Err(_) => Check::fail("X server did not answer within 2s"),
+    // The transport enforces the deadline, so no detached worker remains
+    // blocked after a diagnostic timeout.
+    match crate::x11_display::X11Display::connect().map(|display| display.describe()) {
+        Ok(detail) => Check::ok(detail),
+        Err(error) => Check::fail(format!("{error:#}")),
     }
 }
 

@@ -216,45 +216,31 @@ fn process_depth(pid: u32, ancestor_pid: u32, by_pid: &HashMap<u32, &ProcessInfo
 }
 
 fn looks_like_terminal_window(window: &WindowInfo) -> bool {
-    uses_terminal_paste_shortcut(window)
-        || window.title.as_deref().is_some_and(|title| {
-            let title = title.to_ascii_lowercase();
-            TERMINAL_TITLE_HINTS
-                .iter()
-                .any(|needle| title.contains(needle))
-        })
+    terminal_paste_shortcut(window).is_some()
+        || [window.app_id.as_deref(), window.wm_class.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(terminal_detection_hint_matches)
+        || window
+            .title
+            .as_deref()
+            .is_some_and(terminal_detection_hint_matches)
 }
 
-/// Which paste chord a terminal emulator accepts. The xterm and rxvt families
-/// have no Ctrl+Shift+V binding by default and paste the clipboard with
-/// Shift+Insert; the others use Ctrl+Shift+V.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TerminalPasteShortcut {
     CtrlShiftV,
     ShiftInsert,
 }
 
-pub(crate) fn uses_terminal_paste_shortcut(window: &WindowInfo) -> bool {
-    terminal_paste_shortcut(window).is_some()
-}
-
-/// The paste chord for a terminal window, or `None` for anything else. A known
-/// app id or WM_CLASS decides the chord; a window that only carries PTY
-/// enrichment is treated as a Ctrl+Shift+V terminal.
 pub(crate) fn terminal_paste_shortcut(window: &WindowInfo) -> Option<TerminalPasteShortcut> {
     [window.app_id.as_deref(), window.wm_class.as_deref()]
         .into_iter()
         .flatten()
-        .find_map(terminal_identity_shortcut)
-        .or_else(|| {
-            window
-                .terminal
-                .is_some()
-                .then_some(TerminalPasteShortcut::CtrlShiftV)
-        })
+        .find_map(terminal_identity_paste_shortcut)
 }
 
-fn terminal_identity_shortcut(value: &str) -> Option<TerminalPasteShortcut> {
+fn terminal_identity_paste_shortcut(value: &str) -> Option<TerminalPasteShortcut> {
     let identity = value.trim().to_ascii_lowercase();
     let identity = identity.strip_suffix(".desktop").unwrap_or(&identity);
     if SHIFT_INSERT_TERMINAL_IDENTITIES.contains(&identity) {
@@ -266,14 +252,12 @@ fn terminal_identity_shortcut(value: &str) -> Option<TerminalPasteShortcut> {
     }
 }
 
-const SHIFT_INSERT_TERMINAL_IDENTITIES: &[&str] = &[
-    "koi8rxterm",
-    "rxvt",
-    "rxvt-unicode",
-    "urxvt",
-    "uxterm",
-    "xterm",
-];
+fn terminal_detection_hint_matches(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    TERMINAL_DETECTION_HINTS
+        .iter()
+        .any(|needle| value.contains(needle))
+}
 
 const CTRL_SHIFT_V_TERMINAL_IDENTITIES: &[&str] = &[
     "alacritty",
@@ -281,6 +265,7 @@ const CTRL_SHIFT_V_TERMINAL_IDENTITIES: &[&str] = &[
     "com.mitchellh.ghostty",
     "com.system76.cosmicterm",
     "foot",
+    "ghostty",
     "gnome-terminal",
     "gnome-terminal-server",
     "io.elementary.terminal",
@@ -308,10 +293,22 @@ const CTRL_SHIFT_V_TERMINAL_IDENTITIES: &[&str] = &[
     "yakuake",
 ];
 
-const TERMINAL_TITLE_HINTS: &[&str] = &[
+const SHIFT_INSERT_TERMINAL_IDENTITIES: &[&str] = &[
+    "koi8rxterm",
+    "rxvt",
+    "rxvt-unicode",
+    "urxvt",
+    "uxterm",
+    "xterm",
+];
+
+const TERMINAL_DETECTION_HINTS: &[&str] = &[
     "alacritty",
     "ghostty",
     "gnome terminal",
+    "gnome-terminal",
+    "org.gnome.terminal",
+    "kgx",
     "konsole",
     "kitty",
     "ptyxis",
@@ -500,61 +497,60 @@ mod tests {
         window.app_id = Some("com.example.footnotes".to_string());
         window.wm_class = Some("kitty-helper".to_string());
 
-        assert!(!uses_terminal_paste_shortcut(&window));
+        assert_eq!(terminal_paste_shortcut(&window), None);
     }
 
     #[test]
-    fn terminal_paste_recognizes_common_terminal_identities() {
+    fn terminal_detection_preserves_legacy_identity_substrings() {
         for identity in [
-            "org.kde.konsole",
-            "org.gnome.Terminal",
-            "org.gnome.Ptyxis",
-            "kgx",
-            "uxterm",
-            "xfce4-terminal",
-            "org.codeberg.dnkl.foot.desktop",
+            "custom-ghostty-profile",
+            "gnome-terminal-preview",
+            "org.gnome.Terminal.Devel",
+            "kgx-helper",
+            "KOI8RXTerm",
+        ] {
+            assert!(
+                terminal_detection_hint_matches(identity),
+                "did not recognize legacy terminal hint in {identity}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_paste_maps_common_terminal_identities() {
+        for (identity, expected) in [
+            ("org.kde.konsole", TerminalPasteShortcut::CtrlShiftV),
+            ("org.gnome.Terminal", TerminalPasteShortcut::CtrlShiftV),
+            ("org.gnome.Ptyxis", TerminalPasteShortcut::CtrlShiftV),
+            ("kgx", TerminalPasteShortcut::CtrlShiftV),
+            ("uxterm", TerminalPasteShortcut::ShiftInsert),
+            ("xterm", TerminalPasteShortcut::ShiftInsert),
+            ("xfce4-terminal", TerminalPasteShortcut::CtrlShiftV),
+            (
+                "org.codeberg.dnkl.foot.desktop",
+                TerminalPasteShortcut::CtrlShiftV,
+            ),
         ] {
             let mut window = terminal_window(11, 100);
             window.app_id = Some(identity.to_string());
             window.wm_class = None;
-            assert!(
-                uses_terminal_paste_shortcut(&window),
+            assert_eq!(
+                terminal_paste_shortcut(&window),
+                Some(expected),
                 "did not recognize {identity}"
             );
         }
     }
 
     #[test]
-    fn terminal_paste_picks_shift_insert_for_the_xterm_family_only() {
-        for (identity, expected) in [
-            ("xterm", TerminalPasteShortcut::ShiftInsert),
-            ("uxterm", TerminalPasteShortcut::ShiftInsert),
-            ("URxvt", TerminalPasteShortcut::ShiftInsert),
-            ("koi8rxterm", TerminalPasteShortcut::ShiftInsert),
-            ("org.kde.konsole", TerminalPasteShortcut::CtrlShiftV),
-            ("kitty", TerminalPasteShortcut::CtrlShiftV),
-            (
-                "org.gnome.Ptyxis.desktop",
-                TerminalPasteShortcut::CtrlShiftV,
-            ),
-        ] {
-            let mut window = terminal_window(11, 100);
-            window.app_id = None;
-            window.wm_class = Some(identity.to_string());
-            assert_eq!(
-                terminal_paste_shortcut(&window),
-                Some(expected),
-                "{identity} chose the wrong paste chord"
-            );
-        }
-    }
-
-    #[test]
-    fn terminal_paste_accepts_wm_class_or_enriched_pty_metadata() {
+    fn terminal_paste_accepts_known_wm_class_but_not_pty_metadata_alone() {
         let mut window = terminal_window(11, 100);
         window.app_id = None;
         window.wm_class = Some("qterminal".to_string());
-        assert!(uses_terminal_paste_shortcut(&window));
+        assert_eq!(
+            terminal_paste_shortcut(&window),
+            Some(TerminalPasteShortcut::CtrlShiftV)
+        );
 
         window.wm_class = None;
         window.terminal = Some(TerminalWindowContext {
@@ -570,12 +566,69 @@ mod tests {
             confidence: "high".to_string(),
             match_reason: "test".to_string(),
         });
-        assert!(uses_terminal_paste_shortcut(&window));
+        assert_eq!(terminal_paste_shortcut(&window), None);
+    }
+
+    #[test]
+    fn enrichment_preserves_xterm_class_variants() {
+        let mut window = terminal_window(11, 100);
+        window.title = Some("user@host: ~".to_string());
+        window.app_id = Some("custom-instance".to_string());
+        window.wm_class = Some("KOI8RXTerm".to_string());
+        let mut windows = vec![window];
+        let processes = vec![
+            process(100, 1, 1, "xterm", None),
+            process(200, 100, 10, "bash", Some("/dev/pts/0")),
+        ];
+
+        enrich_terminal_windows_with_processes(&mut windows, &processes);
+
+        assert_eq!(windows[0].terminal.as_ref().unwrap().tty, "/dev/pts/0");
         assert_eq!(
-            terminal_paste_shortcut(&window),
-            Some(TerminalPasteShortcut::CtrlShiftV),
-            "PTY enrichment without a known identity defaults to Ctrl+Shift+V"
+            terminal_paste_shortcut(&windows[0]),
+            Some(TerminalPasteShortcut::ShiftInsert)
         );
+    }
+
+    #[test]
+    fn pty_metadata_does_not_imply_a_terminal_paste_capability() {
+        let mut window = terminal_window(11, 100);
+        window.title = Some("xterm integration test".to_string());
+        window.app_id = Some("example-ide".to_string());
+        window.wm_class = Some("ExampleIde".to_string());
+        let mut windows = vec![window];
+        let processes = vec![
+            process(100, 1, 1, "example-ide", None),
+            process(200, 100, 10, "bash", Some("/dev/pts/0")),
+        ];
+
+        enrich_terminal_windows_with_processes(&mut windows, &processes);
+
+        assert!(windows[0].terminal.is_some());
+        assert_eq!(terminal_paste_shortcut(&windows[0]), None);
+    }
+
+    #[test]
+    fn enriches_x11_ghostty_with_custom_class_and_plain_title() {
+        let mut window = terminal_window(11, 100);
+        window.title = Some("igor@host: ~".to_string());
+        window.app_id = Some("ghostty".to_string());
+        window.wm_class = Some("my-custom-terminal".to_string());
+        window.client_type = Some("x11".to_string());
+        let mut windows = vec![window];
+        let processes = vec![
+            process(100, 1, 1, "ghostty", None),
+            process(200, 100, 10, "bash", Some("/dev/pts/0")),
+        ];
+
+        enrich_terminal_windows_with_processes(&mut windows, &processes);
+
+        let terminal = windows[0]
+            .terminal
+            .as_ref()
+            .expect("Ghostty's default X11 instance should preserve PTY enrichment");
+        assert_eq!(terminal.tty, "/dev/pts/0");
+        assert_eq!(terminal.confidence, "high");
     }
 
     #[test]

@@ -14,13 +14,25 @@
 //! Wayland compositor is never used.
 
 use anyhow::{anyhow, bail, Context, Result};
-use std::env;
-use std::time::Duration;
+use std::{
+    env, io,
+    net::{IpAddr, SocketAddr, TcpStream},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+    os::unix::net::UnixStream,
+    time::{Duration, Instant},
+};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
     AtomEnum, ConnectionExt as _, ImageFormat, ImageOrder, VisualClass, Window,
 };
-use x11rb::rust_connection::RustConnection;
+use x11rb::{
+    reexports::x11rb_protocol::{
+        parse_display::{parse_display, ConnectAddress},
+        xauth::get_auth,
+    },
+    rust_connection::{DefaultStream, PollMode, RustConnection, Stream},
+    utils::RawFdContainer,
+};
 
 /// Bound on one X11 query, including the connection handshake.
 pub(crate) const X11_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -57,17 +69,152 @@ where
     T: Send + 'static,
     F: FnOnce(&X11Display) -> T + Send + 'static,
 {
-    let task =
-        tokio::task::spawn_blocking(move || X11Display::connect().map(|display| f(&display)));
-    match tokio::time::timeout(limit, task).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(join_error)) => Err(anyhow!("X11 query task failed: {join_error}")),
-        Err(_) => bail!("X server did not answer within {limit:?}"),
+    let deadline = Instant::now() + limit;
+    tokio::task::spawn_blocking(move || {
+        X11Display::connect_until(deadline).map(|display| f(&display))
+    })
+    .await
+    .map_err(|join_error| anyhow!("X11 query task failed: {join_error}"))?
+}
+
+/// The deadline is enforced in the transport itself, including handshake and
+/// every reply. Timing out a JoinHandle would leave its blocking task alive.
+struct DeadlineStream {
+    inner: DefaultStream,
+    deadline: Instant,
+}
+
+fn remaining(deadline: Instant) -> io::Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "X server query deadline exceeded"))
+}
+
+fn poll_until(fd: RawFd, mode: PollMode, deadline: Instant) -> io::Result<()> {
+    let mut pollfd = libc::pollfd {
+        fd,
+        events: (if mode.readable() { libc::POLLIN } else { 0 })
+            | (if mode.writable() { libc::POLLOUT } else { 0 }),
+        revents: 0,
+    };
+    loop {
+        let timeout = remaining(deadline)?
+            .as_millis()
+            .saturating_add(1)
+            .min(i32::MAX as u128) as i32;
+        // SAFETY: pollfd points to one valid descriptor record for this call.
+        match unsafe { libc::poll(&mut pollfd, 1, timeout) } {
+            0 => {
+                remaining(deadline)?;
+            }
+            -1 => {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+            _ => return Ok(()),
+        }
     }
 }
 
+impl Stream for DeadlineStream {
+    fn poll(&self, mode: PollMode) -> io::Result<()> {
+        poll_until(self.inner.as_raw_fd(), mode, self.deadline)
+    }
+    fn read(&self, buf: &mut [u8], fds: &mut Vec<RawFdContainer>) -> io::Result<usize> {
+        remaining(self.deadline)?;
+        self.inner.read(buf, fds)
+    }
+    fn write(&self, buf: &[u8], fds: &mut Vec<RawFdContainer>) -> io::Result<usize> {
+        remaining(self.deadline)?;
+        self.inner.write(buf, fds)
+    }
+}
+
+fn connect_unix(path: &str, deadline: Instant) -> io::Result<UnixStream> {
+    remaining(deadline)?;
+    // SAFETY: socket returns a new descriptor owned below or -1 on failure.
+    let raw = unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+            0,
+        )
+    };
+    if raw == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: raw is a new owned descriptor.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: zero is valid for sockaddr_un; all used fields are filled below.
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_family = libc::AF_UNIX as _;
+    if path.len() >= address.sun_path.len() || path.as_bytes().contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid X11 Unix socket path",
+        ));
+    }
+    for (dest, &byte) in address.sun_path.iter_mut().zip(path.as_bytes()) {
+        *dest = byte as _;
+    }
+    // SAFETY: address is initialized and the length describes the entire struct.
+    let status = unsafe {
+        libc::connect(
+            fd.as_raw_fd(),
+            (&address as *const libc::sockaddr_un).cast(),
+            std::mem::size_of_val(&address) as _,
+        )
+    };
+    if status == -1 {
+        let error = io::Error::last_os_error();
+        // Unix sockets report EAGAIN when their listen queue is full. Unlike
+        // TCP EINPROGRESS this is not an in-flight connection; fail promptly.
+        if error.raw_os_error() != Some(libc::EINPROGRESS) {
+            return Err(error);
+        }
+        poll_until(fd.as_raw_fd(), PollMode::Writable, deadline)?;
+        let stream = UnixStream::from(fd);
+        if let Some(error) = stream.take_error()? {
+            return Err(error);
+        }
+        return Ok(stream);
+    }
+    Ok(UnixStream::from(fd))
+}
+
+fn tcp_addresses(host: &str, port: u16, deadline: Instant) -> Result<Vec<SocketAddr>> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(vec![SocketAddr::new(ip, port)]);
+    }
+    if host == "localhost" {
+        return Ok(vec![
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)),
+        ]);
+    }
+    // std's hostname resolver can block indefinitely in NSS. Isolate only
+    // that lookup in the existing bounded process runner, never a detached thread.
+    let result = crate::command_runner::output_blocking_with_timeout(
+        std::process::Command::new("getent").args(["ahosts", "--", host]),
+        "resolve X11 host",
+        remaining(deadline)?,
+    )?;
+    let addresses = String::from_utf8_lossy(&result.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().next()?.parse::<IpAddr>().ok())
+        .map(|ip| SocketAddr::new(ip, port))
+        .collect::<Vec<_>>();
+    if !result.status.success() || addresses.is_empty() {
+        bail!("failed to resolve X11 host {host}");
+    }
+    Ok(addresses)
+}
+
 pub(crate) struct X11Display {
-    conn: RustConnection,
+    conn: RustConnection<DeadlineStream>,
     root: Window,
     screen: usize,
 }
@@ -92,8 +239,59 @@ impl X11Display {
     /// Connect to the display named by `DISPLAY`, authenticating with
     /// `XAUTHORITY` or `~/.Xauthority` the same way Xlib clients do.
     pub(crate) fn connect() -> Result<Self> {
-        let (conn, screen) =
-            x11rb::connect(None).context("failed to connect to the X server named by DISPLAY")?;
+        Self::connect_until(Instant::now() + X11_QUERY_TIMEOUT)
+    }
+
+    fn connect_until(deadline: Instant) -> Result<Self> {
+        let display = env::var("DISPLAY").context("DISPLAY is not set")?;
+        Self::connect_named(&display, deadline)
+    }
+
+    fn connect_named(display: &str, deadline: Instant) -> Result<Self> {
+        let parsed = parse_display(Some(display))?;
+        let screen = usize::from(parsed.screen);
+        let mut last_error = anyhow!("no X11 connection addresses");
+        let mut connected = None;
+        for address in parsed.connect_instruction() {
+            let attempt = (|| -> Result<_> {
+                match address {
+                    ConnectAddress::Socket(path) => Ok(DefaultStream::from_unix_stream(
+                        connect_unix(&path, deadline)?,
+                    )?),
+                    ConnectAddress::Hostname(host, port) => {
+                        let mut error = anyhow!("no X11 TCP addresses");
+                        for addr in tcp_addresses(host, port, deadline)? {
+                            match TcpStream::connect_timeout(&addr, remaining(deadline)?) {
+                                Ok(stream) => return Ok(DefaultStream::from_tcp_stream(stream)?),
+                                Err(e) => error = e.into(),
+                            }
+                        }
+                        Err(error)
+                    }
+                    _ => bail!("unsupported X11 address family"),
+                }
+            })();
+            match attempt {
+                Ok(stream) => {
+                    connected = Some(stream);
+                    break;
+                }
+                Err(error) => last_error = error,
+            }
+        }
+        let (inner, (family, address)) = connected
+            .ok_or(last_error)
+            .context("failed to connect to the X server named by DISPLAY")?;
+        let (auth_name, auth_data) = get_auth(family, &address, parsed.display)
+            .unwrap_or(None)
+            .unwrap_or_default();
+        let conn = RustConnection::connect_to_stream_with_auth_info(
+            DeadlineStream { inner, deadline },
+            screen,
+            auth_name,
+            auth_data,
+        )
+        .context("failed X11 connection handshake")?;
         let root = conn
             .setup()
             .roots
@@ -297,6 +495,145 @@ fn channel_to_u8(pixel: u32, mask: u32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stalled_servers_release_queries_and_runtime() {
+        const CHILD: &str = "COMPUTER_USE_LINUX_TEST_X11_DEADLINE_CHILD";
+        if env::var_os(CHILD).is_some() {
+            use std::io::{Read, Write};
+            use std::net::TcpListener;
+            use x11rb::protocol::xproto::{Screen, Setup};
+            use x11rb::reexports::x11rb_protocol::x11_utils::Serialize;
+
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            assert!(port >= 6000);
+            env::set_var("DISPLAY", format!("127.0.0.1:{}", port - 6000));
+            env::set_var("XAUTHORITY", "/dev/null");
+            let server = std::thread::spawn(move || {
+                for index in 0..6 {
+                    let (mut peer, _) = listener.accept().unwrap();
+                    let mut header = [0; 12];
+                    peer.read_exact(&mut header).unwrap();
+                    let name = u16::from_ne_bytes([header[6], header[7]]) as usize;
+                    let data = u16::from_ne_bytes([header[8], header[9]]) as usize;
+                    let mut auth = vec![0; name.div_ceil(4) * 4 + data.div_ceil(4) * 4];
+                    peer.read_exact(&mut auth).unwrap();
+                    if index >= 3 {
+                        let mut setup = Setup {
+                            status: 1,
+                            protocol_major_version: 11,
+                            resource_id_base: 0x02000000,
+                            resource_id_mask: 0x001fffff,
+                            maximum_request_length: u16::MAX,
+                            roots: vec![Screen {
+                                root: 1,
+                                width_in_pixels: 16,
+                                height_in_pixels: 16,
+                                ..Screen::default()
+                            }],
+                            ..Setup::default()
+                        };
+                        setup.length = ((setup.serialize().len() - 8) / 4) as u16;
+                        peer.write_all(&setup.serialize()).unwrap();
+                    }
+                    // Deliberately never answer handshake/reply. EOF proves
+                    // the timed-out query actually dropped its transport.
+                    let mut requests = Vec::new();
+                    peer.read_to_end(&mut requests).unwrap();
+                    if index >= 3 {
+                        assert!(!requests.is_empty());
+                    }
+                }
+            });
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let started = Instant::now();
+            runtime.block_on(async {
+                for _ in 0..3 {
+                    assert!(
+                        with_x11_display(Duration::from_millis(70), |display| display.describe())
+                            .await
+                            .is_err()
+                    );
+                }
+                // All reply consumers share the deadline, including geometry,
+                // screenshot and the pipelined per-window origin queries.
+                assert!(
+                    with_x11_display(Duration::from_millis(70), |display| display
+                        .frame_extents(1))
+                    .await
+                    .unwrap()
+                    .is_err()
+                );
+                assert!(
+                    with_x11_display(Duration::from_millis(70), |display| display.capture_root())
+                        .await
+                        .unwrap()
+                        .is_err()
+                );
+                assert_eq!(
+                    with_x11_display(Duration::from_millis(70), |display| display
+                        .client_origins(&[1, 2]))
+                    .await
+                    .unwrap(),
+                    vec![None, None]
+                );
+            });
+            // Unlike timeout(JoinHandle), the runtime has no blocked workers
+            // left to wait for, even while the fake server stays connected.
+            drop(runtime);
+            server.join().unwrap();
+            assert!(started.elapsed() < Duration::from_secs(2));
+            return;
+        }
+        // A subprocess makes runtime-exit regression fail in bounded time,
+        // rather than hanging the entire test runner on drop(Runtime).
+        let mut child = std::process::Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "x11_display::tests::stalled_servers_release_queries_and_runtime",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("X11 queries or runtime failed to terminate after transport deadlines");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn unix_connect_fails_promptly_when_listen_queue_is_full() {
+        use std::os::unix::net::UnixListener;
+        let path = format!(
+            "/tmp/computer-use-linux-x11-deadline-{}-{}",
+            std::process::id(),
+            getrandom::u64().unwrap()
+        );
+        let listener = UnixListener::bind(&path).unwrap();
+        // SAFETY: listener owns a valid listening socket; shrink its backlog.
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        let queued = UnixStream::connect(&path).unwrap();
+        let started = Instant::now();
+        assert!(connect_unix(&path, started + Duration::from_millis(70)).is_err());
+        assert!(started.elapsed() < Duration::from_millis(500));
+        drop(queued);
+        drop(listener);
+        std::fs::remove_file(path).unwrap();
+    }
 
     const BGRX: ZPixmapLayout = ZPixmapLayout {
         bits_per_pixel: 32,
