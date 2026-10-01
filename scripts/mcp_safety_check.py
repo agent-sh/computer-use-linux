@@ -256,12 +256,17 @@ def assert_screenshot_error_contract(binary: pathlib.Path) -> None:
     with tempfile.TemporaryDirectory(prefix="cul-mcp-") as temporary:
         fixture = pathlib.Path(temporary)
         # The plugin launcher still needs these commands for cached startup.
-        # Keep compositor clients and capture utilities out of the fixture PATH.
+        # The server can restore standard PATH entries during environment
+        # hydration, so shadow desktop clients before those entries are added.
         for name in ["uname", "touch", "find", "rm"]:
             command = shutil.which(name)
             if command is None:
                 raise AssertionError(f"required launcher command not found: {name}")
             (fixture / name).symlink_to(command)
+        for name in ["hyprctl", "i3-msg", "systemctl"]:
+            command = fixture / name
+            command.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            command.chmod(0o700)
         niri = fixture / "niri"
         windows_json = json.dumps(
             [{
@@ -295,7 +300,7 @@ def assert_screenshot_error_contract(binary: pathlib.Path) -> None:
                     "DBUS_SESSION_BUS_ADDRESS": f"unix:path={fixture / 'absent-bus'}",
                     "AT_SPI_BUS_ADDRESS": f"unix:path={fixture / 'absent-atspi-bus'}",
                     "WAYLAND_DISPLAY": "absent-wayland",
-                    "DISPLAY": "",
+                    "DISPLAY": "absent-x11",
                 },
             )
             try:
