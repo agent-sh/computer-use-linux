@@ -263,6 +263,11 @@ def assert_screenshot_error_contract(binary: pathlib.Path) -> None:
             if command is None:
                 raise AssertionError(f"required launcher command not found: {name}")
             (fixture / name).symlink_to(command)
+        # npm wrappers start with /usr/bin/env node before the server can
+        # restore standard PATH entries. Rust binaries do not need Node.
+        node = shutil.which("node")
+        if node is not None:
+            (fixture / "node").symlink_to(node)
         for name in ["hyprctl", "i3-msg", "systemctl"]:
             command = fixture / name
             command.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
