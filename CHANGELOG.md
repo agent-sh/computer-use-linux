@@ -7,11 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-10-01
+
 ### Fixed
 - Screenshot execution failures return MCP tool results with `isError: true`
   and the original error message. Window targeting, capture, crop, and resize
   failures no longer surface as JSON-RPC internal errors that some clients
   mistake for broken connections. (#210)
+- KWin temporary plugin sequences use the current atomic update API so
+  builds with warnings denied pass on Rust 1.99. (#211)
 
 ## [0.7.8] - 2026-10-01
 
@@ -728,7 +732,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.8...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.9...HEAD
+[0.7.9]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.8...v0.7.9
 [0.7.8]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.7...v0.7.8
 [0.7.7]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.6...v0.7.7
 [0.7.6]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.5...v0.7.6
