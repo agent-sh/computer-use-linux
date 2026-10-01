@@ -24,7 +24,7 @@ use crate::windows::{
     GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND, KWIN_BACKEND,
 };
 use crate::ydotool;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rmcp::{
     handler::server::wrapper::{Json, Parameters},
     model::{CallToolResult, ContentBlock},
@@ -535,21 +535,20 @@ impl ComputerUseLinux {
             open_world_hint = true
         )
     )]
-    async fn screenshot(
-        &self,
-        Parameters(params): Parameters<ScreenshotParams>,
-    ) -> Result<CallToolResult, ErrorData> {
+    async fn screenshot(&self, Parameters(params): Parameters<ScreenshotParams>) -> CallToolResult {
+        match self.capture_screenshot(params).await {
+            Ok(result) => result,
+            Err(error) => CallToolResult::error(vec![ContentBlock::text(format!("{error:#}"))]),
+        }
+    }
+
+    async fn capture_screenshot(&self, params: ScreenshotParams) -> Result<CallToolResult> {
         let target = params.window_target();
         let target_window = match target.as_ref() {
             Some(target) => Some(
                 self.resolve_screenshot_window(target, params.raise_window.unwrap_or(true))
                     .await
-                    .map_err(|error| {
-                        ErrorData::internal_error(
-                            format!("targeted screenshot failed: {error:#}"),
-                            None,
-                        )
-                    })?,
+                    .context("targeted screenshot failed")?,
             ),
             None => None,
         };
@@ -562,7 +561,7 @@ impl ComputerUseLinux {
 
         let raw_capture = capture_screenshot_raw()
             .await
-            .map_err(|e| ErrorData::internal_error(format!("screenshot failed: {e}"), None))?;
+            .context("screenshot failed")?;
         self.cache_desktop_size(raw_capture.width, raw_capture.height);
 
         // Warn when the target window extends past the visible desktop: the
@@ -578,19 +577,9 @@ impl ComputerUseLinux {
                 let (x, y, width, height) = self
                     .window_crop_rect_for_capture(window, &raw_capture)
                     .await
-                    .map_err(|error| {
-                        ErrorData::internal_error(
-                            format!("targeted screenshot crop failed: {error:#}"),
-                            None,
-                        )
-                    })?;
+                    .context("targeted screenshot crop failed")?;
                 let (bytes, width, height) = crop_png(&raw_capture.bytes, x, y, width, height)
-                    .map_err(|error| {
-                        ErrorData::internal_error(
-                            format!("targeted screenshot crop failed: {error}"),
-                            None,
-                        )
-                    })?;
+                    .map_err(|error| anyhow::anyhow!("targeted screenshot crop failed: {error}"))?;
                 (
                     RawScreenshotCapture {
                         mime_type: raw_capture.mime_type,
@@ -604,10 +593,8 @@ impl ComputerUseLinux {
             }
             None => (raw_capture, false),
         };
-        let capture =
-            prepare_screenshot_payload(capture, params.screenshot_options()).map_err(|e| {
-                ErrorData::internal_error(format!("screenshot resize failed: {e}"), None)
-            })?;
+        let capture = prepare_screenshot_payload(capture, params.screenshot_options())
+            .context("screenshot resize failed")?;
 
         let mut caption = serde_json::json!({
             "width": capture.width,

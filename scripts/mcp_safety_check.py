@@ -9,6 +9,8 @@ import os
 import pathlib
 import re
 import select
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -149,7 +151,13 @@ class McpClient:
                 self.process.kill()
                 self.process.wait(timeout=2)
 
-    def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def request(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        allow_protocol_error: bool = False,
+    ) -> dict[str, Any]:
         message: dict[str, Any] = {
             "jsonrpc": "2.0",
             "id": self.next_id,
@@ -159,7 +167,7 @@ class McpClient:
         if params is not None:
             message["params"] = params
         self._write(message)
-        return self._read_response(message["id"])
+        return self._read_response(message["id"], allow_protocol_error=allow_protocol_error)
 
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         message: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
@@ -172,7 +180,9 @@ class McpClient:
         self.process.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
         self.process.stdin.flush()
 
-    def _read_response(self, request_id: int) -> dict[str, Any]:
+    def _read_response(
+        self, request_id: int, *, allow_protocol_error: bool = False
+    ) -> dict[str, Any]:
         assert self.process.stdout is not None
         ready, _, _ = select.select([self.process.stdout], [], [], 5)
         if not ready:
@@ -185,7 +195,7 @@ class McpClient:
         response = json.loads(line)
         if response.get("id") != request_id:
             raise AssertionError(f"expected response id {request_id}, got {response!r}")
-        if "error" in response:
+        if "error" in response and not allow_protocol_error:
             raise AssertionError(f"MCP request {request_id} failed: {response['error']!r}")
         return response
 
@@ -237,6 +247,104 @@ def assert_tool_annotations(tool: dict[str, Any]) -> None:
             raise AssertionError(
                 f"{name} annotation {key}={annotations.get(key)!r}, expected {value!r}"
             )
+
+
+def assert_screenshot_error_contract(binary: pathlib.Path) -> None:
+    # Supply an unfocused window without connecting to the user's desktop.
+    # niri validates the socket's type before invoking its CLI, so keep a
+    # private socket bound even though the fixture CLI answers every query.
+    with tempfile.TemporaryDirectory(prefix="cul-mcp-") as temporary:
+        fixture = pathlib.Path(temporary)
+        # The plugin launcher still needs these commands for cached startup.
+        # Keep compositor clients and capture utilities out of the fixture PATH.
+        for name in ["uname", "touch", "find", "rm"]:
+            command = shutil.which(name)
+            if command is None:
+                raise AssertionError(f"required launcher command not found: {name}")
+            (fixture / name).symlink_to(command)
+        niri = fixture / "niri"
+        windows_json = json.dumps(
+            [{
+                "id": 210,
+                "title": "MCP regression window",
+                "app_id": "mcp-regression",
+                "is_focused": False,
+            }]
+        )
+        niri.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            f"  'msg --json windows') printf '%s\\n' '{windows_json}' ;;\n"
+            "  'msg --json outputs') printf '%s\\n' '{}' ;;\n"
+            "  'msg --json workspaces') printf '%s\\n' '[]' ;;\n"
+            "  *) exit 1 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        niri.chmod(0o700)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as niri_socket:
+            socket_path = fixture / "niri.sock"
+            niri_socket.bind(str(socket_path))
+            client = McpClient(
+                binary,
+                {
+                    "PATH": str(fixture),
+                    "COMPUTER_USE_LINUX_COSMIC_HELPER": str(niri),
+                    "NIRI_SOCKET": str(socket_path),
+                    "XDG_RUNTIME_DIR": str(fixture),
+                    "DBUS_SESSION_BUS_ADDRESS": f"unix:path={fixture / 'absent-bus'}",
+                    "AT_SPI_BUS_ADDRESS": f"unix:path={fixture / 'absent-atspi-bus'}",
+                    "WAYLAND_DISPLAY": "absent-wayland",
+                    "DISPLAY": "",
+                },
+            )
+            try:
+                client.request(
+                    "initialize",
+                    {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "screenshot-error-contract", "version": "0"},
+                    },
+                )
+                client.notify("notifications/initialized", {})
+                result = client.request(
+                    "tools/call",
+                    {
+                        "name": "screenshot",
+                        "arguments": {"window_id": 210, "raise_window": False},
+                    },
+                )["result"]
+                expected_error = (
+                    "targeted screenshot failed: "
+                    "raise_window=false requires the requested window to already be focused"
+                )
+                if result.get("isError") is not True or result.get("content") != [
+                    {"type": "text", "text": expected_error}
+                ]:
+                    raise AssertionError(f"screenshot execution error contract changed: {result!r}")
+
+                # A tool execution failure must leave the same MCP process usable.
+                tools = client.request("tools/list", {})["result"]["tools"]
+                if {tool["name"] for tool in tools} != EXPECTED_TOOLS:
+                    raise AssertionError("MCP tool listing changed after screenshot failure")
+
+                malformed = client.request(
+                    "tools/call",
+                    {"name": "screenshot", "arguments": {"window_id": "invalid"}},
+                )["result"]
+                if malformed.get("isError") is not True:
+                    raise AssertionError(f"malformed tool arguments lost isError: {malformed!r}")
+
+                unknown = client.request(
+                    "tools/call",
+                    {"name": "nonexistent_tool", "arguments": {}},
+                    allow_protocol_error=True,
+                )
+                if "result" in unknown or (unknown.get("error") or {}).get("code") != -32602:
+                    raise AssertionError(f"unknown tool lost its JSON-RPC error: {unknown!r}")
+            finally:
+                client.close()
 
 
 def main() -> int:
@@ -327,6 +435,8 @@ def main() -> int:
                 raise AssertionError(f"doctor report missing {section!r}: {report.keys()}")
     finally:
         client.close()
+
+    assert_screenshot_error_contract(binary)
 
     notification_client = McpClient(binary, {"COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE": "1"})
     try:

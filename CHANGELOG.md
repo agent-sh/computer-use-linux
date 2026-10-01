@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Screenshot execution failures return MCP tool results with `isError: true`
+  and the original error message. Window targeting, capture, crop, and resize
+  failures no longer surface as JSON-RPC internal errors that some clients
+  mistake for broken connections. (#210)
+
 ## [0.7.8] - 2026-10-01
 
 ### Added
