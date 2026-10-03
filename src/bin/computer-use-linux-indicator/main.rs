@@ -1393,7 +1393,9 @@ fn run() -> Result<(), String> {
                         }
                         Some(Capture::End) if !app.capture_held() => app.resume(&qh),
                         Some(Capture::End) => {}
-                        None => app.on_event(event, &qh),
+                        // Every action names its tool; anything else is noise.
+                        None if !event.tool.is_empty() => app.on_event(event, &qh),
+                        None => {}
                     }
                 }
                 Ok(PostAction::Continue)
