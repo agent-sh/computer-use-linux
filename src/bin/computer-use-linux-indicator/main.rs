@@ -28,7 +28,7 @@ use std::{
 };
 
 use computer_use_linux::indicator::{
-    socket_path, IndicatorEvent, GLIDE, HIDE_REPLY_EMPTY, HIDE_REPLY_SHOWN,
+    socket_path, IndicatorEvent, GLIDE, HIDE_REPLY_EMPTY, HIDE_REPLY_SHOWN, HIDE_SETTLE,
 };
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
@@ -273,6 +273,8 @@ struct App {
     last_action: Instant,
     shown_at: Instant,
     fading: Option<Instant>,
+    /// When surfaces were last removed; the compositor may still show them.
+    removed_at: Option<Instant>,
     sprite: Option<(u64, Pixmap)>,
     animating: bool,
     exit: bool,
@@ -335,6 +337,12 @@ impl App {
 
     fn visible(&self) -> bool {
         self.active
+    }
+
+    /// Whether a capture taken now could contain the overlay: it is shown, or
+    /// its surfaces were removed too recently for the compositor to drop them.
+    fn on_screen(&self) -> bool {
+        self.visible() || self.removed_at.is_some_and(|at| at.elapsed() < HIDE_SETTLE)
     }
 
     fn cursor_position(&self) -> Option<(f32, f32)> {
@@ -429,6 +437,9 @@ impl App {
         self.keyboard = None;
         self.fading = None;
         self.active = false;
+        if !self.panels.is_empty() {
+            self.removed_at = Some(Instant::now());
+        }
         self.panels.clear();
     }
 
@@ -1261,6 +1272,7 @@ fn run() -> Result<(), String> {
         last_action: Instant::now(),
         shown_at: Instant::now(),
         fading: None,
+        removed_at: None,
         sprite: None,
         animating: false,
         exit: false,
@@ -1296,7 +1308,7 @@ fn run() -> Result<(), String> {
                     if event.hide {
                         // Tell the capturing server whether it has to wait
                         // for the compositor to drop our surfaces.
-                        let shown = app.visible();
+                        let shown = app.on_screen();
                         app.hide();
                         let reply = if shown {
                             HIDE_REPLY_SHOWN

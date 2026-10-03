@@ -868,7 +868,7 @@ impl ComputerUseLinux {
             unreachable!("click target must resolve to coordinates or an AT-SPI action");
         };
         self.indicator
-            .pointer("click", (x, y), self.indicator_space().await)
+            .pointer("click", (x, y), self.indicator_space())
             .await;
         let button = mouse_button_code(params.button.as_deref());
         let click_count = params.click_count.unwrap_or(1).clamp(1, 10).to_string();
@@ -1093,13 +1093,20 @@ impl ComputerUseLinux {
             }
         };
 
+        // Judge the element that receives the value; one the cache does not
+        // know (e.g. a raw element_identifier) is masked.
         let secret = self
-            .cached_node_for(
-                params.element_index,
-                &params.selector(),
-                ElementResolvePurpose::SetValue,
-            )
-            .is_some_and(|node| crate::indicator::is_secret_role(&node.role));
+            .last_snapshot
+            .lock()
+            .ok()
+            .and_then(|cached| {
+                cached
+                    .nodes
+                    .iter()
+                    .find(|node| node.object_ref == object_ref)
+                    .map(|node| node.role.clone())
+            })
+            .is_none_or(|role| crate::indicator::is_secret_role(&role));
         self.indicator
             .text("set_value", &params.value, secret)
             .await;
@@ -1315,7 +1322,7 @@ impl ComputerUseLinux {
         match target_point {
             Some(point) => {
                 self.indicator
-                    .pointer("scroll", point, self.indicator_space().await)
+                    .pointer("scroll", point, self.indicator_space())
                     .await
             }
             None => self.indicator.action("scroll").await,
@@ -1464,7 +1471,7 @@ impl ComputerUseLinux {
     async fn drag(&self, Parameters(params): Parameters<DragParams>) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params));
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
-        let space = self.indicator_space().await;
+        let space = self.indicator_space();
         self.indicator
             .pointer("drag", (params.start_x, params.start_y), space)
             .await;
@@ -1760,7 +1767,8 @@ impl ComputerUseLinux {
                 });
             }
         };
-        self.indicator.text("type_text", &params.text, false).await;
+        let secret = self.typing_into_secret(focus.as_ref()).await;
+        self.indicator.text("type_text", &params.text, secret).await;
         if self.should_prefer_kde_clipboard_text_backend() {
             match self.ensure_portal_keyboard_session().await {
                 Ok(Some(session)) => {
@@ -3468,13 +3476,29 @@ impl ComputerUseLinux {
     }
 
     /// Capture size for overlay points, which are in screenshot pixels like
-    /// the click tools. Primes the size once, as the absolute pointer does.
-    async fn indicator_space(&self) -> Option<(u32, u32)> {
+    /// the click tools. Only a cached size is used: capturing the screen just
+    /// for the overlay could prompt the user.
+    fn indicator_space(&self) -> Option<(u32, u32)> {
+        *self.desktop_size.lock().ok()?
+    }
+
+    /// Whether typed text would land in a password field. Unknown counts as
+    /// yes, so the overlay never shows a secret it could not rule out.
+    async fn typing_into_secret(&self, focus: Option<&WindowFocusResult>) -> bool {
         if !self.indicator.enabled() {
-            return None;
+            return true;
         }
-        let (_, _, width, height) = self.capture_space_rect().await?;
-        Some((u32::try_from(width).ok()?, u32::try_from(height).ok()?))
+        let pid = focus.and_then(|focus| {
+            focus
+                .focused_window
+                .as_ref()
+                .and_then(|window| window.pid)
+                .or(focus.requested_window.pid)
+        });
+        match timeout(Duration::from_millis(250), probe_focused_element(pid)).await {
+            Ok(Ok(FocusProbe::Found(element))) => crate::indicator::is_secret_role(&element.role),
+            _ => true,
+        }
     }
 
     /// COORDINATE SPACES: window bounds (list_windows / extension frame rects)

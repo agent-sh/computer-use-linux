@@ -46,7 +46,7 @@ const BINARY_ENV: &str = "COMPUTER_USE_LINUX_INDICATOR_BIN";
 /// this long so the cursor lands before the real input happens.
 pub const GLIDE: Duration = Duration::from_millis(350);
 /// Time for the compositor to drop overlay surfaces before a capture.
-const HIDE_SETTLE: Duration = Duration::from_millis(120);
+pub const HIDE_SETTLE: Duration = Duration::from_millis(120);
 /// How long to wait for the overlay to answer `hide`.
 const HIDE_REPLY_WAIT: Duration = Duration::from_millis(100);
 const SPAWN_WAIT: Duration = Duration::from_secs(1);
@@ -159,6 +159,8 @@ pub(crate) struct Indicator {
     agent_override: Option<String>,
     peer: OnceLock<Peer<RoleServer>>,
     socket: Option<UnixDatagram>,
+    /// The overlay's socket.
+    path: Option<PathBuf>,
     overlay: Mutex<Overlay>,
 }
 
@@ -178,6 +180,7 @@ impl Default for Indicator {
                 .filter(|name| !name.trim().is_empty()),
             peer: OnceLock::new(),
             socket,
+            path: socket_path(),
             overlay: Mutex::new(Overlay::NotStarted),
         }
     }
@@ -292,13 +295,18 @@ impl Indicator {
         }
         let deadline = Instant::now() + HIDE_REPLY_WAIT;
         while Instant::now() < deadline {
-            if let Ok(len) = socket.recv(&mut reply) {
-                if &reply[..len] == HIDE_REPLY_EMPTY {
-                    return;
+            match socket.recv_from(&mut reply) {
+                // Only the overlay's socket, in the user's private runtime
+                // directory, may waive the wait.
+                Ok((len, from)) if from.as_pathname() == self.path.as_deref() => {
+                    if &reply[..len] == HIDE_REPLY_EMPTY {
+                        return;
+                    }
+                    break;
                 }
-                break;
+                Ok(_) => {}
+                Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
         }
         // Shown, or no answer (an older overlay): assume it was visible.
         tokio::time::sleep(HIDE_SETTLE).await;
@@ -310,7 +318,7 @@ impl Indicator {
     }
 
     fn send_raw(&self, event: &IndicatorEvent) -> bool {
-        let (Some(socket), Some(path)) = (&self.socket, socket_path()) else {
+        let (Some(socket), Some(path)) = (&self.socket, &self.path) else {
             return false;
         };
         let Ok(payload) = serde_json::to_vec(event) else {
@@ -324,13 +332,13 @@ impl Indicator {
         if !self.enabled {
             return false;
         }
-        let (Some(socket), Some(path)) = (&self.socket, socket_path()) else {
+        let (Some(socket), Some(path)) = (&self.socket, &self.path) else {
             return false;
         };
         let Ok(payload) = serde_json::to_vec(event) else {
             return false;
         };
-        let sent = match socket.send_to(&payload, &path) {
+        let sent = match socket.send_to(&payload, path) {
             Ok(_) => true,
             Err(error)
                 if matches!(
@@ -338,7 +346,7 @@ impl Indicator {
                     ErrorKind::NotFound | ErrorKind::ConnectionRefused
                 ) =>
             {
-                self.start_overlay(&path).await && socket.send_to(&payload, &path).is_ok()
+                self.start_overlay(path).await && socket.send_to(&payload, path).is_ok()
             }
             Err(_) => false,
         };
@@ -452,6 +460,61 @@ mod tests {
         assert!(is_secret_role("PasswordText"));
         assert!(!is_secret_role("text"));
         assert!(!is_secret_role("entry"));
+    }
+
+    /// An enabled sender talking to a stand-in overlay at `path`.
+    fn sender_for(path: &Path) -> Indicator {
+        let socket = client_socket().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        Indicator {
+            enabled: true,
+            mask_text: false,
+            agent_override: None,
+            peer: OnceLock::new(),
+            socket: Some(socket),
+            path: Some(path.to_path_buf()),
+            overlay: Mutex::new(Overlay::Unavailable),
+        }
+    }
+
+    /// Runs `before_capture` against a stand-in overlay that answers `reply`
+    /// from its own socket, or from another one when `spoofed`, and returns
+    /// how long the capture was held.
+    async fn hold_with_reply(name: &str, reply: &'static [u8], spoofed: bool) -> Duration {
+        let dir = std::env::temp_dir().join(format!("cul-hold-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let overlay = UnixDatagram::bind(dir.join(SOCKET_NAME)).unwrap();
+        let impostor = UnixDatagram::bind(dir.join("impostor.sock")).unwrap();
+        let sender = sender_for(&dir.join(SOCKET_NAME));
+        let answer = std::thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            let (_, from) = overlay.recv_from(&mut buf).unwrap();
+            let via = if spoofed { &impostor } else { &overlay };
+            via.send_to_addr(reply, &from).unwrap();
+        });
+        let started = Instant::now();
+        sender.before_capture().await;
+        let held = started.elapsed();
+        answer.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        held
+    }
+
+    #[tokio::test]
+    async fn captures_wait_only_while_the_overlay_was_on_screen() {
+        assert!(hold_with_reply("empty", HIDE_REPLY_EMPTY, false).await < HIDE_SETTLE);
+        assert!(hold_with_reply("shown", HIDE_REPLY_SHOWN, false).await >= HIDE_SETTLE);
+        // Only the overlay's own socket may waive the wait.
+        assert!(hold_with_reply("spoofed", HIDE_REPLY_EMPTY, true).await >= HIDE_SETTLE);
+    }
+
+    #[tokio::test]
+    async fn captures_skip_the_wait_without_an_overlay() {
+        let path = std::env::temp_dir().join(format!("cul-none-{}.sock", std::process::id()));
+        let started = Instant::now();
+        sender_for(&path).before_capture().await;
+        assert!(started.elapsed() < HIDE_SETTLE);
     }
 
     #[test]
