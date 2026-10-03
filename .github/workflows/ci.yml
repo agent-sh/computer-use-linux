@@ -140,6 +140,7 @@ jobs:
           prefix="$RUNNER_TEMP/npm-prefix"
           COMPUTER_USE_LINUX_LOCAL_BINARY="$PWD/target/debug/computer-use-linux" \
           COMPUTER_USE_LINUX_LOCAL_COSMIC_HELPER="$PWD/target/debug/computer-use-linux-cosmic" \
+          COMPUTER_USE_LINUX_LOCAL_INDICATOR="$PWD/target/debug/computer-use-linux-indicator" \
             npm install --prefix "$prefix" -g .
           "$prefix/bin/computer-use-linux" --help
       - run: npm run pack:check
@@ -184,6 +185,7 @@ jobs:
           package="$(npm pack --pack-destination "$RUNNER_TEMP" --silent)"
           COMPUTER_USE_LINUX_LOCAL_BINARY="$PWD/target/debug/computer-use-linux" \
           COMPUTER_USE_LINUX_LOCAL_COSMIC_HELPER="$PWD/target/debug/computer-use-linux-cosmic" \
+          COMPUTER_USE_LINUX_LOCAL_INDICATOR="$PWD/target/debug/computer-use-linux-indicator" \
             npm install --prefix "$prefix" "$RUNNER_TEMP/$package" --no-audit --no-fund
           test -x "$prefix/node_modules/@agent-sh/computer-use-linux/npm/bin/computer-use-linux-linux-x64"
           COMPUTER_USE_LINUX_EXTENSION_PATH="$prefix/node_modules/@agent-sh/computer-use-linux/pi/extension/index.ts" \
@@ -244,10 +246,12 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/computer-use-linux dist/${{ matrix.asset }}
           cp target/${{ matrix.target }}/release/computer-use-linux-cosmic dist/computer-use-linux-cosmic-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/computer-use-linux-indicator dist/computer-use-linux-indicator-${{ matrix.target }}
           (
             cd dist
             sha256sum ${{ matrix.asset }} > ${{ matrix.asset }}.sha256
             sha256sum computer-use-linux-cosmic-${{ matrix.target }} > computer-use-linux-cosmic-${{ matrix.target }}.sha256
+            sha256sum computer-use-linux-indicator-${{ matrix.target }} > computer-use-linux-indicator-${{ matrix.target }}.sha256
           )
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
@@ -256,6 +260,8 @@ jobs:
             dist/${{ matrix.asset }}.sha256
             dist/computer-use-linux-cosmic-${{ matrix.target }}
             dist/computer-use-linux-cosmic-${{ matrix.target }}.sha256
+            dist/computer-use-linux-indicator-${{ matrix.target }}
+            dist/computer-use-linux-indicator-${{ matrix.target }}.sha256
           generate_release_notes: true
 
   publish-crate:
@@ -305,7 +311,9 @@ jobs:
             computer-use-linux-x86_64-unknown-linux-gnu \
             computer-use-linux-aarch64-unknown-linux-gnu \
             computer-use-linux-cosmic-x86_64-unknown-linux-gnu \
-            computer-use-linux-cosmic-aarch64-unknown-linux-gnu
+            computer-use-linux-cosmic-aarch64-unknown-linux-gnu \
+            computer-use-linux-indicator-x86_64-unknown-linux-gnu \
+            computer-use-linux-indicator-aarch64-unknown-linux-gnu
           do
             for suffix in "" ".sha256"; do
               for attempt in {1..30}; do

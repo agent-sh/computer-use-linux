@@ -20,6 +20,10 @@ path = "src/main.rs"
 name = "computer-use-linux-cosmic"
 path = "src/bin/computer-use-linux-cosmic.rs"
 
+[[bin]]
+name = "computer-use-linux-indicator"
+path = "src/bin/computer-use-linux-indicator/main.rs"
+
 [dependencies]
 mimalloc = { version = "0.1", default-features = false }
 anyhow = "1.0.102"
@@ -43,6 +47,10 @@ schemars = "1.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.11.0"
+skrifa = { version = "0.42", default-features = false, features = ["std"] }
+# The indicator overlay: layer-shell surfaces drawn on the CPU into shm buffers.
+smithay-client-toolkit = { version = "0.21.1", default-features = false, features = ["calloop"] }
+tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd"] }
 tokio = { version = "1.51.1", features = ["io-util", "macros", "process", "rt", "signal", "sync", "time"] }
 wayland-client = "0.31.11"
 wayland-protocols = { version = "0.32.9", features = ["client", "staging"] }

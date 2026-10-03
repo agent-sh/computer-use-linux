@@ -21,9 +21,11 @@ OS_RELEASE_FILE="${COMPUTER_USE_LINUX_OS_RELEASE_FILE:-/etc/os-release}"
 UINPUT_DEVICE="${COMPUTER_USE_LINUX_UINPUT_DEVICE:-/dev/uinput}"
 BIN_NAME="computer-use-linux"
 COSMIC_HELPER_NAME="computer-use-linux-cosmic"
+INDICATOR_NAME="computer-use-linux-indicator"
 INSTALL_DIR="${HOME}/.local/bin"
 INSTALL_PATH="${INSTALL_DIR}/${BIN_NAME}"
 COSMIC_HELPER_INSTALL_PATH="${INSTALL_DIR}/${COSMIC_HELPER_NAME}"
+INDICATOR_INSTALL_PATH="${INSTALL_DIR}/${INDICATOR_NAME}"
 EXT_UUID="computer-use-linux@avifenesh.dev"
 EXT_SRC_DIR="${SCRIPT_DIR}/gnome-shell-extension/${EXT_UUID}"
 
@@ -78,7 +80,7 @@ Steps (run in order, each idempotent):
   1. Detect distro + display server
   2. Install system packages (apt/dnf/pacman)
   3. Install rustup toolchain
-  4. cargo build --release  →  ~/.local/bin/${BIN_NAME} and ${COSMIC_HELPER_NAME}
+  4. cargo build --release  →  ~/.local/bin/${BIN_NAME}, ${COSMIC_HELPER_NAME} and ${INDICATOR_NAME}
   5. Enable AT-SPI toolkit accessibility (GNOME)
   6. Install + enable ydotoold systemd --user service when available
   7. Pack/install/enable GNOME Shell extension (Wayland + GNOME)
@@ -87,7 +89,7 @@ Steps (run in order, each idempotent):
 Flags:
   --skip-system-deps      skip apt/dnf/pacman package install
   --skip-rust             skip rustup install
-  --skip-build            skip cargo build (assumes target/release/${BIN_NAME} and ${COSMIC_HELPER_NAME} exist)
+  --skip-build            skip cargo build (assumes target/release/${BIN_NAME}, ${COSMIC_HELPER_NAME} and ${INDICATOR_NAME} exist)
   --skip-atspi            skip toolkit-accessibility gsetting
   --skip-ydotool          skip ydotoold user-service setup
   --skip-gnome-extension  skip GNOME Shell extension install
@@ -375,9 +377,10 @@ build_and_install() {
     log_section "Step 4/9 — build & install binary"
     local built="${SCRIPT_DIR}/target/release/${BIN_NAME}"
     local cosmic_helper_built="${SCRIPT_DIR}/target/release/${COSMIC_HELPER_NAME}"
+    local indicator_built="${SCRIPT_DIR}/target/release/${INDICATOR_NAME}"
 
     if [[ ${SKIP_BUILD} -eq 1 ]]; then
-        log_skip "--skip-build (expecting prebuilt binaries at ${built} and ${cosmic_helper_built})"
+        log_skip "--skip-build (expecting prebuilt binaries at ${built}, ${cosmic_helper_built} and ${indicator_built})"
     else
         ( cd "${SCRIPT_DIR}" && cargo build --release ) || { log_fail "cargo build failed"; return 1; }
         log_ok "cargo build --release succeeded"
@@ -385,6 +388,7 @@ build_and_install() {
 
     [[ -x "${built}" ]] || { log_fail "binary not found at ${built}"; return 1; }
     [[ -x "${cosmic_helper_built}" ]] || { log_fail "COSMIC helper not found at ${cosmic_helper_built}"; return 1; }
+    [[ -x "${indicator_built}" ]] || { log_fail "indicator overlay not found at ${indicator_built}"; return 1; }
 
     mkdir -p "${INSTALL_DIR}"
     if [[ -f "${INSTALL_PATH}" ]] && cmp -s "${built}" "${INSTALL_PATH}"; then
@@ -398,6 +402,12 @@ build_and_install() {
     else
         install -m 0755 "${cosmic_helper_built}" "${COSMIC_HELPER_INSTALL_PATH}"
         log_ok "installed ${COSMIC_HELPER_INSTALL_PATH}"
+    fi
+    if [[ -f "${INDICATOR_INSTALL_PATH}" ]] && cmp -s "${indicator_built}" "${INDICATOR_INSTALL_PATH}"; then
+        log_ok "indicator overlay already up to date at ${INDICATOR_INSTALL_PATH}"
+    else
+        install -m 0755 "${indicator_built}" "${INDICATOR_INSTALL_PATH}"
+        log_ok "installed ${INDICATOR_INSTALL_PATH}"
     fi
 
     case ":${PATH}:" in

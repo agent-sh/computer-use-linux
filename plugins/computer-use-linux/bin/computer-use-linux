@@ -36,6 +36,7 @@ cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/computer-use-linux/plugin"
 cache_dir="$cache_root/v$version"
 binary="$cache_dir/computer-use-linux"
 helper="$cache_dir/computer-use-linux-cosmic"
+indicator="$cache_dir/computer-use-linux-indicator"
 
 fetch() {
   if command -v curl >/dev/null 2>&1; then
@@ -64,7 +65,7 @@ install_release() {
   trap 'exit 130' INT
   trap 'exit 143' TERM
 
-  for name in computer-use-linux computer-use-linux-cosmic; do
+  for name in computer-use-linux computer-use-linux-cosmic computer-use-linux-indicator; do
     asset="$name-$target"
     say "downloading $asset v$version"
     fetch "$base/$asset" "$tmp/$name"
@@ -79,15 +80,16 @@ install_release() {
   done
 
   # Concurrent first starts each stage their own copy; rename keeps the swap
-  # atomic, and the helper lands before the main binary that gates reuse.
+  # atomic, and the helpers land before the main binary that gates reuse.
   mkdir -p "$cache_dir"
   mv -f "$tmp/computer-use-linux-cosmic" "$helper"
+  mv -f "$tmp/computer-use-linux-indicator" "$indicator"
   mv -f "$tmp/computer-use-linux" "$binary"
   rm -rf "$tmp"
   trap - EXIT INT TERM
 }
 
-if [ ! -x "$binary" ] || [ ! -x "$helper" ]; then
+if [ ! -x "$binary" ] || [ ! -x "$helper" ] || [ ! -x "$indicator" ]; then
   install_release
 fi
 
@@ -102,6 +104,10 @@ find "$cache_root" -mindepth 1 -maxdepth 1 \
 if [ -z "${COMPUTER_USE_LINUX_COSMIC_HELPER:-}" ]; then
   COMPUTER_USE_LINUX_COSMIC_HELPER="$helper"
   export COMPUTER_USE_LINUX_COSMIC_HELPER
+fi
+if [ -z "${COMPUTER_USE_LINUX_INDICATOR_BIN:-}" ]; then
+  COMPUTER_USE_LINUX_INDICATOR_BIN="$indicator"
+  export COMPUTER_USE_LINUX_INDICATOR_BIN
 fi
 
 exec "$binary" "$@"

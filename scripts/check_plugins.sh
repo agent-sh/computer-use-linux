@@ -55,6 +55,7 @@ if [ "${1:-}" != "--binary" ]; then
 fi
 binary=$2
 helper="$(dirname -- "$binary")/computer-use-linux-cosmic"
+indicator="$(dirname -- "$binary")/computer-use-linux-indicator"
 
 case "$(uname -m)" in
   x86_64 | amd64) target=x86_64-unknown-linux-gnu ;;
@@ -67,11 +68,12 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 mkdir "$tmp/release"
 cp "$binary" "$tmp/release/computer-use-linux-$target"
 cp "$helper" "$tmp/release/computer-use-linux-cosmic-$target"
+cp "$indicator" "$tmp/release/computer-use-linux-indicator-$target"
 (cd "$tmp/release" && for asset in *; do sha256sum "$asset" >"$asset.sha256"; done)
 
 export XDG_CACHE_HOME="$tmp/cache"
 export COMPUTER_USE_LINUX_DOWNLOAD_BASE="file://$tmp/release"
-unset COMPUTER_USE_LINUX_BIN COMPUTER_USE_LINUX_COSMIC_HELPER
+unset COMPUTER_USE_LINUX_BIN COMPUTER_USE_LINUX_COSMIC_HELPER COMPUTER_USE_LINUX_INDICATOR_BIN
 
 good_sha=$(cat "$tmp/release/computer-use-linux-cosmic-$target.sha256")
 echo "0000000000000000000000000000000000000000000000000000000000000000  x" \

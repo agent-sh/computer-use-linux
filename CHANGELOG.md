@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- On-screen indicator, on by default: `computer-use-linux-indicator` draws a
+  software cursor that glides to each pointer target (element-targeted actions
+  included) and ripples on click, keycaps and a typing line for keyboard input,
+  an edge glow, and a status pill naming the agent from the MCP `clientInfo`.
+  Pointer actions wait 350 ms for the cursor to land; the overlay is hidden
+  before screen captures. Needs `wlr-layer-shell`; set
+  `COMPUTER_USE_LINUX_INDICATOR=0` to turn it off. Installed by `./install.sh`,
+  `cargo install`, npm, and published as a release asset.
+
 ## [0.7.10] - 2026-10-01
 
 ### Security
