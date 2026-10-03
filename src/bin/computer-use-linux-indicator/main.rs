@@ -1319,7 +1319,12 @@ fn run() -> Result<(), String> {
                 app.exit = true;
                 return TimeoutAction::Drop;
             }
-            TimeoutAction::ToDuration(EXIT_AFTER_IDLE)
+            // Check again when the latest action turns ten minutes old.
+            TimeoutAction::ToDuration(
+                EXIT_AFTER_IDLE
+                    .saturating_sub(app.last_action.elapsed())
+                    .max(Duration::from_secs(1)),
+            )
         })
         .map_err(|error| error.to_string())?;
 
