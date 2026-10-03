@@ -27,7 +27,6 @@ path = "src/bin/computer-use-linux-indicator/main.rs"
 [dependencies]
 mimalloc = { version = "0.1", default-features = false }
 anyhow = "1.0.102"
-ab_glyph = "0.2.32"
 # atspi without its "connection" feature: that feature pulls atspi-connection
 # with default features, which include "p2p" — and p2p peer enumeration during
 # connect() calls GetInterfaces on every a11y-bus peer, so a single
@@ -39,7 +38,6 @@ atspi-connection = { version = "0.13.0", default-features = false, features = ["
 base64 = "0.22.1"
 evdev = "0.13.2"
 cosmic-protocols = { version = "0.2.0", default-features = false, features = ["client"] }
-fontdb = "0.24.0"
 futures-util = "0.3.32"
 getrandom = "0.4.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
@@ -49,6 +47,7 @@ schemars = "1.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.11.0"
+skrifa = { version = "0.42", default-features = false, features = ["std"] }
 # The indicator overlay: layer-shell surfaces drawn on the CPU into shm buffers.
 smithay-client-toolkit = { version = "0.21.1", default-features = false, features = ["calloop"] }
 tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd"] }

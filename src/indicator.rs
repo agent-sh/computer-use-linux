@@ -88,7 +88,8 @@ pub fn agent_display_name(name: &str, title: Option<&str>) -> String {
     if let Some((_, display)) = known.iter().find(|(needle, _)| lower.contains(needle)) {
         return (*display).to_string();
     }
-    if lower == "pi" || lower.starts_with("pi-") {
+    // Pi's native extension identifies as `computer-use-linux-pi`.
+    if lower == "pi" || lower.starts_with("pi-") || lower.ends_with("-pi") {
         return "Pi".to_string();
     }
     if let Some(title) = title.map(str::trim).filter(|title| !title.is_empty()) {
@@ -389,6 +390,7 @@ mod tests {
         assert_eq!(agent_display_name("codex-mcp-client", None), "Codex");
         assert_eq!(agent_display_name("opencode", None), "OpenCode");
         assert_eq!(agent_display_name("pi", None), "Pi");
+        assert_eq!(agent_display_name("computer-use-linux-pi", None), "Pi");
         assert_eq!(
             agent_display_name("pipeline", Some("Pipeline Bot")),
             "Pipeline Bot"

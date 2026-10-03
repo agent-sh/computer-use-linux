@@ -921,8 +921,6 @@ impl App {
                 }
             }
             Keyboard::Text(text) => {
-                let icon = "⌨";
-                let icon_w = font::measure(&fonts.regular, 14.0, icon);
                 let shown: String = {
                     let chars: Vec<char> = text.chars().collect();
                     if chars.len() > 40 {
@@ -934,18 +932,10 @@ impl App {
                     }
                 };
                 let text_w = font::measure(&fonts.regular, 13.0, &shown);
-                let w = pad + icon_w + 8.0 + text_w + 4.0 + 2.0 + pad;
+                let w = pad + text_w + 4.0 + 2.0 + pad;
                 self.bubble_frame(pixmap, scale, (x, y, w, h), color, alpha);
                 let baseline = y + pad + ascent;
-                font::draw(
-                    pixmap,
-                    &fonts.regular,
-                    14.0 * scale,
-                    ((x + pad) * scale, baseline * scale),
-                    icon,
-                    white(0.7 * alpha),
-                );
-                let tx = x + pad + icon_w + 8.0;
+                let tx = x + pad;
                 font::draw(
                     pixmap,
                     &fonts.regular,

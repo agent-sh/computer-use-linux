@@ -79,7 +79,9 @@ mcp_servers:
 The package downloads the matching Linux x86_64 or aarch64 binary from the
 GitHub release for this package version and verifies the `.sha256` asset before
 installing it. It also installs the matching `computer-use-linux-cosmic` helper
-used for COSMIC desktop window targeting.
+used for COSMIC desktop window targeting and the `computer-use-linux-indicator`
+overlay that shows agent activity on screen (`COMPUTER_USE_LINUX_INDICATOR=0`
+turns it off).
 
 When installed through Pi, the package supplies native, dynamically loaded
 `computer_use_linux_*` tools. No separate MCP adapter or manual MCP
