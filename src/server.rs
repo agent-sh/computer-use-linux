@@ -87,6 +87,8 @@ pub struct ComputerUseLinux {
     /// Cached physical desktop size from the most recent full-frame capture;
     /// used for off-screen warnings and portal logical-coordinate mapping.
     desktop_size: Arc<Mutex<Option<(u32, u32)>>>,
+    /// On-screen activity overlay (opt-out via `COMPUTER_USE_LINUX_INDICATOR=0`).
+    indicator: Arc<crate::indicator::Indicator>,
 }
 
 fn sanitize_unsigned_integer_formats(value: &mut serde_json::Value) {
@@ -310,6 +312,7 @@ impl ComputerUseLinux {
     ) -> Json<ActivateWindowOutput> {
         let target = params.into_target();
         let received = Some(serde_json::json!(target.clone()));
+        self.indicator.action("activate_window", None).await;
         match focus_window_target(&target).await {
             Ok(focus) => {
                 let ok = focus_satisfies_target(&focus, &target);
@@ -354,6 +357,18 @@ impl ComputerUseLinux {
         &self,
         Parameters(params): Parameters<GetAppStateParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let captures = params.include_screenshot.unwrap_or(true);
+        if captures {
+            self.indicator.before_capture().await;
+        }
+        let result = self.app_state(params).await;
+        if captures {
+            self.indicator.after_capture("get_app_state").await;
+        }
+        result
+    }
+
+    async fn app_state(&self, params: GetAppStateParams) -> Result<CallToolResult, ErrorData> {
         let verbose = params.verbose.unwrap_or(false);
         let diagnostics = tokio::task::spawn_blocking(doctor_report)
             .await
@@ -536,10 +551,13 @@ impl ComputerUseLinux {
         )
     )]
     async fn screenshot(&self, Parameters(params): Parameters<ScreenshotParams>) -> CallToolResult {
-        match self.capture_screenshot(params).await {
+        self.indicator.before_capture().await;
+        let result = match self.capture_screenshot(params).await {
             Ok(result) => result,
             Err(error) => CallToolResult::error(vec![ContentBlock::text(format!("{error:#}"))]),
-        }
+        };
+        self.indicator.after_capture("screenshot").await;
+        result
     }
 
     async fn capture_screenshot(&self, params: ScreenshotParams) -> Result<CallToolResult> {
@@ -802,6 +820,14 @@ impl ComputerUseLinux {
             action_index,
         } = target
         {
+            let point = self
+                .cached_node_for(
+                    params.element_index,
+                    &params.selector(),
+                    ElementResolvePurpose::Click,
+                )
+                .and_then(|node| node.bounds.as_ref().and_then(bounds_center));
+            self.indicator.action("click", point).await;
             let invocation = if let Some(name) = action_name
                 .as_deref()
                 .filter(|name| !name.trim().is_empty())
@@ -848,6 +874,7 @@ impl ComputerUseLinux {
         let ClickTarget::Coordinates(x, y) = target else {
             unreachable!("click target must resolve to coordinates or an AT-SPI action");
         };
+        self.indicator.pointer("click", (x, y)).await;
         let button = mouse_button_code(params.button.as_deref());
         let click_count = params.click_count.unwrap_or(1).clamp(1, 10).to_string();
         // Preferred backend: the uinput absolute pointer. Unlike ydotool's
@@ -1071,6 +1098,16 @@ impl ComputerUseLinux {
             }
         };
 
+        let point = self
+            .cached_node_for(
+                params.element_index,
+                &params.selector(),
+                ElementResolvePurpose::SetValue,
+            )
+            .and_then(|node| node.bounds.as_ref().and_then(bounds_center));
+        self.indicator
+            .text("set_value", &params.value, point)
+            .await;
         match set_element_value(&object_ref, &params.value).await {
             Ok(ValueSetInvocation::Numeric { value }) => Json(ActionOutput {
                 ok: true,
@@ -1280,6 +1317,7 @@ impl ComputerUseLinux {
                 });
             }
         };
+        self.indicator.action("scroll", target_point).await;
         let off_screen_note = match target_point {
             Some((x, y)) => self.off_screen_note_for_point(x, y).await,
             None => None,
@@ -1424,6 +1462,13 @@ impl ComputerUseLinux {
     async fn drag(&self, Parameters(params): Parameters<DragParams>) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params));
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        self.indicator
+            .pointer("drag", (params.start_x, params.start_y))
+            .await;
+        // Lead the overlay cursor to the drop point while the drag runs.
+        self.indicator
+            .follow("drag", (params.end_x, params.end_y))
+            .await;
         // Preferred backend: the uinput absolute pointer (accurate landing).
         if self.ensure_abs_pointer().await {
             let abs_pointer = Arc::clone(&self.abs_pointer);
@@ -1556,6 +1601,7 @@ impl ComputerUseLinux {
                 });
             }
         };
+        self.indicator.keys(&params.key).await;
         let Some((chord_modifiers, chord_key)) = key_chord(&params.key) else {
             return Json(ActionOutput {
                 ok: false,
@@ -1711,6 +1757,7 @@ impl ComputerUseLinux {
                 });
             }
         };
+        self.indicator.text("type_text", &params.text, None).await;
         if self.should_prefer_kde_clipboard_text_backend() {
             match self.ensure_portal_keyboard_session().await {
                 Ok(Some(session)) => {
@@ -1895,6 +1942,7 @@ impl ComputerUseLinux {
     ) -> Json<WindowGeometryOutput> {
         let received = Some(serde_json::json!(params.clone()));
         let target = params.target.clone().into_target();
+        self.indicator.action("move_window", None).await;
         self.window_geometry_op(received, &target, |window| async move {
             registry::move_window(&window, params.x, params.y).await
         })
@@ -1917,6 +1965,7 @@ impl ComputerUseLinux {
     ) -> Json<WindowGeometryOutput> {
         let received = Some(serde_json::json!(params.clone()));
         let target = params.target.clone().into_target();
+        self.indicator.action("resize_window", None).await;
         self.window_geometry_op(received, &target, |window| async move {
             registry::resize_window(&window, params.width, params.height).await
         })
@@ -2211,11 +2260,12 @@ async fn execute_shell(params: RunShellParams) -> RunShellOutput {
 }
 
 pub async fn serve_mcp() -> Result<()> {
-    ComputerUseLinux::default()
-        .serve(rmcp::transport::stdio())
-        .await?
-        .waiting()
-        .await?;
+    let server = ComputerUseLinux::default();
+    let indicator = Arc::clone(&server.indicator);
+    let running = server.serve(rmcp::transport::stdio()).await?;
+    // The handshake is done, so the peer knows the client's name.
+    indicator.attach(running.peer().clone());
+    running.waiting().await?;
     Ok(())
 }
 
@@ -3864,6 +3914,14 @@ impl ComputerUseLinux {
             }
         };
 
+        let point = self
+            .cached_node_for(
+                params.element_index,
+                &params.selector(),
+                ElementResolvePurpose::Action,
+            )
+            .and_then(|node| node.bounds.as_ref().and_then(bounds_center));
+        self.indicator.action("perform_action", point).await;
         match invoke_accessibility_action(&object_ref, requested_action).await {
             Ok(invocation) => Json(ActionOutput {
                 ok: invocation.ok,
