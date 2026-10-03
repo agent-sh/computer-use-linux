@@ -358,12 +358,9 @@ impl ComputerUseLinux {
         Parameters(params): Parameters<GetAppStateParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let captures = params.include_screenshot.unwrap_or(true);
-        if captures {
-            self.indicator.before_capture().await;
-        }
         let result = self.app_state(params).await;
         if captures {
-            self.indicator.after_capture("get_app_state").await;
+            self.indicator.action("get_app_state").await;
         }
         result
     }
@@ -393,7 +390,10 @@ impl ComputerUseLinux {
             .await;
         let (screenshot, screenshot_error) = if include_screenshot {
             let result: Result<ScreenshotCapture> = async {
-                let raw = capture_screenshot_raw().await?;
+                let raw = {
+                    let _hold = self.indicator.hold_for_capture().await;
+                    capture_screenshot_raw().await?
+                };
                 self.cache_desktop_size(raw.width, raw.height);
                 if let Some(window) = window_context.as_ref() {
                     ensure_readonly_screenshot_target_is_visible(window)?;
@@ -551,12 +551,11 @@ impl ComputerUseLinux {
         )
     )]
     async fn screenshot(&self, Parameters(params): Parameters<ScreenshotParams>) -> CallToolResult {
-        self.indicator.before_capture().await;
         let result = match self.capture_screenshot(params).await {
             Ok(result) => result,
             Err(error) => CallToolResult::error(vec![ContentBlock::text(format!("{error:#}"))]),
         };
-        self.indicator.after_capture("screenshot").await;
+        self.indicator.action("screenshot").await;
         result
     }
 
@@ -577,9 +576,12 @@ impl ComputerUseLinux {
             .as_ref()
             .and_then(|window| window.title.clone());
 
-        let raw_capture = capture_screenshot_raw()
-            .await
-            .context("screenshot failed")?;
+        let raw_capture = {
+            let _hold = self.indicator.hold_for_capture().await;
+            capture_screenshot_raw()
+                .await
+                .context("screenshot failed")?
+        };
         self.cache_desktop_size(raw_capture.width, raw_capture.height);
 
         // Warn when the target window extends past the visible desktop: the
@@ -3488,17 +3490,27 @@ impl ComputerUseLinux {
         if !self.indicator.enabled() {
             return true;
         }
-        let pid = focus.and_then(|focus| {
-            focus
-                .focused_window
-                .as_ref()
-                .and_then(|window| window.pid)
-                .or(focus.requested_window.pid)
-        });
-        match timeout(Duration::from_millis(250), probe_focused_element(pid)).await {
-            Ok(Ok(FocusProbe::Found(element))) => crate::indicator::is_secret_role(&element.role),
-            _ => true,
-        }
+        let focused_role = async {
+            let pid = match focus {
+                Some(focus) => focus
+                    .focused_window
+                    .as_ref()
+                    .and_then(|window| window.pid)
+                    .or(focus.requested_window.pid),
+                None => focused_window().await.ok().flatten()?.pid,
+            };
+            // Only the app that receives the keystrokes can tell where they
+            // land; another app may keep a stale focused element.
+            match probe_focused_element(Some(pid?)).await.ok()? {
+                FocusProbe::Found(element) => Some(element.role),
+                _ => None,
+            }
+        };
+        timeout(Duration::from_millis(250), focused_role)
+            .await
+            .ok()
+            .flatten()
+            .is_none_or(|role| crate::indicator::is_secret_role(&role))
     }
 
     /// COORDINATE SPACES: window bounds (list_windows / extension frame rects)

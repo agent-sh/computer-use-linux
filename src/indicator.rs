@@ -7,12 +7,19 @@
 //! starts the overlay on the first action. Set `COMPUTER_USE_LINUX_INDICATOR=0`
 //! to turn it off.
 //!
-//! Before a screen capture the server sends `hide` and the overlay answers
-//! with [`HIDE_REPLY_SHOWN`] or [`HIDE_REPLY_EMPTY`], so captures wait for the
-//! compositor only when something was actually on screen.
+//! Every server keeps the overlay out of its screen captures, even with its
+//! own indicator disabled, because one overlay serves all agents in the
+//! session. For the length of a capture the server holds a shared lock on
+//! [`capture_lock_path`], and the overlay draws nothing while anyone holds it.
+//! The kernel drops the lock of a server that dies, so a crash cannot freeze
+//! the overlay. `capture: begin` and `end` datagrams make the overlay react
+//! at once; it answers `begin` with [`CAPTURE_REPLY_SHOWN`] or
+//! [`CAPTURE_REPLY_EMPTY`], so a capture waits for the compositor only when
+//! something was on screen.
 
 use std::{
     env,
+    fs::{File, OpenOptions, TryLockError},
     io::ErrorKind,
     os::linux::net::SocketAddrExt,
     os::unix::net::{SocketAddr, UnixDatagram},
@@ -32,10 +39,10 @@ use serde::{Deserialize, Serialize};
 pub const INDICATOR_BINARY: &str = "computer-use-linux-indicator";
 /// Socket file name inside `$XDG_RUNTIME_DIR`.
 pub const SOCKET_NAME: &str = "computer-use-linux-indicator.sock";
-/// Reply to `hide` when the overlay had something on screen.
-pub const HIDE_REPLY_SHOWN: &[u8] = b"shown";
-/// Reply to `hide` when nothing was on screen.
-pub const HIDE_REPLY_EMPTY: &[u8] = b"empty";
+/// Reply to `capture: begin` when the overlay had something on screen.
+pub const CAPTURE_REPLY_SHOWN: &[u8] = b"shown";
+/// Reply to `capture: begin` when nothing was on screen.
+pub const CAPTURE_REPLY_EMPTY: &[u8] = b"empty";
 
 const DISABLE_ENV: &str = "COMPUTER_USE_LINUX_INDICATOR";
 const HIDE_TEXT_ENV: &str = "COMPUTER_USE_LINUX_INDICATOR_HIDE_TEXT";
@@ -47,17 +54,25 @@ const BINARY_ENV: &str = "COMPUTER_USE_LINUX_INDICATOR_BIN";
 pub const GLIDE: Duration = Duration::from_millis(350);
 /// Time for the compositor to drop overlay surfaces before a capture.
 pub const HIDE_SETTLE: Duration = Duration::from_millis(120);
-/// How long to wait for the overlay to answer `hide`.
-const HIDE_REPLY_WAIT: Duration = Duration::from_millis(100);
+/// How long to wait for the overlay to answer `capture: begin`.
+const CAPTURE_REPLY_WAIT: Duration = Duration::from_millis(100);
 const SPAWN_WAIT: Duration = Duration::from_secs(1);
 const TEXT_LIMIT: usize = 64;
+
+/// A server starting or finishing a screen capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Capture {
+    Begin,
+    End,
+}
 
 /// One overlay update.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndicatorEvent {
-    /// Remove the overlay immediately, e.g. right before a screen capture.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub hide: bool,
+    /// Capture phase; such an event carries nothing else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<Capture>,
     /// Display name of the agent, e.g. `Claude`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub agent: String,
@@ -87,6 +102,11 @@ pub fn socket_path() -> Option<PathBuf> {
     env::var_os("XDG_RUNTIME_DIR")
         .filter(|dir| !dir.is_empty())
         .map(|dir| Path::new(&dir).join(SOCKET_NAME))
+}
+
+/// Lock file held shared by every server for the length of a capture.
+pub fn capture_lock_path(socket: &Path) -> PathBuf {
+    socket.with_extension("capture")
 }
 
 /// Maps an MCP `clientInfo` to the name shown on screen.
@@ -127,19 +147,16 @@ fn disabled_value(value: Option<&str>) -> bool {
     )
 }
 
-/// Last `TEXT_LIMIT` characters, masked when requested.
+/// Last `TEXT_LIMIT` characters, or a fixed mask that does not reveal the
+/// length.
 fn shown_text(text: &str, mask: bool) -> String {
-    let tail: String = {
-        let chars: Vec<char> = text.chars().collect();
-        chars[chars.len().saturating_sub(TEXT_LIMIT)..]
-            .iter()
-            .collect()
-    };
     if mask {
-        "•".repeat(tail.chars().count())
-    } else {
-        tail
+        return "••••••••".to_string();
     }
+    let chars: Vec<char> = text.chars().collect();
+    chars[chars.len().saturating_sub(TEXT_LIMIT)..]
+        .iter()
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,7 +168,8 @@ enum Overlay {
     Unavailable,
 }
 
-/// Server-side sender. Every method is a cheap no-op when disabled.
+/// Server-side sender. Action reports are cheap no-ops when disabled;
+/// capture holds work regardless.
 #[derive(Debug)]
 pub(crate) struct Indicator {
     enabled: bool,
@@ -166,21 +184,21 @@ pub(crate) struct Indicator {
 
 impl Default for Indicator {
     fn default() -> Self {
-        // Unit tests build servers freely; they must not drive a real overlay.
-        let enabled = !cfg!(test) && !disabled_value(env::var(DISABLE_ENV).ok().as_deref());
-        let socket = enabled
+        // Unit tests build servers freely; they must not touch a real overlay.
+        let live = !cfg!(test);
+        let socket = live
             .then(client_socket)
             .flatten()
             .filter(|socket| socket.set_nonblocking(true).is_ok());
         Self {
-            enabled: socket.is_some(),
+            enabled: socket.is_some() && !disabled_value(env::var(DISABLE_ENV).ok().as_deref()),
             mask_text: env::var(HIDE_TEXT_ENV).ok().as_deref() == Some("1"),
             agent_override: env::var(AGENT_ENV)
                 .ok()
                 .filter(|name| !name.trim().is_empty()),
             peer: OnceLock::new(),
             socket,
-            path: socket_path(),
+            path: live.then(socket_path).flatten(),
             overlay: Mutex::new(Overlay::NotStarted),
         }
     }
@@ -276,31 +294,36 @@ impl Indicator {
         self.send(&event).await;
     }
 
-    /// Hides the overlay so a screen capture never contains it. The overlay is
-    /// shared by every agent in the session, so this asks it directly instead
-    /// of trusting what this server last sent.
-    pub(crate) async fn before_capture(&self) {
-        let Some(socket) = self.socket.as_ref().filter(|_| self.enabled) else {
-            return;
+    /// Keeps every overlay off the screen until the returned hold drops, and
+    /// waits until the compositor has dropped whatever was showing. Works with
+    /// this server's indicator disabled too: another agent's overlay must not
+    /// end up in this server's captures.
+    pub(crate) async fn hold_for_capture(&self) -> CaptureHold<'_> {
+        let hold = CaptureHold {
+            indicator: self,
+            lock: self.take_capture_lock().await,
+        };
+        let Some(socket) = &self.socket else {
+            return hold;
         };
         let mut reply = [0u8; 16];
         // Drop a late answer to an earlier request.
         while socket.recv(&mut reply).is_ok() {}
         if !self.send_raw(&IndicatorEvent {
-            hide: true,
+            capture: Some(Capture::Begin),
             ..Default::default()
         }) {
-            // No overlay is running, so there is nothing to hide.
-            return;
+            // No overlay is running; the lock keeps one that starts now blank.
+            return hold;
         }
-        let deadline = Instant::now() + HIDE_REPLY_WAIT;
+        let deadline = Instant::now() + CAPTURE_REPLY_WAIT;
         while Instant::now() < deadline {
             match socket.recv_from(&mut reply) {
                 // Only the overlay's socket, in the user's private runtime
                 // directory, may waive the wait.
                 Ok((len, from)) if from.as_pathname() == self.path.as_deref() => {
-                    if &reply[..len] == HIDE_REPLY_EMPTY {
-                        return;
+                    if &reply[..len] == CAPTURE_REPLY_EMPTY {
+                        return hold;
                     }
                     break;
                 }
@@ -308,13 +331,27 @@ impl Indicator {
                 Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
             }
         }
-        // Shown, or no answer (an older overlay): assume it was visible.
+        // Shown, or no answer: assume it was visible.
         tokio::time::sleep(HIDE_SETTLE).await;
+        hold
     }
 
-    /// Announces a finished capture ("looking at the screen").
-    pub(crate) async fn after_capture(&self, tool: &str) {
-        self.send(&self.event(tool)).await;
+    async fn take_capture_lock(&self) -> Option<File> {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(capture_lock_path(self.path.as_deref()?))
+            .ok()?;
+        // The overlay tests the lock exclusively for an instant; retry past it.
+        for _ in 0..20 {
+            match file.try_lock_shared() {
+                Ok(()) => return Some(file),
+                Err(TryLockError::WouldBlock) => tokio::time::sleep(Duration::from_millis(1)).await,
+                Err(TryLockError::Error(_)) => return None,
+            }
+        }
+        None
     }
 
     fn send_raw(&self, event: &IndicatorEvent) -> bool {
@@ -387,8 +424,26 @@ impl Indicator {
     }
 }
 
+/// A capture in progress. Dropping it, also when the request is cancelled,
+/// releases the lock and tells the overlay it may draw again.
+pub(crate) struct CaptureHold<'a> {
+    indicator: &'a Indicator,
+    lock: Option<File>,
+}
+
+impl Drop for CaptureHold<'_> {
+    fn drop(&mut self) {
+        // Release first, so the overlay finds the lock free.
+        drop(self.lock.take());
+        self.indicator.send_raw(&IndicatorEvent {
+            capture: Some(Capture::End),
+            ..Default::default()
+        });
+    }
+}
+
 /// A socket the overlay can answer: bound to a unique abstract address. Falls
-/// back to an unbound socket, which only loses the `hide` replies.
+/// back to an unbound socket, which only loses the capture replies.
 fn client_socket() -> Option<UnixDatagram> {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let name = format!(
@@ -402,10 +457,15 @@ fn client_socket() -> Option<UnixDatagram> {
         .ok()
 }
 
-/// Whether an AT-SPI role is a password field (`password text`, or the
-/// `PasswordText` fallback name).
+/// Whether text for an element with this AT-SPI role must be masked: a
+/// password field (`password text`, or the `PasswordText` fallback name), or
+/// a role that could not be read and so might be one.
 pub(crate) fn is_secret_role(role: &str) -> bool {
-    role.to_ascii_lowercase().contains("password")
+    let role = role.trim().to_ascii_lowercase();
+    role.is_empty()
+        || role == crate::atspi_tree::UNKNOWN_ROLE
+        || role == "invalid"
+        || role.contains("password")
 }
 
 fn overlay_binary() -> PathBuf {
@@ -462,12 +522,21 @@ mod tests {
         assert!(!is_secret_role("entry"));
     }
 
-    /// An enabled sender talking to a stand-in overlay at `path`.
-    fn sender_for(path: &Path) -> Indicator {
+    #[test]
+    fn unreadable_roles_are_secret() {
+        // `role_name` reports this when both AT-SPI role reads fail.
+        assert!(is_secret_role(crate::atspi_tree::UNKNOWN_ROLE));
+        assert!(is_secret_role("Unknown"));
+        assert!(is_secret_role("Invalid"));
+        assert!(is_secret_role(" "));
+    }
+
+    /// A sender talking to a stand-in overlay at `path`.
+    fn sender_for(path: &Path, enabled: bool) -> Indicator {
         let socket = client_socket().unwrap();
         socket.set_nonblocking(true).unwrap();
         Indicator {
-            enabled: true,
+            enabled,
             mask_text: false,
             agent_override: None,
             peer: OnceLock::new(),
@@ -477,61 +546,110 @@ mod tests {
         }
     }
 
-    /// Runs `before_capture` against a stand-in overlay that answers `reply`
-    /// from its own socket, or from another one when `spoofed`, and returns
-    /// how long the capture was held.
-    async fn hold_with_reply(name: &str, reply: &'static [u8], spoofed: bool) -> Duration {
-        let dir = std::env::temp_dir().join(format!("cul-hold-{}-{name}", std::process::id()));
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cul-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let overlay = UnixDatagram::bind(dir.join(SOCKET_NAME)).unwrap();
+        dir
+    }
+
+    /// Whether some server holds the capture lock next to `socket`.
+    fn capture_held(socket: &Path) -> bool {
+        let file = File::open(capture_lock_path(socket)).unwrap();
+        match file.try_lock() {
+            Ok(()) => false,
+            Err(TryLockError::WouldBlock) => true,
+            Err(TryLockError::Error(error)) => panic!("{error}"),
+        }
+    }
+
+    /// Takes a capture hold against a stand-in overlay that answers `begin`
+    /// with `reply`, from its own socket or, when `spoofed`, from another one.
+    /// Returns how long taking the hold took.
+    async fn hold_with_reply(name: &str, reply: &'static [u8], spoofed: bool) -> Duration {
+        let dir = scratch_dir(name);
+        let socket = dir.join(SOCKET_NAME);
+        let overlay = UnixDatagram::bind(&socket).unwrap();
         let impostor = UnixDatagram::bind(dir.join("impostor.sock")).unwrap();
-        let sender = sender_for(&dir.join(SOCKET_NAME));
+        let sender = sender_for(&socket, true);
         let answer = std::thread::spawn(move || {
             let mut buf = [0u8; 64];
-            let (_, from) = overlay.recv_from(&mut buf).unwrap();
+            let (len, from) = overlay.recv_from(&mut buf).unwrap();
+            assert_eq!(&buf[..len], br#"{"capture":"begin"}"#);
             let via = if spoofed { &impostor } else { &overlay };
             via.send_to_addr(reply, &from).unwrap();
+            let len = overlay.recv(&mut buf).unwrap();
+            assert_eq!(&buf[..len], br#"{"capture":"end"}"#);
         });
         let started = Instant::now();
-        sender.before_capture().await;
-        let held = started.elapsed();
+        let hold = sender.hold_for_capture().await;
+        let took = started.elapsed();
+        assert!(capture_held(&socket));
+        drop(hold);
+        assert!(!capture_held(&socket));
         answer.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
-        held
+        took
     }
 
     #[tokio::test]
     async fn captures_wait_only_while_the_overlay_was_on_screen() {
-        assert!(hold_with_reply("empty", HIDE_REPLY_EMPTY, false).await < HIDE_SETTLE);
-        assert!(hold_with_reply("shown", HIDE_REPLY_SHOWN, false).await >= HIDE_SETTLE);
+        assert!(hold_with_reply("empty", CAPTURE_REPLY_EMPTY, false).await < HIDE_SETTLE);
+        assert!(hold_with_reply("shown", CAPTURE_REPLY_SHOWN, false).await >= HIDE_SETTLE);
         // Only the overlay's own socket may waive the wait.
-        assert!(hold_with_reply("spoofed", HIDE_REPLY_EMPTY, true).await >= HIDE_SETTLE);
+        assert!(hold_with_reply("spoofed", CAPTURE_REPLY_EMPTY, true).await >= HIDE_SETTLE);
     }
 
     #[tokio::test]
-    async fn captures_skip_the_wait_without_an_overlay() {
-        let path = std::env::temp_dir().join(format!("cul-none-{}.sock", std::process::id()));
+    async fn captures_hold_the_lock_without_an_overlay() {
+        // An overlay another agent starts mid-capture must still stay blank.
+        let dir = scratch_dir("none");
+        let socket = dir.join(SOCKET_NAME);
+        let sender = sender_for(&socket, true);
         let started = Instant::now();
-        sender_for(&path).before_capture().await;
+        let hold = sender.hold_for_capture().await;
         assert!(started.elapsed() < HIDE_SETTLE);
+        assert!(capture_held(&socket));
+        drop(hold);
+        assert!(!capture_held(&socket));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn disabled_servers_still_hold_captures() {
+        let dir = scratch_dir("disabled");
+        let socket = dir.join(SOCKET_NAME);
+        let overlay = UnixDatagram::bind(&socket).unwrap();
+        overlay.set_nonblocking(true).unwrap();
+        let sender = sender_for(&socket, false);
+        let hold = sender.hold_for_capture().await;
+        assert!(capture_held(&socket));
+        let mut buf = [0u8; 64];
+        let len = overlay.recv(&mut buf).unwrap();
+        assert_eq!(&buf[..len], br#"{"capture":"begin"}"#);
+        // It reports no actions of its own.
+        sender.action("click").await;
+        assert!(overlay.recv(&mut buf).is_err());
+        drop(hold);
+        let len = overlay.recv(&mut buf).unwrap();
+        assert_eq!(&buf[..len], br#"{"capture":"end"}"#);
+        assert!(!capture_held(&socket));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn hide_is_answered_through_the_client_socket() {
-        let overlay_path =
-            std::env::temp_dir().join(format!("cul-indicator-test-{}.sock", std::process::id()));
-        let _ = std::fs::remove_file(&overlay_path);
+    fn overlays_can_answer_the_client_socket() {
+        let dir = scratch_dir("answer");
+        let overlay_path = dir.join(SOCKET_NAME);
         let overlay = UnixDatagram::bind(&overlay_path).unwrap();
         let client = client_socket().unwrap();
-        client.send_to(br#"{"hide":true}"#, &overlay_path).unwrap();
+        client.send_to(b"ping", &overlay_path).unwrap();
         let mut buf = [0u8; 64];
-        let (len, from) = overlay.recv_from(&mut buf).unwrap();
-        assert_eq!(&buf[..len], br#"{"hide":true}"#);
-        overlay.send_to_addr(HIDE_REPLY_EMPTY, &from).unwrap();
+        let (_, from) = overlay.recv_from(&mut buf).unwrap();
+        overlay.send_to_addr(CAPTURE_REPLY_EMPTY, &from).unwrap();
         let len = client.recv(&mut buf).unwrap();
-        assert_eq!(&buf[..len], HIDE_REPLY_EMPTY);
-        let _ = std::fs::remove_file(&overlay_path);
+        assert_eq!(&buf[..len], CAPTURE_REPLY_EMPTY);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -549,7 +667,8 @@ mod tests {
         let long = "a".repeat(80) + "end";
         assert_eq!(shown_text(&long, false).chars().count(), TEXT_LIMIT);
         assert!(shown_text(&long, false).ends_with("end"));
-        assert_eq!(shown_text("пароль", true), "••••••");
+        assert_eq!(shown_text("пароль", true), shown_text("x", true));
+        assert!(!shown_text("пароль", true).contains("пароль"));
     }
 
     #[test]
@@ -577,10 +696,10 @@ mod tests {
             serde_json::from_str::<IndicatorEvent>(&json).unwrap(),
             scaled
         );
-        let hide = serde_json::to_string(&IndicatorEvent {
-            hide: true,
+        let begin = serde_json::to_string(&IndicatorEvent {
+            capture: Some(Capture::Begin),
             ..Default::default()
         });
-        assert_eq!(hide.unwrap(), r#"{"hide":true}"#);
+        assert_eq!(begin.unwrap(), r#"{"capture":"begin"}"#);
     }
 }

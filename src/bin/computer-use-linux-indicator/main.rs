@@ -20,6 +20,7 @@ mod font;
 use std::{
     collections::hash_map::DefaultHasher,
     f32::consts::PI,
+    fs::{File, OpenOptions, TryLockError},
     hash::{Hash, Hasher},
     os::unix::net::UnixDatagram,
     process::ExitCode,
@@ -28,7 +29,8 @@ use std::{
 };
 
 use computer_use_linux::indicator::{
-    socket_path, IndicatorEvent, GLIDE, HIDE_REPLY_EMPTY, HIDE_REPLY_SHOWN, HIDE_SETTLE,
+    capture_lock_path, socket_path, Capture, IndicatorEvent, CAPTURE_REPLY_EMPTY,
+    CAPTURE_REPLY_SHOWN, GLIDE, HIDE_SETTLE,
 };
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
@@ -86,6 +88,8 @@ const PILL_TOP: i32 = 34;
 const BUBBLE_SIZE: (u32, u32) = (460, 48);
 const FRAME: Duration = Duration::from_millis(16);
 const RESTING_FRAME: Duration = Duration::from_millis(250);
+/// How often to look for the end of a capture that holds the overlay back.
+const HOLD_POLL: Duration = Duration::from_millis(40);
 
 fn agent_color(agent: &str) -> Color {
     let rgb = match agent.to_ascii_lowercase().as_str() {
@@ -275,6 +279,9 @@ struct App {
     fading: Option<Instant>,
     /// When surfaces were last removed; the compositor may still show them.
     removed_at: Option<Instant>,
+    /// Held shared by servers while they capture the screen.
+    capture_lock: Option<File>,
+    watching_hold: bool,
     sprite: Option<(u64, Pixmap)>,
     animating: bool,
     exit: bool,
@@ -342,7 +349,46 @@ impl App {
     /// Whether a capture taken now could contain the overlay: it is shown, or
     /// its surfaces were removed too recently for the compositor to drop them.
     fn on_screen(&self) -> bool {
-        self.visible() || self.removed_at.is_some_and(|at| at.elapsed() < HIDE_SETTLE)
+        !self.panels.is_empty() || self.removed_at.is_some_and(|at| at.elapsed() < HIDE_SETTLE)
+    }
+
+    fn capture_held(&self) -> bool {
+        self.capture_lock.as_ref().is_some_and(lock_held)
+    }
+
+    /// Takes every surface off the screen until no capture holds the overlay
+    /// back. State keeps updating meanwhile, so it reappears up to date.
+    fn suspend(&mut self) {
+        if !self.panels.is_empty() {
+            self.removed_at = Some(Instant::now());
+        }
+        self.panels.clear();
+        if self.watching_hold {
+            return;
+        }
+        self.watching_hold = true;
+        let started = self
+            .handle
+            .insert_source(Timer::from_duration(HOLD_POLL), |_, _, app| {
+                if app.capture_held() {
+                    return TimeoutAction::ToDuration(HOLD_POLL);
+                }
+                app.watching_hold = false;
+                let qh = app.qh();
+                app.resume(&qh);
+                TimeoutAction::Drop
+            });
+        if started.is_err() {
+            self.watching_hold = false;
+        }
+    }
+
+    fn resume(&mut self, qh: &QueueHandle<Self>) {
+        if self.visible() {
+            self.sync_panels(qh);
+            self.render_all(qh);
+            self.ensure_animation();
+        }
     }
 
     fn cursor_position(&self) -> Option<(f32, f32)> {
@@ -541,6 +587,11 @@ impl App {
     /// Creates, moves or removes the cursor, pill and bubble panels.
     fn sync_panels(&mut self, qh: &QueueHandle<Self>) {
         if !self.visible() {
+            return;
+        }
+        // Covers captures that began before this overlay started, too.
+        if self.capture_held() {
+            self.suspend();
             return;
         }
         self.ensure_edges(qh);
@@ -1034,6 +1085,20 @@ fn spread((x, y): (i32, i32), space: Option<(u32, u32)>, layout: Option<Rect>) -
     }
 }
 
+/// Whether a server holds the capture lock. Probing takes it exclusively for
+/// an instant; servers retry past that.
+fn lock_held(lock: &File) -> bool {
+    match lock.try_lock() {
+        Ok(()) => {
+            let _ = lock.unlock();
+            false
+        }
+        Err(TryLockError::WouldBlock) => true,
+        // Unknowable: never freeze the overlay on it.
+        Err(TryLockError::Error(_)) => false,
+    }
+}
+
 fn white(alpha: f32) -> Color {
     Color::from_rgba(1.0, 1.0, 1.0, alpha.clamp(0.0, 1.0)).unwrap_or(Color::WHITE)
 }
@@ -1218,6 +1283,12 @@ fn run() -> Result<(), String> {
     if lock.try_lock().is_err() {
         return Ok(());
     }
+    let capture_lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(capture_lock_path(&path))
+        .ok();
 
     let conn =
         Connection::connect_to_env().map_err(|error| format!("no Wayland session: {error}"))?;
@@ -1273,6 +1344,8 @@ fn run() -> Result<(), String> {
         shown_at: Instant::now(),
         fading: None,
         removed_at: None,
+        capture_lock,
+        watching_hold: false,
         sprite: None,
         animating: false,
         exit: false,
@@ -1305,19 +1378,22 @@ fn run() -> Result<(), String> {
                     let Ok(event) = serde_json::from_slice::<IndicatorEvent>(&buf[..len]) else {
                         continue;
                     };
-                    if event.hide {
-                        // Tell the capturing server whether it has to wait
-                        // for the compositor to drop our surfaces.
-                        let shown = app.on_screen();
-                        app.hide();
-                        let reply = if shown {
-                            HIDE_REPLY_SHOWN
-                        } else {
-                            HIDE_REPLY_EMPTY
-                        };
-                        let _ = socket.send_to_addr(reply, &sender);
-                    } else {
-                        app.on_event(event, &qh);
+                    match event.capture {
+                        Some(Capture::Begin) => {
+                            // Tell the capturing server whether it has to wait
+                            // for the compositor to drop our surfaces.
+                            let shown = app.on_screen();
+                            app.suspend();
+                            let reply = if shown {
+                                CAPTURE_REPLY_SHOWN
+                            } else {
+                                CAPTURE_REPLY_EMPTY
+                            };
+                            let _ = socket.send_to_addr(reply, &sender);
+                        }
+                        Some(Capture::End) if !app.capture_held() => app.resume(&qh),
+                        Some(Capture::End) => {}
+                        None => app.on_event(event, &qh),
                     }
                 }
                 Ok(PostAction::Continue)
@@ -1378,6 +1454,34 @@ mod tests {
         );
         // Without a capture size the point is already logical.
         assert_eq!(spread((300, 150), None, layout), (300.0, 150.0));
+    }
+
+    #[test]
+    fn any_capturing_server_holds_the_overlay_back() {
+        let path =
+            std::env::temp_dir().join(format!("cul-overlay-hold-{}.capture", std::process::id()));
+        let open = || {
+            OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .unwrap()
+        };
+        let overlay = open();
+        assert!(!lock_held(&overlay));
+        let (first, second) = (open(), open());
+        first.try_lock_shared().unwrap();
+        second.try_lock_shared().unwrap();
+        assert!(lock_held(&overlay));
+        drop(first);
+        assert!(lock_held(&overlay), "one capture still runs");
+        drop(second);
+        assert!(!lock_held(&overlay));
+        // Probing must not leave the lock taken.
+        let third = open();
+        third.try_lock_shared().unwrap();
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
