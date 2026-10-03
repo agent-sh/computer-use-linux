@@ -27,7 +27,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use computer_use_linux::indicator::{socket_path, IndicatorEvent, GLIDE};
+use computer_use_linux::indicator::{
+    socket_path, IndicatorEvent, GLIDE, HIDE_REPLY_EMPTY, HIDE_REPLY_SHOWN,
+};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
     delegate_registry,
@@ -68,7 +70,7 @@ use wayland_protocols::wp::{
 
 use draw::{Edge, CURSOR_SIZE};
 
-/// Idle time before fading out (the server's `VISIBLE_FOR` includes the fade).
+/// Idle time before fading out.
 const IDLE_BEFORE_FADE: Duration = Duration::from_secs(8);
 const FADE_IN: f32 = 0.2;
 const FADE_OUT: f32 = 0.35;
@@ -297,6 +299,18 @@ impl App {
             .collect()
     }
 
+    /// Maps an event point to logical desktop coordinates. Points come in
+    /// screenshot pixels with the capture size; the capture covers the
+    /// bounding box of all outputs, like the server's absolute pointer.
+    fn logical_point(&self, point: (i32, i32), space: Option<(u32, u32)>) -> (f32, f32) {
+        let rects: Vec<Rect> = self
+            .output_rects()
+            .into_iter()
+            .map(|(_, rect)| rect)
+            .collect();
+        spread(point, space, bounding_box(&rects))
+    }
+
     fn output_for(&self, point: (f32, f32)) -> Option<(WlOutput, Rect)> {
         let rects = self.output_rects();
         rects
@@ -350,10 +364,6 @@ impl App {
     }
 
     fn on_event(&mut self, event: IndicatorEvent, qh: &QueueHandle<Self>) {
-        if event.hide {
-            self.hide();
-            return;
-        }
         self.agent = event.agent;
         self.tool = event.tool;
         self.last_action = Instant::now();
@@ -366,7 +376,7 @@ impl App {
                 .map(|text| (Instant::now(), Keyboard::Text(text)))
         };
         if let (Some(x), Some(y)) = (event.x, event.y) {
-            let to = (x as f32, y as f32);
+            let to = self.logical_point((x, y), event.space);
             // First appearance glides in from a short distance away.
             let from = self
                 .cursor_position()
@@ -983,6 +993,36 @@ impl App {
     }
 }
 
+fn bounding_box(rects: &[Rect]) -> Option<Rect> {
+    let first = rects.first()?;
+    let (mut left, mut top) = (first.x, first.y);
+    let (mut right, mut bottom) = (first.x + first.w, first.y + first.h);
+    for rect in &rects[1..] {
+        left = left.min(rect.x);
+        top = top.min(rect.y);
+        right = right.max(rect.x + rect.w);
+        bottom = bottom.max(rect.y + rect.h);
+    }
+    Some(Rect {
+        x: left,
+        y: top,
+        w: right - left,
+        h: bottom - top,
+    })
+}
+
+/// Spreads a point in a `space`-sized capture over the logical `layout`; a
+/// point without a capture size is already logical.
+fn spread((x, y): (i32, i32), space: Option<(u32, u32)>, layout: Option<Rect>) -> (f32, f32) {
+    match (space, layout) {
+        (Some((width, height)), Some(layout)) if width > 0 && height > 0 => (
+            layout.x + x as f32 * layout.w / width as f32,
+            layout.y + y as f32 * layout.h / height as f32,
+        ),
+        _ => (x as f32, y as f32),
+    }
+}
+
 fn white(alpha: f32) -> Color {
     Color::from_rgba(1.0, 1.0, 1.0, alpha.clamp(0.0, 1.0)).unwrap_or(Color::WHITE)
 }
@@ -1159,11 +1199,12 @@ smithay_client_toolkit::delegate_dispatch2!(App);
 
 fn run() -> Result<(), String> {
     let path = socket_path().ok_or("XDG_RUNTIME_DIR is not set")?;
-    // One overlay per session: another instance already owns the socket.
-    if UnixDatagram::unbound()
-        .and_then(|probe| probe.connect(&path))
-        .is_ok()
-    {
+    // One overlay per session. Agents may start it at the same moment, so a
+    // lock, not a probe of the socket, decides which instance stays. The lock
+    // lives as long as the process.
+    let lock = std::fs::File::create(path.with_extension("lock"))
+        .map_err(|error| format!("lock file: {error}"))?;
+    if lock.try_lock().is_err() {
         return Ok(());
     }
 
@@ -1248,8 +1289,22 @@ fn run() -> Result<(), String> {
             |_, socket, app| {
                 let mut buf = [0u8; 4096];
                 let qh = app.qh();
-                while let Ok(len) = socket.recv(&mut buf) {
-                    if let Ok(event) = serde_json::from_slice::<IndicatorEvent>(&buf[..len]) {
+                while let Ok((len, sender)) = socket.recv_from(&mut buf) {
+                    let Ok(event) = serde_json::from_slice::<IndicatorEvent>(&buf[..len]) else {
+                        continue;
+                    };
+                    if event.hide {
+                        // Tell the capturing server whether it has to wait
+                        // for the compositor to drop our surfaces.
+                        let shown = app.visible();
+                        app.hide();
+                        let reply = if shown {
+                            HIDE_REPLY_SHOWN
+                        } else {
+                            HIDE_REPLY_EMPTY
+                        };
+                        let _ = socket.send_to_addr(reply, &sender);
+                    } else {
                         app.on_event(event, &qh);
                     }
                 }
@@ -1285,5 +1340,37 @@ fn main() -> ExitCode {
             eprintln!("[computer-use-linux-indicator] {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    #[test]
+    fn capture_points_spread_over_the_logical_layout() {
+        // A 2x output: a 3840x2160 capture over a 1920x1080 logical desktop.
+        let layout = bounding_box(&[rect(0.0, 0.0, 1920.0, 1080.0)]);
+        assert_eq!(
+            spread((3000, 1500), Some((3840, 2160)), layout),
+            (1500.0, 750.0)
+        );
+        // Without a capture size the point is already logical.
+        assert_eq!(spread((300, 150), None, layout), (300.0, 150.0));
+    }
+
+    #[test]
+    fn layouts_span_every_output() {
+        let layout = bounding_box(&[
+            rect(1920.0, 0.0, 1280.0, 720.0),
+            rect(0.0, 0.0, 1920.0, 1080.0),
+        ]);
+        assert_eq!(layout, Some(rect(0.0, 0.0, 3200.0, 1080.0)));
+        assert_eq!(spread((4800, 0), Some((6400, 2160)), layout), (2400.0, 0.0));
+        assert_eq!(bounding_box(&[]), None);
     }
 }

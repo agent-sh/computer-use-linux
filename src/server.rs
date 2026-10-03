@@ -312,7 +312,7 @@ impl ComputerUseLinux {
     ) -> Json<ActivateWindowOutput> {
         let target = params.into_target();
         let received = Some(serde_json::json!(target.clone()));
-        self.indicator.action("activate_window", None).await;
+        self.indicator.action("activate_window").await;
         match focus_window_target(&target).await {
             Ok(focus) => {
                 let ok = focus_satisfies_target(&focus, &target);
@@ -820,14 +820,7 @@ impl ComputerUseLinux {
             action_index,
         } = target
         {
-            let point = self
-                .cached_node_for(
-                    params.element_index,
-                    &params.selector(),
-                    ElementResolvePurpose::Click,
-                )
-                .and_then(|node| node.bounds.as_ref().and_then(bounds_center));
-            self.indicator.action("click", point).await;
+            self.indicator.action("click").await;
             let invocation = if let Some(name) = action_name
                 .as_deref()
                 .filter(|name| !name.trim().is_empty())
@@ -874,7 +867,9 @@ impl ComputerUseLinux {
         let ClickTarget::Coordinates(x, y) = target else {
             unreachable!("click target must resolve to coordinates or an AT-SPI action");
         };
-        self.indicator.pointer("click", (x, y)).await;
+        self.indicator
+            .pointer("click", (x, y), self.indicator_space().await)
+            .await;
         let button = mouse_button_code(params.button.as_deref());
         let click_count = params.click_count.unwrap_or(1).clamp(1, 10).to_string();
         // Preferred backend: the uinput absolute pointer. Unlike ydotool's
@@ -1098,14 +1093,16 @@ impl ComputerUseLinux {
             }
         };
 
-        let point = self
+        let secret = self
             .cached_node_for(
                 params.element_index,
                 &params.selector(),
                 ElementResolvePurpose::SetValue,
             )
-            .and_then(|node| node.bounds.as_ref().and_then(bounds_center));
-        self.indicator.text("set_value", &params.value, point).await;
+            .is_some_and(|node| crate::indicator::is_secret_role(&node.role));
+        self.indicator
+            .text("set_value", &params.value, secret)
+            .await;
         match set_element_value(&object_ref, &params.value).await {
             Ok(ValueSetInvocation::Numeric { value }) => Json(ActionOutput {
                 ok: true,
@@ -1315,7 +1312,14 @@ impl ComputerUseLinux {
                 });
             }
         };
-        self.indicator.action("scroll", target_point).await;
+        match target_point {
+            Some(point) => {
+                self.indicator
+                    .pointer("scroll", point, self.indicator_space().await)
+                    .await
+            }
+            None => self.indicator.action("scroll").await,
+        }
         let off_screen_note = match target_point {
             Some((x, y)) => self.off_screen_note_for_point(x, y).await,
             None => None,
@@ -1460,12 +1464,13 @@ impl ComputerUseLinux {
     async fn drag(&self, Parameters(params): Parameters<DragParams>) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params));
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        let space = self.indicator_space().await;
         self.indicator
-            .pointer("drag", (params.start_x, params.start_y))
+            .pointer("drag", (params.start_x, params.start_y), space)
             .await;
         // Lead the overlay cursor to the drop point while the drag runs.
         self.indicator
-            .follow("drag", (params.end_x, params.end_y))
+            .follow("drag", (params.end_x, params.end_y), space)
             .await;
         // Preferred backend: the uinput absolute pointer (accurate landing).
         if self.ensure_abs_pointer().await {
@@ -1755,7 +1760,7 @@ impl ComputerUseLinux {
                 });
             }
         };
-        self.indicator.text("type_text", &params.text, None).await;
+        self.indicator.text("type_text", &params.text, false).await;
         if self.should_prefer_kde_clipboard_text_backend() {
             match self.ensure_portal_keyboard_session().await {
                 Ok(Some(session)) => {
@@ -1940,7 +1945,7 @@ impl ComputerUseLinux {
     ) -> Json<WindowGeometryOutput> {
         let received = Some(serde_json::json!(params.clone()));
         let target = params.target.clone().into_target();
-        self.indicator.action("move_window", None).await;
+        self.indicator.action("move_window").await;
         self.window_geometry_op(received, &target, |window| async move {
             registry::move_window(&window, params.x, params.y).await
         })
@@ -1963,7 +1968,7 @@ impl ComputerUseLinux {
     ) -> Json<WindowGeometryOutput> {
         let received = Some(serde_json::json!(params.clone()));
         let target = params.target.clone().into_target();
-        self.indicator.action("resize_window", None).await;
+        self.indicator.action("resize_window").await;
         self.window_geometry_op(received, &target, |window| async move {
             registry::resize_window(&window, params.width, params.height).await
         })
@@ -3462,6 +3467,16 @@ impl ComputerUseLinux {
         session.logical_point_from_capture(x, y, capture_size)
     }
 
+    /// Capture size for overlay points, which are in screenshot pixels like
+    /// the click tools. Primes the size once, as the absolute pointer does.
+    async fn indicator_space(&self) -> Option<(u32, u32)> {
+        if !self.indicator.enabled() {
+            return None;
+        }
+        let (_, _, width, height) = self.capture_space_rect().await?;
+        Some((u32::try_from(width).ok()?, u32::try_from(height).ok()?))
+    }
+
     /// COORDINATE SPACES: window bounds (list_windows / extension frame rects)
     /// and the extension monitor layout are in LOGICAL pixels, while click/
     /// scroll coordinates and screenshot captures are in PHYSICAL capture
@@ -3912,14 +3927,7 @@ impl ComputerUseLinux {
             }
         };
 
-        let point = self
-            .cached_node_for(
-                params.element_index,
-                &params.selector(),
-                ElementResolvePurpose::Action,
-            )
-            .and_then(|node| node.bounds.as_ref().and_then(bounds_center));
-        self.indicator.action("perform_action", point).await;
+        self.indicator.action("perform_action").await;
         match invoke_accessibility_action(&object_ref, requested_action).await {
             Ok(invocation) => Json(ActionOutput {
                 ok: invocation.ok,

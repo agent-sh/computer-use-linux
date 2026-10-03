@@ -6,14 +6,22 @@
 //! target, keycaps for key presses, an edge glow and a status pill. The server
 //! starts the overlay on the first action. Set `COMPUTER_USE_LINUX_INDICATOR=0`
 //! to turn it off.
+//!
+//! Before a screen capture the server sends `hide` and the overlay answers
+//! with [`HIDE_REPLY_SHOWN`] or [`HIDE_REPLY_EMPTY`], so captures wait for the
+//! compositor only when something was actually on screen.
 
 use std::{
     env,
     io::ErrorKind,
-    os::unix::net::UnixDatagram,
+    os::linux::net::SocketAddrExt,
+    os::unix::net::{SocketAddr, UnixDatagram},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Mutex, OnceLock,
+    },
     time::{Duration, Instant},
 };
 
@@ -24,6 +32,10 @@ use serde::{Deserialize, Serialize};
 pub const INDICATOR_BINARY: &str = "computer-use-linux-indicator";
 /// Socket file name inside `$XDG_RUNTIME_DIR`.
 pub const SOCKET_NAME: &str = "computer-use-linux-indicator.sock";
+/// Reply to `hide` when the overlay had something on screen.
+pub const HIDE_REPLY_SHOWN: &[u8] = b"shown";
+/// Reply to `hide` when nothing was on screen.
+pub const HIDE_REPLY_EMPTY: &[u8] = b"empty";
 
 const DISABLE_ENV: &str = "COMPUTER_USE_LINUX_INDICATOR";
 const HIDE_TEXT_ENV: &str = "COMPUTER_USE_LINUX_INDICATOR_HIDE_TEXT";
@@ -33,10 +45,10 @@ const BINARY_ENV: &str = "COMPUTER_USE_LINUX_INDICATOR_BIN";
 /// How long the overlay cursor takes to reach a target. Pointer actions wait
 /// this long so the cursor lands before the real input happens.
 pub const GLIDE: Duration = Duration::from_millis(350);
-/// The overlay stays visible this long after the last action (fade included).
-pub const VISIBLE_FOR: Duration = Duration::from_secs(9);
 /// Time for the compositor to drop overlay surfaces before a capture.
 const HIDE_SETTLE: Duration = Duration::from_millis(120);
+/// How long to wait for the overlay to answer `hide`.
+const HIDE_REPLY_WAIT: Duration = Duration::from_millis(100);
 const SPAWN_WAIT: Duration = Duration::from_secs(1);
 const TEXT_LIMIT: usize = 64;
 
@@ -52,11 +64,16 @@ pub struct IndicatorEvent {
     /// MCP tool name, e.g. `click`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tool: String,
-    /// Target in desktop coordinates (the screenshot coordinate space).
+    /// Target in screenshot pixels, the coordinate space of the click tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub y: Option<i32>,
+    /// Size of the full-desktop capture that `x`/`y` refer to. The overlay
+    /// spreads it over the logical output layout, as the compositor does for
+    /// the absolute pointer. Without it `x`/`y` are taken as logical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<(u32, u32)>,
     /// Key chord parts for `press_key`, e.g. `["ctrl", "l"]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<String>,
@@ -130,7 +147,7 @@ enum Overlay {
     NotStarted,
     Started(Instant),
     /// No Wayland session, no binary, or the overlay could not start (for
-    /// example GNOME, which has no layer-shell). Not retried.
+    /// example GNOME, which has no layer-shell). Not retried by this server.
     Unavailable,
 }
 
@@ -143,7 +160,6 @@ pub(crate) struct Indicator {
     peer: OnceLock<Peer<RoleServer>>,
     socket: Option<UnixDatagram>,
     overlay: Mutex<Overlay>,
-    shown_at: Mutex<Option<Instant>>,
 }
 
 impl Default for Indicator {
@@ -151,8 +167,8 @@ impl Default for Indicator {
         // Unit tests build servers freely; they must not drive a real overlay.
         let enabled = !cfg!(test) && !disabled_value(env::var(DISABLE_ENV).ok().as_deref());
         let socket = enabled
-            .then(UnixDatagram::unbound)
-            .and_then(Result::ok)
+            .then(client_socket)
+            .flatten()
             .filter(|socket| socket.set_nonblocking(true).is_ok());
         Self {
             enabled: socket.is_some(),
@@ -163,7 +179,6 @@ impl Default for Indicator {
             peer: OnceLock::new(),
             socket,
             overlay: Mutex::new(Overlay::NotStarted),
-            shown_at: Mutex::new(None),
         }
     }
 }
@@ -195,11 +210,21 @@ impl Indicator {
         }
     }
 
-    /// Moves the overlay cursor to a desktop point and waits until it lands.
-    pub(crate) async fn pointer(&self, tool: &str, (x, y): (i32, i32)) {
+    pub(crate) fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Moves the overlay cursor to a point in screenshot pixels and waits until
+    /// it lands. Without the capture size the point cannot be placed, so only
+    /// the action is shown.
+    pub(crate) async fn pointer(&self, tool: &str, (x, y): (i32, i32), space: Option<(u32, u32)>) {
+        let Some(space) = space else {
+            return self.action(tool).await;
+        };
         let event = IndicatorEvent {
             x: Some(x),
             y: Some(y),
+            space: Some(space),
             ..self.event(tool)
         };
         if self.send(&event).await {
@@ -208,23 +233,22 @@ impl Indicator {
     }
 
     /// Moves the overlay cursor without waiting, e.g. to a drop point.
-    pub(crate) async fn follow(&self, tool: &str, (x, y): (i32, i32)) {
+    pub(crate) async fn follow(&self, tool: &str, (x, y): (i32, i32), space: Option<(u32, u32)>) {
+        let Some(space) = space else {
+            return;
+        };
         let event = IndicatorEvent {
             x: Some(x),
             y: Some(y),
+            space: Some(space),
             ..self.event(tool)
         };
         self.send(&event).await;
     }
 
-    /// Reports an action, at a point when one is known.
-    pub(crate) async fn action(&self, tool: &str, point: Option<(i32, i32)>) {
-        match point {
-            Some(point) => self.pointer(tool, point).await,
-            None => {
-                self.send(&self.event(tool)).await;
-            }
-        }
+    /// Reports an action that moves no pointer.
+    pub(crate) async fn action(&self, tool: &str) {
+        self.send(&self.event(tool)).await;
     }
 
     pub(crate) async fn keys(&self, chord: &str) {
@@ -240,37 +264,44 @@ impl Indicator {
         self.send(&event).await;
     }
 
-    pub(crate) async fn text(&self, tool: &str, text: &str, point: Option<(i32, i32)>) {
+    /// Shows entered text; `secret` masks it regardless of the opt-in.
+    pub(crate) async fn text(&self, tool: &str, text: &str, secret: bool) {
         let event = IndicatorEvent {
-            text: Some(shown_text(text, self.mask_text)),
-            x: point.map(|(x, _)| x),
-            y: point.map(|(_, y)| y),
+            text: Some(shown_text(text, self.mask_text || secret)),
             ..self.event(tool)
         };
-        if self.send(&event).await && point.is_some() {
-            tokio::time::sleep(GLIDE).await;
-        }
+        self.send(&event).await;
     }
 
-    /// Hides a visible overlay so a screen capture never contains it.
+    /// Hides the overlay so a screen capture never contains it. The overlay is
+    /// shared by every agent in the session, so this asks it directly instead
+    /// of trusting what this server last sent.
     pub(crate) async fn before_capture(&self) {
-        let recently_shown = self
-            .shown_at
-            .lock()
-            .ok()
-            .and_then(|shown| *shown)
-            .is_some_and(|at| at.elapsed() < VISIBLE_FOR);
-        if recently_shown
-            && self.send_raw(&IndicatorEvent {
-                hide: true,
-                ..Default::default()
-            })
-        {
-            if let Ok(mut shown) = self.shown_at.lock() {
-                *shown = None;
-            }
-            tokio::time::sleep(HIDE_SETTLE).await;
+        let Some(socket) = self.socket.as_ref().filter(|_| self.enabled) else {
+            return;
+        };
+        let mut reply = [0u8; 16];
+        // Drop a late answer to an earlier request.
+        while socket.recv(&mut reply).is_ok() {}
+        if !self.send_raw(&IndicatorEvent {
+            hide: true,
+            ..Default::default()
+        }) {
+            // No overlay is running, so there is nothing to hide.
+            return;
         }
+        let deadline = Instant::now() + HIDE_REPLY_WAIT;
+        while Instant::now() < deadline {
+            if let Ok(len) = socket.recv(&mut reply) {
+                if &reply[..len] == HIDE_REPLY_EMPTY {
+                    return;
+                }
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Shown, or no answer (an older overlay): assume it was visible.
+        tokio::time::sleep(HIDE_SETTLE).await;
     }
 
     /// Announces a finished capture ("looking at the screen").
@@ -311,11 +342,6 @@ impl Indicator {
             }
             Err(_) => false,
         };
-        if sent {
-            if let Ok(mut shown) = self.shown_at.lock() {
-                *shown = Some(Instant::now());
-            }
-        }
         sent
     }
 
@@ -351,6 +377,27 @@ impl Indicator {
         }
         false
     }
+}
+
+/// A socket the overlay can answer: bound to a unique abstract address. Falls
+/// back to an unbound socket, which only loses the `hide` replies.
+fn client_socket() -> Option<UnixDatagram> {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let name = format!(
+        "computer-use-linux-indicator-client.{}.{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    SocketAddr::from_abstract_name(name.as_bytes())
+        .and_then(|address| UnixDatagram::bind_addr(&address))
+        .or_else(|_| UnixDatagram::unbound())
+        .ok()
+}
+
+/// Whether an AT-SPI role is a password field (`password text`, or the
+/// `PasswordText` fallback name).
+pub(crate) fn is_secret_role(role: &str) -> bool {
+    role.to_ascii_lowercase().contains("password")
 }
 
 fn overlay_binary() -> PathBuf {
@@ -400,6 +447,31 @@ mod tests {
     }
 
     #[test]
+    fn password_fields_are_secret() {
+        assert!(is_secret_role("password text"));
+        assert!(is_secret_role("PasswordText"));
+        assert!(!is_secret_role("text"));
+        assert!(!is_secret_role("entry"));
+    }
+
+    #[test]
+    fn hide_is_answered_through_the_client_socket() {
+        let overlay_path =
+            std::env::temp_dir().join(format!("cul-indicator-test-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&overlay_path);
+        let overlay = UnixDatagram::bind(&overlay_path).unwrap();
+        let client = client_socket().unwrap();
+        client.send_to(br#"{"hide":true}"#, &overlay_path).unwrap();
+        let mut buf = [0u8; 64];
+        let (len, from) = overlay.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..len], br#"{"hide":true}"#);
+        overlay.send_to_addr(HIDE_REPLY_EMPTY, &from).unwrap();
+        let len = client.recv(&mut buf).unwrap();
+        assert_eq!(&buf[..len], HIDE_REPLY_EMPTY);
+        let _ = std::fs::remove_file(&overlay_path);
+    }
+
+    #[test]
     fn opt_out_values() {
         for value in ["0", "false", "OFF", "no"] {
             assert!(disabled_value(Some(value)), "{value}");
@@ -431,6 +503,16 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<IndicatorEvent>(&json).unwrap(),
             event
+        );
+        let scaled = IndicatorEvent {
+            space: Some((3840, 2160)),
+            ..event
+        };
+        let json = serde_json::to_string(&scaled).unwrap();
+        assert!(json.ends_with(r#""space":[3840,2160]}"#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<IndicatorEvent>(&json).unwrap(),
+            scaled
         );
         let hide = serde_json::to_string(&IndicatorEvent {
             hide: true,
