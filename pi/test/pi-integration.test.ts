@@ -21,7 +21,7 @@ const extensionPath =
 		"index.ts",
 	);
 
-describe("Pi 0.84 native integration", () => {
+describe("Pi native integration", () => {
 	let tempDir: string | undefined;
 
 	afterEach(() => {
