@@ -1105,9 +1105,7 @@ impl ComputerUseLinux {
                 ElementResolvePurpose::SetValue,
             )
             .and_then(|node| node.bounds.as_ref().and_then(bounds_center));
-        self.indicator
-            .text("set_value", &params.value, point)
-            .await;
+        self.indicator.text("set_value", &params.value, point).await;
         match set_element_value(&object_ref, &params.value).await {
             Ok(ValueSetInvocation::Numeric { value }) => Json(ActionOutput {
                 ok: true,

@@ -102,7 +102,9 @@ pub fn agent_display_name(name: &str, title: Option<&str>) -> String {
 
 fn disabled_value(value: Option<&str>) -> bool {
     matches!(
-        value.map(|value| value.trim().to_ascii_lowercase()).as_deref(),
+        value
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
         Some("0" | "false" | "off" | "no")
     )
 }
@@ -257,7 +259,12 @@ impl Indicator {
             .ok()
             .and_then(|shown| *shown)
             .is_some_and(|at| at.elapsed() < VISIBLE_FOR);
-        if recently_shown && self.send_raw(&IndicatorEvent { hide: true, ..Default::default() }) {
+        if recently_shown
+            && self.send_raw(&IndicatorEvent {
+                hide: true,
+                ..Default::default()
+            })
+        {
             if let Ok(mut shown) = self.shown_at.lock() {
                 *shown = None;
             }
@@ -294,7 +301,10 @@ impl Indicator {
         let sent = match socket.send_to(&payload, &path) {
             Ok(_) => true,
             Err(error)
-                if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) =>
+                if matches!(
+                    error.kind(),
+                    ErrorKind::NotFound | ErrorKind::ConnectionRefused
+                ) =>
             {
                 self.start_overlay(&path).await && socket.send_to(&payload, &path).is_ok()
             }
@@ -379,7 +389,10 @@ mod tests {
         assert_eq!(agent_display_name("codex-mcp-client", None), "Codex");
         assert_eq!(agent_display_name("opencode", None), "OpenCode");
         assert_eq!(agent_display_name("pi", None), "Pi");
-        assert_eq!(agent_display_name("pipeline", Some("Pipeline Bot")), "Pipeline Bot");
+        assert_eq!(
+            agent_display_name("pipeline", Some("Pipeline Bot")),
+            "Pipeline Bot"
+        );
         assert_eq!(agent_display_name("my-agent", None), "my-agent");
         assert_eq!(agent_display_name(" ", None), "Agent");
     }
@@ -413,8 +426,14 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         assert_eq!(json, r#"{"agent":"Claude","tool":"click","x":10,"y":20}"#);
-        assert_eq!(serde_json::from_str::<IndicatorEvent>(&json).unwrap(), event);
-        let hide = serde_json::to_string(&IndicatorEvent { hide: true, ..Default::default() });
+        assert_eq!(
+            serde_json::from_str::<IndicatorEvent>(&json).unwrap(),
+            event
+        );
+        let hide = serde_json::to_string(&IndicatorEvent {
+            hide: true,
+            ..Default::default()
+        });
         assert_eq!(hide.unwrap(), r#"{"hide":true}"#);
     }
 }
