@@ -571,6 +571,9 @@ pub async fn scroll(
     if let Some((x, y)) = target_point {
         let (stream_id, x, y) = session.map_absolute_point(x, y)?;
         notify_pointer_motion_absolute(&proxy, &session.session_handle, stream_id, x, y).await?;
+        // The compositor acknowledges motion before the target client processes
+        // pointer enter. As with click, let positioning settle before the wheel.
+        tokio::time::sleep(Duration::from_millis(35)).await;
     }
 
     let (axis, steps) = portal_scroll_axis_steps(direction, steps, portal_scroll_polarity());
