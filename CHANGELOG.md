@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Doctor now separates detected screenshot routes from verified capture. A detected route reports `screenshot_capture_status: "unverified"` and `can_capture_screenshots: false`; use `get_app_state` with a screenshot to obtain `verified` or `failed`. Unverified capture is a setup warning, and callers should not treat the boolean alone as a missing backend.
+- GNOME literal text prefers the portal and rejects strings its keymap cannot represent before typing. Wayland coordinate input refuses inaccurate relative-motion fallback.
+- Screenshot errors retain their backend causes, and diagnostic subprocesses have bounded execution and cleanup.
+
+## [Unreleased]
+
 ## [0.7.10] - 2026-10-01
 
 ### Security
