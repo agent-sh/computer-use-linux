@@ -625,10 +625,15 @@ impl ComputerUseLinux {
     }
 
     /// Lazily create the uinput absolute pointer, sizing its ABS range to the
-    /// logical desktop (the portal screenshot dimensions). Returns `false` if it
-    /// can't be created or is disabled via `CU_DISABLE_ABS_POINTER`.
+    /// full capture's pixel dimensions. This preserves the coordinate space
+    /// used by click/scroll/drag, independently of logical monitor scaling.
+    /// Explicit backend overrides skip this device, including a cached one.
     async fn ensure_abs_pointer(&self) -> bool {
-        if env_flag_enabled("CU_DISABLE_ABS_POINTER") {
+        if env_flag_enabled("CU_DISABLE_ABS_POINTER")
+            || env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER")
+            || (env_flag_enabled("COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER")
+                && self.is_wayland_session())
+        {
             return false;
         }
         if self
@@ -657,31 +662,6 @@ impl ComputerUseLinux {
             }
             _ => false,
         }
-    }
-
-    /// Try a coordinate click through the absolute uinput pointer. Returns the
-    /// requested and emitted coordinates from that backend, or `None` to fall
-    /// through.
-    async fn try_abs_click(
-        &self,
-        x: i32,
-        y: i32,
-        button: Option<&str>,
-        count: u32,
-    ) -> Option<crate::abs_pointer::PointerLanding> {
-        let btn = crate::abs_pointer::PointerButton::from_name(button)?;
-        if !self.ensure_abs_pointer().await {
-            return None;
-        }
-        let abs_pointer = Arc::clone(&self.abs_pointer);
-        tokio::task::spawn_blocking(move || {
-            let mut guard = abs_pointer.lock().ok()?;
-            let pointer = guard.as_mut()?;
-            pointer.click(x, y, btn, count).ok()
-        })
-        .await
-        .ok()
-        .flatten()
     }
 
     #[tool(
@@ -858,25 +838,22 @@ impl ComputerUseLinux {
         // portal (per-monitor coordinate scaling + an approval dialog), the
         // absolute pointer uses screenshot-pixel coordinates directly and
         // reports the point it emitted after desktop-edge clamping.
-        if let Some(landing) = self
-            .try_abs_click(
-                x,
-                y,
-                params.button.as_deref(),
-                params.click_count.unwrap_or(1).clamp(1, 10),
-            )
-            .await
+        if let Some(abs_button) =
+            crate::abs_pointer::PointerButton::from_name(params.button.as_deref())
         {
-            return Json(with_notes(
-                ActionOutput {
-                    ok: true,
-                    implemented: true,
-                    action: "click".to_string(),
-                    message: "Action sent through the uinput absolute pointer.".to_string(),
-                    received,
-                },
-                abs_pointer_clamp_note(landing),
-            ));
+            if self.ensure_abs_pointer().await {
+                let pointer = Arc::clone(&self.abs_pointer);
+                let count = params.click_count.unwrap_or(1).clamp(1, 10);
+                let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
+                    run_abs_pointer(pointer, move |pointer| {
+                        pointer.click(x, y, abs_button, count)
+                    })
+                    .await
+                })
+                .await;
+                let _input_guard = input_guard;
+                return Json(abs_pointer_result("click", result, received));
+            }
         }
         let off_screen_note = self.off_screen_note_for_point(x, y).await;
         if let Some(session) = self.cached_portal_pointer_session() {
@@ -962,8 +939,11 @@ impl ComputerUseLinux {
                     }
                 }
                 Ok(None) => {}
-                Err(_) => {}
+                Err(error) => return Json(portal_start_error("click", error, received)),
             }
+        }
+        if self.is_wayland_session() {
+            return Json(unsafe_pointer_fallback("click", received));
         }
         if self.should_prefer_xdotool_pointer() {
             if let Some(xdotool_args) = xdotool_pointer_click_args(
@@ -1282,6 +1262,32 @@ impl ComputerUseLinux {
                 });
             }
         };
+        let (dx, dy) = match direction {
+            ScrollDirection::Up => (0, units),
+            ScrollDirection::Down => (0, -units),
+            ScrollDirection::Left => (units, 0),
+            ScrollDirection::Right => (-units, 0),
+        };
+        // Coordinate scroll needs the same accurate positioning as click. Keep
+        // the move and wheel event under one cancellation-safe input guard.
+        if let Some((x, y)) = target_point {
+            if self.is_wayland_session()
+                && ydotool_backend_available().await
+                && self.ensure_abs_pointer().await
+            {
+                let pointer = Arc::clone(&self.abs_pointer);
+                let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
+                    let landing =
+                        run_abs_pointer(pointer, move |pointer| pointer.move_to(x, y)).await?;
+                    sleep(Duration::from_millis(35)).await;
+                    run_ydotool(&wheel_mousemove_args(dx, dy)).await?;
+                    Ok(landing)
+                })
+                .await;
+                let _input_guard = input_guard;
+                return Json(abs_pointer_result("scroll", result, received));
+            }
+        }
         let off_screen_note = match target_point {
             Some((x, y)) => self.off_screen_note_for_point(x, y).await,
             None => None,
@@ -1359,15 +1365,18 @@ impl ComputerUseLinux {
                     }
                 }
                 Ok(None) => {}
+                Err(error)
+                    if target_point.is_some()
+                        || env_flag_enabled("COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER") =>
+                {
+                    return Json(portal_start_error("scroll", error, received));
+                }
                 Err(_) => {}
             }
         }
-        let (dx, dy) = match direction {
-            ScrollDirection::Up => (0, units),
-            ScrollDirection::Down => (0, -units),
-            ScrollDirection::Left => (units, 0),
-            ScrollDirection::Right => (-units, 0),
-        };
+        if target_point.is_some() && self.is_wayland_session() {
+            return Json(unsafe_pointer_fallback("scroll", received));
+        }
         let mut sequence = Vec::new();
         if let Some((x, y)) = target_point {
             sequence.push(absolute_mousemove_args(x, y));
@@ -1428,33 +1437,29 @@ impl ComputerUseLinux {
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         // Preferred backend: the uinput absolute pointer (accurate landing).
         if self.ensure_abs_pointer().await {
-            let abs_pointer = Arc::clone(&self.abs_pointer);
-            let dragged = tokio::task::spawn_blocking(move || {
-                if let Ok(mut guard) = abs_pointer.lock() {
-                    guard.as_mut().map(|p| {
-                        p.drag(
-                            (params.start_x, params.start_y),
-                            (params.end_x, params.end_y),
-                            crate::abs_pointer::PointerButton::Left,
-                        )
-                        .is_ok()
-                    })
-                } else {
-                    None
-                }
+            let pointer = Arc::clone(&self.abs_pointer);
+            let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
+                run_abs_pointer(pointer, move |pointer| {
+                    pointer.drag(
+                        (params.start_x, params.start_y),
+                        (params.end_x, params.end_y),
+                        crate::abs_pointer::PointerButton::Left,
+                    )
+                })
+                .await
             })
-            .await
-            .ok()
-            .flatten();
-            if dragged == Some(true) {
-                return Json(ActionOutput {
+            .await;
+            let _input_guard = input_guard;
+            return Json(match result {
+                Ok(()) => ActionOutput {
                     ok: true,
                     implemented: true,
                     action: "drag".to_string(),
                     message: "Action sent through the uinput absolute pointer.".to_string(),
                     received,
-                });
-            }
+                },
+                Err(error) => abs_pointer_error("drag", error, received),
+            });
         }
         if let Some(session) = self.cached_portal_pointer_session() {
             let _ = self.capture_space_rect().await;
@@ -1519,8 +1524,11 @@ impl ComputerUseLinux {
                     }
                 }
                 Ok(None) => {}
-                Err(_) => {}
+                Err(error) => return Json(portal_start_error("drag", error, received)),
             }
+        }
+        if self.is_wayland_session() {
+            return Json(unsafe_pointer_fallback("drag", received));
         }
         let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
             run_ydotool_drag(params.start_x, params.start_y, params.end_x, params.end_y).await
@@ -3071,6 +3079,9 @@ impl ComputerUseLinux {
     }
 
     fn cached_portal_pointer_session(&self) -> Option<PortalPointerSession> {
+        if env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER") {
+            return None;
+        }
         let mut cached = self.portal_pointer_session.lock().ok()?;
         if cached.as_ref().is_some_and(|session| !session.is_valid()) {
             *cached = None;
@@ -4710,6 +4721,69 @@ fn action_result(
     }
 }
 
+fn unsafe_pointer_fallback(action: &str, received: Option<serde_json::Value>) -> ActionOutput {
+    ActionOutput {
+        ok: false,
+        implemented: true,
+        action: action.to_string(),
+        message: "Coordinate input was not sent: ydotool cannot position the pointer accurately on Wayland. Enable the uinput absolute pointer with working screenshot capture, or use COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER=1 with an approved desktop portal session. Remove COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER if set.".to_string(),
+        received,
+    }
+}
+
+fn portal_start_error(
+    action: &str,
+    error: anyhow::Error,
+    received: Option<serde_json::Value>,
+) -> ActionOutput {
+    ActionOutput {
+        ok: false,
+        implemented: true,
+        action: action.to_string(),
+        message: format!("Input was not sent because the remote desktop portal could not start; input was not replayed through ydotool: {error:#}"),
+        received,
+    }
+}
+
+fn abs_pointer_error(
+    action: &str,
+    error: String,
+    received: Option<serde_json::Value>,
+) -> ActionOutput {
+    ActionOutput {
+        ok: false,
+        implemented: true,
+        action: action.to_string(),
+        message: format!("Absolute pointer {action} may have started before it failed; input was not replayed through another backend: {error}"),
+        received,
+    }
+}
+
+fn abs_pointer_result(
+    action: &str,
+    result: std::result::Result<crate::abs_pointer::PointerLanding, String>,
+    received: Option<serde_json::Value>,
+) -> ActionOutput {
+    match result {
+        Ok(landing) => with_notes(
+            ActionOutput {
+                ok: true,
+                implemented: true,
+                action: action.to_string(),
+                message: if action == "scroll" {
+                    "Pointer positioned through uinput; wheel input sent through ydotool."
+                        .to_string()
+                } else {
+                    "Action sent through the uinput absolute pointer.".to_string()
+                },
+                received,
+            },
+            abs_pointer_clamp_note(landing),
+        ),
+        Err(error) => abs_pointer_error(action, error, received),
+    }
+}
+
 fn portal_action_error(
     action: &str,
     error: anyhow::Error,
@@ -5088,6 +5162,27 @@ async fn run_ydotool_drag(
             "{error}; ydotool button release also failed: {release_error}"
         )),
     }
+}
+
+async fn run_abs_pointer<T, F>(
+    pointer: Arc<Mutex<Option<crate::abs_pointer::AbsPointer>>>,
+    operation: F,
+) -> std::result::Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut crate::abs_pointer::AbsPointer) -> Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let mut guard = pointer
+            .lock()
+            .map_err(|_| "absolute pointer lock was poisoned".to_string())?;
+        let pointer = guard
+            .as_mut()
+            .ok_or_else(|| "absolute pointer is unavailable".to_string())?;
+        operation(pointer).map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(|error| format!("absolute pointer task failed: {error}"))?
 }
 
 async fn run_cancellation_safe_input<T, F>(
@@ -6040,6 +6135,173 @@ mod tests {
     /// The run_shell tests change the same process-wide variable, so they
     /// take turns instead of racing each other under the parallel test runner.
     static SHELL_ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Exercise the real handlers in a separate process so backend overrides
+    /// cannot race other tests. All command programs are harmless stubs; the
+    /// private datagram socket and invalid D-Bus address cannot reach a desktop.
+    #[test]
+    fn pointer_coordinate_backend_dispatch_is_safe() {
+        let dir = std::env::temp_dir().join(format!(
+            "cul-pointer-safety-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+        let socket_path = dir.join("input.sock");
+        let _socket = std::os::unix::net::UnixDatagram::bind(&socket_path).unwrap();
+        for program in ["ydotool", "xdotool", "systemctl"] {
+            let path = dir.join(program);
+            std::fs::write(
+                &path,
+                r#"#!/bin/sh
+case "${0##*/}" in
+  systemctl) exit 0 ;;
+  ydotool)
+    case "$1" in help|--help) printf '%s\n' click mousemove type key debug; exit 0 ;; esac
+    # Capability probes use their own socket. Record only dispatched input.
+    [ "$YDOTOOL_SOCKET" = "$CUL_POINTER_TEST_SOCKET" ] || exit 0 ;;
+esac
+printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
+"#,
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        for mode in [
+            "wayland-default",
+            "wayland-ydotool",
+            "wayland-portal",
+            "x11",
+        ] {
+            let log = dir.join(format!("{mode}.log"));
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "server::tests::pointer_coordinate_backend_child",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env("PATH", &dir)
+                .env("HOME", &dir)
+                .env("CUL_POINTER_TEST_MODE", mode)
+                .env("CUL_POINTER_TEST_LOG", &log)
+                .env("CUL_POINTER_TEST_SOCKET", &socket_path)
+                .env("YDOTOOL_SOCKET", &socket_path)
+                .env("XDG_RUNTIME_DIR", &dir)
+                .env(
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    format!("unix:path={}/no-bus", dir.display()),
+                )
+                .env("DISPLAY", ":9876")
+                .env(
+                    "WAYLAND_DISPLAY",
+                    if mode == "x11" { "" } else { "no-wayland" },
+                )
+                .env(
+                    "XDG_SESSION_TYPE",
+                    if mode == "x11" { "x11" } else { "wayland" },
+                )
+                .env("CU_DISABLE_ABS_POINTER", "1")
+                .env(
+                    "COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER",
+                    if mode == "wayland-ydotool" { "1" } else { "0" },
+                )
+                .env(
+                    "COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER",
+                    if mode == "wayland-portal" { "1" } else { "0" },
+                );
+            for key in [
+                "DESKTOP_SESSION",
+                "HYPRLAND_INSTANCE_SIGNATURE",
+                "XAUTHORITY",
+                "XDG_SESSION_DESKTOP",
+                "XDG_CURRENT_DESKTOP",
+            ] {
+                command.env(key, "pointer-test");
+            }
+            let output = crate::command_runner::output_blocking_with_timeout(
+                &mut command,
+                "pointer backend regression",
+                Duration::from_secs(15),
+            )
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "{mode}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let commands = std::fs::read_to_string(&log).unwrap_or_default();
+            match mode {
+                "wayland-portal" => assert!(commands.is_empty(), "{commands}"),
+                "x11" => {
+                    assert!(
+                        commands.contains("xdotool mousemove -- 5536 700 click"),
+                        "{commands}"
+                    );
+                    assert!(
+                        commands.contains("ydotool mousemove --absolute -- 100 100"),
+                        "{commands}"
+                    );
+                }
+                _ => assert_eq!(commands, "ydotool mousemove --wheel -- 0 -5\n"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pointer_coordinate_backend_child() {
+        let Ok(mode) = std::env::var("CUL_POINTER_TEST_MODE") else {
+            return;
+        };
+        let backend = ComputerUseLinux::default();
+        backend.cache_desktop_size(9376, 1600);
+        let click: ClickParams =
+            serde_json::from_value(serde_json::json!({"x":5536,"y":700})).unwrap();
+        let scroll: ScrollParams =
+            serde_json::from_value(serde_json::json!({"x":5536,"y":700,"direction":"down"}))
+                .unwrap();
+        let drag = DragParams {
+            start_x: 100,
+            start_y: 100,
+            end_x: 200,
+            end_y: 200,
+        };
+        let results = [
+            backend.click(Parameters(click)).await.0,
+            backend.scroll(Parameters(scroll)).await.0,
+            backend.drag(Parameters(drag)).await.0,
+        ];
+        for result in results {
+            if mode == "x11" {
+                assert!(result.ok, "{}", result.message);
+            } else {
+                assert!(!result.ok, "{}", result.message);
+                let expected = if mode == "wayland-portal" {
+                    "portal could not start"
+                } else {
+                    "cannot position the pointer accurately on Wayland"
+                };
+                assert!(result.message.contains(expected), "{}", result.message);
+            }
+        }
+        let scroll: ScrollParams =
+            serde_json::from_value(serde_json::json!({"direction":"down"})).unwrap();
+        let result = backend.scroll(Parameters(scroll)).await.0;
+        assert_eq!(result.ok, mode != "wayland-portal", "{}", result.message);
+    }
 
     #[test]
     fn completion_tool_is_explicitly_opt_in_and_has_side_effect_annotations() {
