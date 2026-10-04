@@ -11,8 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GNOME literal text prefers the portal and rejects strings its keymap cannot represent before typing. Wayland coordinate input refuses inaccurate relative-motion fallback.
 - Screenshot errors retain their backend causes, and diagnostic subprocesses have bounded execution and cleanup.
 
-## [Unreleased]
-
 ## [0.7.10] - 2026-10-01
 
 ### Security
