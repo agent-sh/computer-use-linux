@@ -498,9 +498,10 @@ fn hydrate_desktop_env_from_process_tree() {
 }
 
 fn hydrate_desktop_env_from_systemd_user() {
-    let Ok(output) = Command::new("systemctl")
-        .args(["--user", "show-environment"])
-        .output()
+    let mut command = Command::new("systemctl");
+    command.args(["--user", "show-environment"]);
+    let Ok(output) =
+        crate::command_runner::output_blocking(&mut command, "read systemd user environment")
     else {
         return;
     };
@@ -1119,7 +1120,9 @@ fn ydotool_socket_check() -> Check {
 }
 
 fn user_id() -> Option<String> {
-    let output = Command::new("id").arg("-u").output().ok()?;
+    let mut command = Command::new("id");
+    command.arg("-u");
+    let output = crate::command_runner::output_blocking(&mut command, "query user id").ok()?;
     output
         .status
         .success()
@@ -1536,7 +1539,10 @@ fn run_command(command: &str, args: &[&str], with_session_bus: bool) -> Check {
         }
     }
 
-    match cmd.output() {
+    // Introspection can block while a portal retrieves backend properties.
+    // Bound every probe and reap its process group instead of stalling doctor
+    // and every get_app_state request waiting for that diagnostic.
+    match crate::command_runner::output_blocking(&mut cmd, &format!("run diagnostic {command}")) {
         Ok(output) if output.status.success() => {
             let detail = String::from_utf8_lossy(&output.stdout).trim().to_string();
             Check::ok(if detail.is_empty() {
@@ -1555,13 +1561,60 @@ fn run_command(command: &str, args: &[&str], with_session_bus: bool) -> Check {
                 detail
             })
         }
-        Err(error) => Check::fail(error.to_string()),
+        Err(error) => Check::fail(format!("{error:#}")),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_command_timeout_reaps_the_hung_process() {
+        use std::time::{Duration, Instant};
+
+        let pid_path = std::env::temp_dir().join(format!(
+            "cul-diagnostic-timeout-{}-{}.pid",
+            std::process::id(),
+            getrandom::u64().unwrap()
+        ));
+        let started = Instant::now();
+        let result = run_command(
+            "/bin/sh",
+            &[
+                "-c",
+                "printf '%s' \"$$\" > \"$1\"; exec /bin/sleep 60",
+                "diagnostic-timeout-test",
+                pid_path.to_str().unwrap(),
+            ],
+            false,
+        );
+        let elapsed = started.elapsed();
+        let pid = fs::read_to_string(&pid_path);
+        let _ = fs::remove_file(&pid_path);
+        let pid: u32 = pid.expect("fixture must record its pid").parse().unwrap();
+
+        assert!(!result.ok, "hung diagnostic must fail");
+        assert!(result.detail.contains("timed out after 2000 ms"));
+        assert!(elapsed < Duration::from_secs(4), "took {elapsed:?}");
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "diagnostic child must be killed and reaped before returning"
+        );
+    }
+
+    #[test]
+    fn diagnostic_spawn_failure_keeps_the_os_cause() {
+        let path = std::env::temp_dir().join(format!(
+            "cul-missing-diagnostic-{}-{}",
+            std::process::id(),
+            getrandom::u64().unwrap()
+        ));
+        let result = run_command(path.to_str().unwrap(), &[], false);
+        assert!(!result.ok);
+        assert!(result.detail.contains("failed to run diagnostic"));
+        assert!(result.detail.contains("os error 2"));
+    }
 
     #[test]
     fn setup_repairs_saved_key_even_when_runtime_is_ready() {
