@@ -53,6 +53,10 @@ x11rb = "0.14"
 xkeysym = "0.2.1"
 zbus = "5.14.0"
 
+[profile.dev]
+# Keep file and line numbers in backtraces without full variable/type debug info.
+debug = "line-tables-only"
+
 [profile.release]
 codegen-units = 1
 opt-level = 3

@@ -11,6 +11,11 @@ cargo check --locked
 cargo test --locked
 ```
 
+Development and test builds keep file and line information for backtraces with
+`debug = "line-tables-only"`. For a debugging session that needs local variables
+and types, use `CARGO_PROFILE_DEV_DEBUG=2 cargo build --locked`. CI disables dev
+debug information. Release settings are unchanged.
+
 For npm wrapper work:
 
 ```bash
