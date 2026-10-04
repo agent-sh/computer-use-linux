@@ -1,0 +1,40 @@
+xkb_keymap {
+    xkb_keycodes "fixture" {
+        minimum = 8;
+        maximum = 255;
+        <AC01> = 38;
+        <TLDE> = 49;
+        <LFSH> = 50;
+        <DUMY> = 255;
+    };
+    xkb_types "fixture" {
+        type "ONE_LEVEL" {
+            modifiers = None;
+            map[None] = Level1;
+        };
+        type "TWO_LEVEL" {
+            modifiers = Shift;
+            map[None] = Level1;
+            map[Shift] = Level2;
+        };
+    };
+    xkb_compatibility "fixture" {
+        interpret Shift_L {
+            action = SetMods(modifiers=Shift);
+        };
+    };
+    xkb_symbols "fixture" {
+        name[Group1] = "US fixture";
+        name[Group2] = "German fixture";
+        key <AC01> {
+            type[Group1] = "TWO_LEVEL", symbols[Group1] = [ a, A ],
+            type[Group2] = "TWO_LEVEL", symbols[Group2] = [ a, A ]
+        };
+        key <TLDE> {
+            type[Group1] = "TWO_LEVEL", symbols[Group1] = [ grave, asciitilde ],
+            type[Group2] = "TWO_LEVEL", symbols[Group2] = [ dead_circumflex, degree ]
+        };
+        key <LFSH> { [ Shift_L ] };
+        key <DUMY> { [ NoSymbol ] };
+    };
+};

@@ -80,6 +80,8 @@ the origin. A missing window target is rejected.
 
 Targeted `press_key`/`type_text` results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus. Click/screenshot/input results warn when the target window or coordinate is partially or fully off-screen. `get_app_state` returns a compact readiness block by default; pass `verbose: true` for the full diagnostics report. It also reports `tree_scoped` (false when no app target narrowed the AT-SPI tree, with a warning in `message`) and `accessibility_tree_truncated` (true when the node, depth, or read budget stopped traversal with unread elements left).
 
+On GNOME, a read-only keymap preflight rejects the whole string before input if a character is absent or requires a modifier level Mutter cannot synthesize. The background reader cannot establish the active layout group, so every configured group must support the text. This can reject text that works in one of several groups; use `set_value` on an editable field instead. The check requires `libxkbcommon.so.0` at runtime and stops after a two-second keymap read deadline. It does not cover held modifiers or a keymap changed concurrently with typing.
+
 **Semantic actions**
 
 - `perform_action` — invoke any AT-SPI action exposed by an element (`Press`, `Activate`, `Toggle`, …); defaults to the primary action

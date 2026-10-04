@@ -133,7 +133,7 @@ impl Stream for DeadlineStream {
     }
 }
 
-fn connect_unix(path: &str, deadline: Instant) -> io::Result<UnixStream> {
+pub(crate) fn connect_unix(path: &str, deadline: Instant) -> io::Result<UnixStream> {
     remaining(deadline)?;
     // SAFETY: socket returns a new descriptor owned below or -1 on failure.
     let raw = unsafe {
