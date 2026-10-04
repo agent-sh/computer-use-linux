@@ -1766,36 +1766,40 @@ impl ComputerUseLinux {
                 Err(_) => {}
             }
         }
-        if self.should_prefer_portal_keyboard_backend().await {
-            if let Ok(keysyms) = keysyms_for_text(&params.text) {
-                match self.ensure_portal_keyboard_session().await {
-                    Ok(Some(session)) => match type_text_with_keysyms(&session, &keysyms).await {
-                        Ok(()) => {
-                            let notes = self.input_landing_notes(focus.as_ref(), true).await;
-                            return Json(with_notes(
-                                successful_action_with_focus(
-                                    "type_text",
-                                    "Action sent through the remote desktop portal.",
-                                    received,
-                                    focus,
-                                ),
-                                notes,
-                            ));
-                        }
-                        Err(error) => {
-                            self.clear_portal_keyboard_session(&session);
-                            return Json(action_result_with_focus(
-                                "type_text",
-                                Err(format!("{error:#}")),
-                                received,
-                                focus,
-                            ));
-                        }
-                    },
-                    Ok(None) => {}
-                    Err(_) => {}
-                }
+        if self.should_prefer_portal_text_backend() {
+            let result = async {
+                let keysyms = keysyms_for_text(&params.text)
+                    .map_err(|error| format!("Literal text was not sent: {error:#}"))?;
+                let session = self
+                    .ensure_portal_keyboard_session()
+                    .await
+                    .map_err(|error| format!("Portal text input could not start: {error:#}"))?
+                    .ok_or_else(|| {
+                        "Portal keyboard input is unavailable; no text was sent.".to_string()
+                    })?;
+                type_text_with_keysyms(&session, &keysyms)
+                    .await
+                    .map_err(|error| {
+                        self.clear_portal_keyboard_session(&session);
+                        format!("{error:#}")
+                    })
             }
+            .await;
+            return Json(match result {
+                Ok(()) => {
+                    let notes = self.input_landing_notes(focus.as_ref(), true).await;
+                    with_notes(
+                        successful_action_with_focus(
+                            "type_text",
+                            "Action sent through the remote desktop portal.",
+                            received,
+                            focus,
+                        ),
+                        notes,
+                    )
+                }
+                Err(error) => action_result_with_focus("type_text", Err(error), received, focus),
+            });
         }
         // X11: xdotool type resolves keysyms against the live XKB layout.
         // ydotool's raw scancodes get re-mapped by X11 and mangle symbols and
@@ -1932,7 +1936,7 @@ impl ComputerUseLinux {
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
     version = "0.7.10",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send literal type_text through KDE clipboard integration on Plasma Wayland, wtype on compatible Wayland compositors, or portal keysyms on other Wayland sessions. Portal text startup or conversion failures return an error without replaying through ydotool. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus. Treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
 )]
 impl ServerHandler for ComputerUseLinux {}
 
@@ -2971,21 +2975,17 @@ impl ComputerUseLinux {
         )
     }
 
-    async fn should_prefer_portal_keyboard_backend(&self) -> bool {
-        if env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD") {
-            return false;
-        }
-        if self.should_prefer_xdotool_keyboard() {
-            return false;
-        }
-        if env_flag_enabled("COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD") {
-            return self.is_wayland_session() && !self.is_kde_wayland_session();
-        }
-        !self.is_kde_wayland_session()
-            && should_prefer_portal_backend_by_default(
-                self.is_wayland_session(),
-                ydotool_backend_available().await,
-            )
+    // Literal text needs a layout-aware route even when raw ydotool input is
+    // available. KDE uses clipboard paste; compatible compositors use wtype.
+    fn should_prefer_portal_text_backend(&self) -> bool {
+        prefer_portal_text_backend(
+            env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD"),
+            self.should_prefer_xdotool_keyboard(),
+            self.is_wayland_session(),
+            self.is_kde_wayland_session(),
+            env_flag_enabled("COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD"),
+            self.should_prefer_wtype_keyboard(),
+        )
     }
 
     /// Portal keyboard policy for `press_key` chords. Unlike literal text
@@ -4690,7 +4690,12 @@ fn action_result(
             ok: true,
             implemented: true,
             action: action.to_string(),
-            message: "Action sent through ydotool.".to_string(),
+            message: if action == "type_text" {
+                "Action sent through ydotool using US physical key positions. The active keyboard layout can change the resulting text; verify the field contents."
+            } else {
+                "Action sent through ydotool."
+            }
+            .to_string(),
             received,
         },
         Err(message) => ActionOutput {
@@ -5124,6 +5129,7 @@ async fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
 }
 
 async fn run_ydotool_type_text(text: &str) -> std::result::Result<Output, String> {
+    validate_ydotool_text(text)?;
     let support = ydotool::ensure_supported_async().await?;
     let socket = ydotool::socket_path_for_command()?;
     let mut command = TokioCommand::new(&support.executable);
@@ -5146,6 +5152,19 @@ async fn run_ydotool_type_text(text: &str) -> std::result::Result<Output, String
     } else {
         Err(ydotool_output_error(output))
     }
+}
+
+fn validate_ydotool_text(text: &str) -> std::result::Result<(), String> {
+    if let Some(ch) = text
+        .chars()
+        .find(|ch| !matches!(ch, '\t' | '\n' | ' '..='~'))
+    {
+        return Err(format!(
+            "ydotool cannot type U+{:04X}; no text was sent. Use a layout-aware text backend or set_value on an editable field.",
+            ch as u32
+        ));
+    }
+    Ok(())
 }
 
 fn ydotool_type_timeout(text: &str) -> Duration {
@@ -5698,6 +5717,17 @@ fn ydotool_backend_available_from(socket_available: bool, cli_supported: bool) -
 
 fn should_prefer_portal_backend_by_default(is_wayland: bool, ydotool_available: bool) -> bool {
     is_wayland && !ydotool_available
+}
+
+fn prefer_portal_text_backend(
+    force_ydotool: bool,
+    prefer_xdotool: bool,
+    is_wayland: bool,
+    is_kde: bool,
+    force_portal: bool,
+    prefer_wtype: bool,
+) -> bool {
+    !force_ydotool && !prefer_xdotool && is_wayland && !is_kde && (force_portal || !prefer_wtype)
 }
 
 fn mouse_button_code(button: Option<&str>) -> String {
@@ -6443,6 +6473,60 @@ mod tests {
         assert!(!prefer_wtype_keyboard(false, false, true, true));
         assert!(!prefer_wtype_keyboard(false, true, false, true));
         assert!(!prefer_wtype_keyboard(false, true, true, false));
+    }
+
+    #[test]
+    fn literal_text_portal_policy_preserves_layout_aware_routes_and_overrides() {
+        // GNOME has no wtype route. ydotool availability must not suppress
+        // literal portal text, unlike pointer and physical chord policies.
+        assert!(prefer_portal_text_backend(
+            false, false, true, false, false, false
+        ));
+        // A compatible compositor with wtype needs no portal prompt.
+        assert!(!prefer_portal_text_backend(
+            false, false, true, false, false, true
+        ));
+        assert!(prefer_portal_text_backend(
+            false, false, true, false, true, true
+        ));
+        // Explicit raw/XTEST overrides, KDE clipboard, and X11 keep precedence.
+        assert!(!prefer_portal_text_backend(
+            true, false, true, false, true, false
+        ));
+        assert!(!prefer_portal_text_backend(
+            false, true, true, false, true, false
+        ));
+        assert!(!prefer_portal_text_backend(
+            false, false, true, true, true, false
+        ));
+        assert!(!prefer_portal_text_backend(
+            false, false, false, false, true, false
+        ));
+    }
+
+    #[tokio::test]
+    async fn raw_text_rejects_unsupported_characters_before_backend_access() {
+        assert!(validate_ydotool_text("probe-0710_a/b\t\nXYZ").is_ok());
+        for text in [
+            "prefixä",
+            "prefix中",
+            "prefix\r",
+            "prefix\0",
+            "prefix\u{7f}",
+        ] {
+            // This exits before CLI probing, socket discovery or input, even
+            // though a supported prefix appears before the invalid character.
+            let error = run_ydotool_type_text(text).await.unwrap_err();
+            assert!(error.contains("no text was sent"), "{error}");
+        }
+    }
+
+    #[test]
+    fn raw_text_success_explains_layout_dependence() {
+        let result = action_result("type_text", Ok(Vec::new()), None);
+        assert!(result.ok);
+        assert!(result.message.contains("US physical key positions"));
+        assert!(result.message.contains("verify the field contents"));
     }
 
     #[test]
