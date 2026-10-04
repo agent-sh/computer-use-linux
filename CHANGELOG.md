@@ -7,9 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.11] - 2026-10-04
+
+### Fixed
+
 - Doctor now separates detected screenshot routes from verified capture. A detected route reports `screenshot_capture_status: "unverified"` and `can_capture_screenshots: false`; use `get_app_state` with a screenshot to obtain `verified` or `failed`. Unverified capture is a setup warning, and callers should not treat the boolean alone as a missing backend.
-- GNOME literal text prefers the portal and rejects strings its keymap cannot represent before typing. Wayland coordinate input refuses inaccurate relative-motion fallback.
+- GNOME literal text prefers the portal and rejects strings its keymap cannot represent before typing. Wayland coordinate input refuses inaccurate relative-motion fallback. (#226)
+- Portal wheel direction matches compositor axis signs on GNOME and KDE. (#226)
 - Screenshot errors retain their backend causes, and diagnostic subprocesses have bounded execution and cleanup.
+
+### Changed
+- Local development builds keep line information with less debug data, and CI host builds share their cache. Release settings are unchanged. (#225)
+- Pi and schema-check dependency lockfiles address audit findings. (#221)
 
 ## [0.7.10] - 2026-10-01
 
@@ -755,7 +764,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.10...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.11...HEAD
+[0.7.11]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.10...v0.7.11
 [0.7.10]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.9...v0.7.10
 [0.7.9]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.8...v0.7.9
 [0.7.8]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.7...v0.7.8
