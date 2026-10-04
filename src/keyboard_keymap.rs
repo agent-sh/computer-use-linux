@@ -147,13 +147,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Reader {
             version,
         } = event
         {
-            if interface == "wl_seat" {
-                // Two seats are enough to reject ambiguous device selection.
-                if state.seats.len() < 2 {
-                    state
-                        .seats
-                        .push(registry.bind(name, version.min(7), qh, ()));
-                }
+            // Two seats are enough to reject ambiguous device selection.
+            if interface == "wl_seat" && state.seats.len() < 2 {
+                state
+                    .seats
+                    .push(registry.bind(name, version.min(7), qh, ()));
             }
         }
     }
@@ -377,7 +375,7 @@ mod tests {
         assert!(validate_groups(
             "a^",
             &[xkeysym::key::a as i32, xkeysym::key::asciicircum as i32],
-            &[latin.clone()]
+            std::slice::from_ref(&latin)
         )
         .is_ok());
         let error = validate_groups(
