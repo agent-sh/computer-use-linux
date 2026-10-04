@@ -384,7 +384,7 @@ Spawn the binary with `["mcp"]` as the argv tail. It speaks JSON-RPC over stdio 
    computer-use-linux doctor | jq .readiness
    ```
 
-   Aim for `can_register_mcp_tools`, `can_build_accessibility_tree`, `can_send_development_input`, `can_query_windows`, and `can_capture_screenshots` all `true`. The `blockers` array should be empty. `can_capture_screenshots` means a route was detected, not that a test capture succeeded.
+   Aim for `can_register_mcp_tools`, `can_build_accessibility_tree`, `can_send_development_input`, and `can_query_windows` all `true`, with an empty `blockers` array. Doctor lists detected screenshot routes in `capabilities.screenshot`, but does not take a screenshot or request consent. Detected routes are always `screenshot_capture_status: "unverified"` and `can_capture_screenshots: false` in a doctor report. `get_app_state` records the result of its requested raw capture as `verified` or `failed`; only `verified` sets `can_capture_screenshots: true` in that response. If no route is detected, the status is `unavailable`. An unverified capture is a warning, not an installation blocker.
 
 2. **If `accessibility.at_spi_bus.ok = false`** — run `computer-use-linux setup` (or call the `setup_accessibility` MCP tool). This sets:
    - `org.gnome.desktop.interface toolkit-accessibility true`
@@ -393,7 +393,7 @@ Spawn the binary with `["mcp"]` as the argv tail. It speaks JSON-RPC over stdio 
 
 3. **If `windowing.can_list_windows = false`** — inspect `doctor.windowing.backends`. On GNOME Wayland, run `computer-use-linux setup-window-targeting` (or call `setup_window_targeting`) to install the bundled `computer-use-linux@avifenesh.dev` Shell extension, then log out and back in so GNOME Shell loads it. On KDE, Hyprland, niri, i3, COSMIC, or generic X11, install or expose the matching compositor tool/helper shown in the backend details.
 
-4. **Grant the screencast portal on first screenshot.** The first time `get_app_state` or any screenshot subcommand runs, GNOME will pop a portal dialog asking to share the screen. Accept once and tick "remember" to make it sticky for the session.
+4. **Verify screenshot capture.** Call `get_app_state` or run `computer-use-linux screenshot`. The Screenshot portal may request consent for the caller's app ID. On GNOME, that dialog can be rejected when the app ID does not match the focused app. A detected portal interface alone does not prove capture permission. Inspect the full backend error and the desktop portal logs if capture fails; `gnome-screenshot` is an optional fallback when GNOME Shell or portal calls are denied.
 
 5. **Confirm compatible ydotool 1.0.3+ and `ydotoold` are available.**
 
@@ -458,7 +458,7 @@ files.
 Computer-use tooling is, by definition, a privilege-escalation surface. The threat model:
 
 - **`ydotoold` runs as a per-user service** with read/write access to `/dev/uinput`. `install.sh` automates this for systemd user sessions and prints manual supervisor guidance elsewhere. Any process that can connect to its socket (`/run/user/$UID/.ydotool_socket`, mode `0600` by default) can synthesize arbitrary input — keypresses, clicks, anything. Keep the socket in the user runtime dir (the default), not in `/tmp` or any world-readable location. Do not run `ydotoold` as root or as a system service.
-- **The screencast portal asks for permission once per session.** Granting it lets the calling MCP host capture the screen for the rest of the session. If you don't want that, decline the portal dialog and use `get_app_state` with `include_screenshot: false`.
+- **Screenshot consent depends on the portal and caller's app ID.** A saved permission can apply to multiple processes with that identity. Doctor only detects the available routes and does not request consent. Use `get_app_state` with `include_screenshot: false` to skip capture.
 - **Persisted remote control is opt-in.** `COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP=1` stores the portal's single-use restore token in the user state directory, mode `0600`. A same-user process that can read that file can restore remote control without a new prompt until the desktop revokes the grant. Leave the variable unset to keep a prompt on every new process.
 - **AT-SPI exposes window contents to any client on your session bus.** Enabling the AT-SPI bridge (`setup_accessibility`) is a prerequisite for this binary; it's also what screen readers use, and it shares the same trust boundary.
 - **The GNOME Shell extension** is loaded only into your user's GNOME Shell, runs in the Shell's JS sandbox, and exposes a single DBus interface on the user session bus. It does not request any extra permissions.

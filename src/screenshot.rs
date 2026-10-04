@@ -194,12 +194,12 @@ pub async fn capture_screenshot_raw() -> Result<RawScreenshotCapture> {
         return forced.capture().await;
     }
 
-    // The Shell and portal DBus paths fail for background processes (systemd
+    // The Shell and portal DBus paths can fail for background processes (systemd
     // user services, non-interactive parent shells): GNOME Shell's
-    // DBusSenderChecker rejects unknown bus names, and the portal cancels with
-    // response code 2 when there is no foreground window. `gnome-screenshot`
-    // claims an allowlisted bus name and works regardless, so it is the final
-    // fallback. See issue #20.
+    // DBusSenderChecker rejects unknown bus names, and a portal consent dialog
+    // may be denied when the caller is not the focused app. Response code 2
+    // can also indicate other portal failures. `gnome-screenshot` claims an
+    // allowlisted bus name, so try it as the final fallback. See issue #20.
     let gnome_error = match capture_with_gnome_shell().await {
         Ok(capture) => return Ok(capture),
         Err(error) => error,
@@ -221,10 +221,10 @@ pub async fn capture_screenshot_raw() -> Result<RawScreenshotCapture> {
     };
 
     Err(anyhow!(
-        "GNOME Shell screenshot failed: {gnome_error}; \
-         XDG portal screenshot failed: {portal_error}; \
-         native X11 screenshot failed: {x11_error}; \
-         gnome-screenshot fallback failed: {cli_error}"
+        "GNOME Shell screenshot failed: {gnome_error:#}; \
+         XDG portal screenshot failed: {portal_error:#}; \
+         native X11 screenshot failed: {x11_error:#}; \
+         gnome-screenshot fallback failed: {cli_error:#}"
     ))
 }
 
@@ -404,8 +404,14 @@ async fn capture_with_portal() -> Result<RawScreenshotCapture> {
     .await
     .context("timed out waiting for XDG portal screenshot response")??;
 
-    if response_code != 0 {
-        bail!("XDG portal screenshot was denied or cancelled with response code {response_code}");
+    match response_code {
+        0 => {}
+        1 => bail!("XDG portal screenshot was cancelled by the user (response code 1)"),
+        2 => bail!(
+            "XDG portal screenshot ended without success (response code 2); \
+             check the desktop portal logs for permission or backend errors"
+        ),
+        _ => bail!("XDG portal screenshot returned unknown response code {response_code}"),
     }
 
     let uri_value = results

@@ -355,7 +355,7 @@ impl ComputerUseLinux {
         Parameters(params): Parameters<GetAppStateParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let verbose = params.verbose.unwrap_or(false);
-        let diagnostics = tokio::task::spawn_blocking(doctor_report)
+        let mut diagnostics = tokio::task::spawn_blocking(doctor_report)
             .await
             .expect("diagnostics task panicked");
         let (window_context, window_error, window_permissions_hint) =
@@ -378,7 +378,9 @@ impl ComputerUseLinux {
             .await;
         let (screenshot, screenshot_error) = if include_screenshot {
             let result: Result<ScreenshotCapture> = async {
-                let raw = capture_screenshot_raw().await?;
+                let raw = capture_screenshot_raw().await;
+                diagnostics.readiness.record_screenshot_result(raw.is_ok());
+                let raw = raw?;
                 self.cache_desktop_size(raw.width, raw.height);
                 if let Some(window) = window_context.as_ref() {
                     ensure_readonly_screenshot_target_is_visible(window)?;
@@ -6269,8 +6271,10 @@ mod tests {
                 can_focus_windows: true,
                 can_send_development_input: true,
                 can_capture_screenshots: true,
+                screenshot_capture_status: crate::diagnostics::ScreenshotCaptureStatus::Verified,
                 recommended_next_step: String::new(),
                 blockers: Vec::new(),
+                warnings: Vec::new(),
             },
             diagnostics: None,
             message: "ok".to_string(),
