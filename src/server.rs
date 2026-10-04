@@ -3507,10 +3507,12 @@ impl ComputerUseLinux {
     /// Warn when a click/scroll coordinate is outside the captured desktop.
     /// Click coordinates are physical capture-space pixels, so compare ONLY
     /// against the capture rect — the extension's logical layout is a
-    /// different space on scaled displays and would false-positive.
+    /// different space on scaled displays and would false-positive. This is a
+    /// best-effort warning: never request a new capture (and possibly consent)
+    /// merely to decide whether to append a note to an input result.
     async fn off_screen_note_for_point(&self, x: i32, y: i32) -> Option<String> {
-        let (mx, my, mw, mh) = self.capture_space_rect().await?;
-        let visible = x >= mx && y >= my && x < mx.saturating_add(mw) && y < my.saturating_add(mh);
+        let (mw, mh) = self.desktop_size.lock().ok().and_then(|guard| *guard)?;
+        let visible = x >= 0 && y >= 0 && (x as u32) < mw && (y as u32) < mh;
         if visible {
             return None;
         }
@@ -6160,13 +6162,14 @@ mod tests {
         let _cleanup = Cleanup(dir.clone());
         let socket_path = dir.join("input.sock");
         let _socket = std::os::unix::net::UnixDatagram::bind(&socket_path).unwrap();
-        for program in ["ydotool", "xdotool", "systemctl"] {
+        for program in ["ydotool", "xdotool", "systemctl", "gnome-screenshot"] {
             let path = dir.join(program);
             std::fs::write(
                 &path,
                 r#"#!/bin/sh
 case "${0##*/}" in
   systemctl) exit 0 ;;
+  gnome-screenshot) printf 'capture\n' >> "$CUL_POINTER_TEST_CAPTURE_LOG"; exit 1 ;;
   ydotool)
     case "$1" in help|--help) printf '%s\n' click mousemove type key debug; exit 0 ;; esac
     # Capability probes use their own socket. Record only dispatched input.
@@ -6180,11 +6183,13 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
         }
         for mode in [
             "wayland-default",
+            "wayland-uncached",
             "wayland-ydotool",
             "wayland-portal",
             "x11",
         ] {
             let log = dir.join(format!("{mode}.log"));
+            let capture_log = dir.join(format!("{mode}-capture.log"));
             let mut command = Command::new(std::env::current_exe().unwrap());
             command
                 .args([
@@ -6197,6 +6202,8 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
                 .env("HOME", &dir)
                 .env("CUL_POINTER_TEST_MODE", mode)
                 .env("CUL_POINTER_TEST_LOG", &log)
+                .env("CUL_POINTER_TEST_CAPTURE_LOG", &capture_log)
+                .env("COMPUTER_USE_LINUX_SCREENSHOT_BACKEND", "gnome-screenshot")
                 .env("CUL_POINTER_TEST_SOCKET", &socket_path)
                 .env("YDOTOOL_SOCKET", &socket_path)
                 .env("XDG_RUNTIME_DIR", &dir)
@@ -6243,6 +6250,10 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
+            assert!(
+                !capture_log.exists(),
+                "{mode}: a pointer warning triggered screenshot capture"
+            );
             let commands = std::fs::read_to_string(&log).unwrap_or_default();
             match mode {
                 "wayland-portal" => assert!(commands.is_empty(), "{commands}"),
@@ -6267,7 +6278,11 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             return;
         };
         let backend = ComputerUseLinux::default();
-        backend.cache_desktop_size(9376, 1600);
+        if mode != "wayland-uncached" {
+            backend.cache_desktop_size(9376, 1600);
+            assert!(backend.off_screen_note_for_point(9376, 700).await.is_some());
+        }
+        assert!(backend.off_screen_note_for_point(5536, 700).await.is_none());
         let click: ClickParams =
             serde_json::from_value(serde_json::json!({"x":5536,"y":700})).unwrap();
         let scroll: ScrollParams =
