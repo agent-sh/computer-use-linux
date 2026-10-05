@@ -546,15 +546,18 @@ impl App {
     }
 
     /// Places a fixed-size panel with its top-left at a desktop point,
-    /// clamped to the output, and returns the offset of `point` inside it.
+    /// clamped to the output under `on`, and returns the offset of `point`
+    /// inside it. `on` is separate because a sprite's top-left can lie on a
+    /// neighbouring output, which would clip the sprite away.
     fn place(
         &mut self,
         qh: &QueueHandle<Self>,
         kind: Kind,
         size: (u32, u32),
         top_left: (f32, f32),
+        on: (f32, f32),
     ) -> Option<(f32, f32)> {
-        let (output, rect) = self.output_for(top_left)?;
+        let (output, rect) = self.output_for(on)?;
         let left = (top_left.0 - rect.x)
             .clamp(0.0, (rect.w - size.0 as f32).max(0.0))
             .round();
@@ -600,7 +603,7 @@ impl App {
         match cursor {
             Some((x, y)) => {
                 let size = (CURSOR_SIZE as u32, CURSOR_SIZE as u32);
-                self.place(qh, Kind::Cursor, size, (x - half, y - half));
+                self.place(qh, Kind::Cursor, size, (x - half, y - half), (x, y));
             }
             None => self.panels.retain(|panel| panel.kind != Kind::Cursor),
         }
@@ -611,18 +614,19 @@ impl App {
             .or_else(|| self.output_rects().into_iter().next());
         if let Some((_, rect)) = pill_output {
             let left = rect.x + (rect.w - PILL_SIZE.0 as f32) / 2.0;
-            self.place(qh, Kind::Pill, PILL_SIZE, (left, rect.y + PILL_TOP as f32));
+            let top_left = (left, rect.y + PILL_TOP as f32);
+            self.place(qh, Kind::Pill, PILL_SIZE, top_left, top_left);
         }
 
         match (&self.keyboard, cursor, pill_output) {
             // Keystrokes go to the focused field, usually where the cursor last clicked.
             (Some(_), Some((x, y)), _) => {
-                self.place(qh, Kind::Bubble, BUBBLE_SIZE, (x + 18.0, y + 22.0));
+                self.place(qh, Kind::Bubble, BUBBLE_SIZE, (x + 18.0, y + 22.0), (x, y));
             }
             (Some(_), None, Some((_, rect))) => {
                 let left = rect.x + (rect.w - BUBBLE_SIZE.0 as f32) / 2.0;
                 let top = rect.y + (PILL_TOP + PILL_SIZE.1 as i32) as f32;
-                self.place(qh, Kind::Bubble, BUBBLE_SIZE, (left, top));
+                self.place(qh, Kind::Bubble, BUBBLE_SIZE, (left, top), (left, top));
             }
             _ => self.panels.retain(|panel| panel.kind != Kind::Bubble),
         }

@@ -391,7 +391,7 @@ impl ComputerUseLinux {
         let (screenshot, screenshot_error) = if include_screenshot {
             let result: Result<ScreenshotCapture> = async {
                 let raw = {
-                    let _hold = self.indicator.hold_for_capture().await;
+                    let _hold = self.indicator.hold_for_capture().await?;
                     capture_screenshot_raw().await?
                 };
                 self.cache_desktop_size(raw.width, raw.height);
@@ -577,7 +577,7 @@ impl ComputerUseLinux {
             .and_then(|window| window.title.clone());
 
         let raw_capture = {
-            let _hold = self.indicator.hold_for_capture().await;
+            let _hold = self.indicator.hold_for_capture().await?;
             capture_screenshot_raw()
                 .await
                 .context("screenshot failed")?

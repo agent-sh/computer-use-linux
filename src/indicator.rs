@@ -20,7 +20,7 @@
 use std::{
     env,
     fs::{File, OpenOptions, TryLockError},
-    io::ErrorKind,
+    io::{self, ErrorKind},
     os::linux::net::SocketAddrExt,
     os::unix::net::{SocketAddr, UnixDatagram},
     path::{Path, PathBuf},
@@ -297,24 +297,46 @@ impl Indicator {
     /// Keeps every overlay off the screen until the returned hold drops, and
     /// waits until the compositor has dropped whatever was showing. Works with
     /// this server's indicator disabled too: another agent's overlay must not
-    /// end up in this server's captures.
-    pub(crate) async fn hold_for_capture(&self) -> CaptureHold<'_> {
+    /// end up in this server's captures. Fails when a running overlay cannot
+    /// be told to hide, rather than capture it.
+    pub(crate) async fn hold_for_capture(&self) -> anyhow::Result<CaptureHold<'_>> {
         let hold = CaptureHold {
             indicator: self,
             lock: self.take_capture_lock().await,
         };
         let Some(socket) = &self.socket else {
-            return hold;
+            return Ok(hold);
         };
         let mut reply = [0u8; 16];
         // Drop a late answer to an earlier request.
         while socket.recv(&mut reply).is_ok() {}
-        if !self.send_raw(&IndicatorEvent {
+        let begin = IndicatorEvent {
             capture: Some(Capture::Begin),
             ..Default::default()
-        }) {
-            // No overlay is running; the lock keeps one that starts now blank.
-            return hold;
+        };
+        let deadline = Instant::now() + CAPTURE_REPLY_WAIT;
+        loop {
+            match self.send_raw(&begin) {
+                Ok(()) => break,
+                // No overlay is running; the lock keeps one that starts now blank.
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::NotFound | ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    return Ok(hold)
+                }
+                // A full queue: the overlay is running but not reading.
+                Err(error)
+                    if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await
+                }
+                Err(error) => anyhow::bail!(
+                    "could not hide the action indicator overlay before capturing: {error}"
+                ),
+            }
         }
         let deadline = Instant::now() + CAPTURE_REPLY_WAIT;
         while Instant::now() < deadline {
@@ -323,7 +345,7 @@ impl Indicator {
                 // directory, may waive the wait.
                 Ok((len, from)) if from.as_pathname() == self.path.as_deref() => {
                     if &reply[..len] == CAPTURE_REPLY_EMPTY {
-                        return hold;
+                        return Ok(hold);
                     }
                     break;
                 }
@@ -333,7 +355,7 @@ impl Indicator {
         }
         // Shown, or no answer: assume it was visible.
         tokio::time::sleep(HIDE_SETTLE).await;
-        hold
+        Ok(hold)
     }
 
     async fn take_capture_lock(&self) -> Option<File> {
@@ -354,14 +376,11 @@ impl Indicator {
         None
     }
 
-    fn send_raw(&self, event: &IndicatorEvent) -> bool {
+    fn send_raw(&self, event: &IndicatorEvent) -> io::Result<()> {
         let (Some(socket), Some(path)) = (&self.socket, &self.path) else {
-            return false;
+            return Err(ErrorKind::NotFound.into());
         };
-        let Ok(payload) = serde_json::to_vec(event) else {
-            return false;
-        };
-        socket.send_to(&payload, path).is_ok()
+        socket.send_to(&serde_json::to_vec(event)?, path).map(drop)
     }
 
     /// Sends an event, starting the overlay first if it is not running.
@@ -435,7 +454,7 @@ impl Drop for CaptureHold<'_> {
     fn drop(&mut self) {
         // Release first, so the overlay finds the lock free.
         drop(self.lock.take());
-        self.indicator.send_raw(&IndicatorEvent {
+        let _ = self.indicator.send_raw(&IndicatorEvent {
             capture: Some(Capture::End),
             ..Default::default()
         });
@@ -582,7 +601,7 @@ mod tests {
             assert_eq!(&buf[..len], br#"{"capture":"end"}"#);
         });
         let started = Instant::now();
-        let hold = sender.hold_for_capture().await;
+        let hold = sender.hold_for_capture().await.unwrap();
         let took = started.elapsed();
         assert!(capture_held(&socket));
         drop(hold);
@@ -607,11 +626,24 @@ mod tests {
         let socket = dir.join(SOCKET_NAME);
         let sender = sender_for(&socket, true);
         let started = Instant::now();
-        let hold = sender.hold_for_capture().await;
+        let hold = sender.hold_for_capture().await.unwrap();
         assert!(started.elapsed() < HIDE_SETTLE);
         assert!(capture_held(&socket));
         drop(hold);
         assert!(!capture_held(&socket));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn captures_fail_while_a_stalled_overlay_cannot_be_told_to_hide() {
+        let dir = scratch_dir("stalled");
+        let socket = dir.join(SOCKET_NAME);
+        let _overlay = UnixDatagram::bind(&socket).unwrap();
+        let sender = sender_for(&socket, true);
+        let stuffer = UnixDatagram::unbound().unwrap();
+        stuffer.set_nonblocking(true).unwrap();
+        while stuffer.send_to(b"{}", &socket).is_ok() {}
+        assert!(sender.hold_for_capture().await.is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -622,7 +654,7 @@ mod tests {
         let overlay = UnixDatagram::bind(&socket).unwrap();
         overlay.set_nonblocking(true).unwrap();
         let sender = sender_for(&socket, false);
-        let hold = sender.hold_for_capture().await;
+        let hold = sender.hold_for_capture().await.unwrap();
         assert!(capture_held(&socket));
         let mut buf = [0u8; 64];
         let len = overlay.recv(&mut buf).unwrap();
