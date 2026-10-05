@@ -1,6 +1,6 @@
 [package]
 name = "computer-use-linux"
-version = "0.7.10"
+version = "0.7.11"
 edition = "2021"
 authors = ["Avi Fenesh <avifenesh@users.noreply.github.com>"]
 license = "MIT"
@@ -58,8 +58,13 @@ wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 # Pure-Rust X11 client (no libxcb). Native X11 sessions only: absolute window
 # origins for the EWMH backend (wmctrl -lG counts the frame offset twice, #157).
 x11rb = "0.14"
+xkbcommon-dl = "0.4.2"
 xkeysym = "0.2.1"
 zbus = "5.14.0"
+
+[profile.dev]
+# Keep file and line numbers in backtraces without full variable/type debug info.
+debug = "line-tables-only"
 
 [profile.release]
 codegen-units = 1

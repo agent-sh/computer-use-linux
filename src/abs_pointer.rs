@@ -6,11 +6,11 @@
 //! scaling — clicks land in the wrong place on multi-monitor / HiDPI setups.
 //!
 //! Here we create our own uinput device that exposes a true `ABS_X`/`ABS_Y`
-//! axis whose range equals the **logical desktop size** (the same coordinate
-//! space the portal screenshot reports). The compositor maps an absolute
-//! device's axis range across the whole logical layout, so `ABS(x, y)` lands at
-//! screenshot pixel `(x, y)` regardless of scaling — and with no approval
-//! dialog (we already hold `/dev/uinput` access).
+//! axis whose range matches the full screenshot's pixel dimensions. The
+//! compositor maps that range across its logical output layout. Callers keep
+//! using capture-pixel coordinates, which can differ from logical coordinates
+//! on scaled outputs. Returned landings describe the emitted coordinates;
+//! they are not a readback of the compositor's actual pointer position.
 
 use std::thread::sleep;
 use std::time::Duration;
@@ -64,9 +64,8 @@ pub struct AbsPointer {
 }
 
 impl AbsPointer {
-    /// Create the absolute pointer sized to the logical desktop `width`×`height`
-    /// (the portal screenshot dimensions). Blocks ~`settle` ms so libinput picks
-    /// the device up before the first event.
+    /// Create the absolute pointer sized to the capture's `width`×`height`.
+    /// Waits 500 ms for libinput to enumerate the device before its first event.
     pub fn create(width: i32, height: i32) -> Result<Self> {
         let geometry = AbsPointerGeometry::from_dimensions(width, height);
         let (max_x, max_y) = geometry.axis_maxima();
@@ -98,7 +97,7 @@ impl AbsPointer {
         Ok(Self { device, geometry })
     }
 
-    /// Move the pointer to absolute logical coordinates `(x, y)` and report
+    /// Move the pointer to capture-pixel coordinates `(x, y)` and report
     /// both the requested point and the values emitted after edge clamping.
     pub fn move_to(&mut self, x: i32, y: i32) -> Result<PointerLanding> {
         let landing = self.geometry.landing_for(x, y);
@@ -149,10 +148,14 @@ impl AbsPointer {
         self.device
             .emit(&[InputEvent::new_now(EventType::KEY.0, code, 1)])?;
         sleep(Duration::from_millis(40));
-        let _end_landing = self.move_to(end.0, end.1)?;
+        let end_landing = self.move_to(end.0, end.1);
         sleep(Duration::from_millis(40));
-        self.device
-            .emit(&[InputEvent::new_now(EventType::KEY.0, code, 0)])?;
+        // Always try to release after a press, even if endpoint motion failed.
+        let released = self
+            .device
+            .emit(&[InputEvent::new_now(EventType::KEY.0, code, 0)]);
+        let _end_landing = end_landing?;
+        released?;
         Ok(())
     }
 }

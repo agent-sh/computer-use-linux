@@ -137,5 +137,8 @@ Ready output has:
 - `can_build_accessibility_tree: true`
 - `can_query_windows: true`
 - `can_send_development_input: true`
-- `can_capture_screenshots: true`
+- `screenshot_capture_status: "unverified"`
+- `can_capture_screenshots: false`
 - `blockers: []`
+
+Doctor detects screenshot routes without capturing or requesting consent. Treat unverified capture as a warning. Call `get_app_state` with `include_screenshot: true` to verify it: a successful raw capture reports `screenshot_capture_status: "verified"` and `can_capture_screenshots: true`; a failure reports `failed` and keeps the boolean false. Inspect `screenshot_error` for the full backend cause.

@@ -169,12 +169,66 @@ pub struct ReadinessReport {
     pub can_focus_apps: bool,
     pub can_focus_windows: bool,
     pub can_send_development_input: bool,
-    /// A screenshot route was detected (GNOME Shell, an XDG Screenshot portal
-    /// that exports its Screenshot method, or the gnome-screenshot fallback).
-    /// Detection only: no test capture is taken.
+    /// A raw screenshot was successfully captured while producing this report.
+    /// Doctor only detects routes, so this remains false until capture is tested.
     pub can_capture_screenshots: bool,
+    pub screenshot_capture_status: ScreenshotCaptureStatus,
     pub recommended_next_step: String,
     pub blockers: Vec<String>,
+    /// Untested capabilities and optional remediation, without blocking setup.
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenshotCaptureStatus {
+    /// No backend route was detected; no capture was attempted.
+    Unavailable,
+    /// At least one route was detected; no capture was attempted.
+    Unverified,
+    /// A raw screenshot was captured successfully for this report.
+    Verified,
+    /// The raw capture attempted for this report failed.
+    Failed,
+}
+
+const SCREENSHOT_UNAVAILABLE: &str = "No screenshot route was detected: GNOME Shell is absent, the XDG portal does not export org.freedesktop.portal.Screenshot, this is not a native X11 session, and gnome-screenshot is not installed. get_app_state and screenshot return no image; element-aware actions from the accessibility tree still work.";
+const SCREENSHOT_UNVERIFIED: &str = "Screenshot routes were detected, but capture is unverified. Doctor does not take a screenshot or check screenshot consent. GNOME Shell can reject callers, and a portal may require consent for the caller's app ID. Call screenshot or get_app_state to verify capture.";
+const SCREENSHOT_MISSING_GNOME_FALLBACK: &str = "gnome-screenshot is not installed. On GNOME it provides a fallback when Shell or portal calls are denied; install it or inspect the desktop portal logs and screenshot permissions for the actual caller.";
+const SCREENSHOT_FAILED: &str = "Screenshot capture failed for this request. Inspect screenshot_error for the full backend errors; accessibility-tree actions still work.";
+const SCREENSHOT_FAILED_NEXT_STEP: &str = "Inspect screenshot_error and the desktop portal logs for the failed capture. On GNOME, gnome-screenshot can provide a fallback when Shell or portal calls are denied.";
+const READY_NEXT_STEP: &str = "Computer Use is ready: AT-SPI tree support, window targeting, and a Linux input backend are available.";
+
+impl ReadinessReport {
+    /// Record only the raw backend capture, before crop or encoding can fail.
+    pub(crate) fn record_screenshot_result(&mut self, succeeded: bool) {
+        self.can_capture_screenshots = succeeded;
+        self.screenshot_capture_status = if succeeded {
+            ScreenshotCaptureStatus::Verified
+        } else {
+            ScreenshotCaptureStatus::Failed
+        };
+        self.warnings.retain(|warning| {
+            warning != SCREENSHOT_UNVERIFIED && warning != SCREENSHOT_MISSING_GNOME_FALLBACK
+        });
+        self.blockers
+            .retain(|blocker| blocker != SCREENSHOT_UNAVAILABLE && blocker != SCREENSHOT_FAILED);
+        if !succeeded {
+            self.blockers.push(SCREENSHOT_FAILED.to_string());
+        }
+        if self.can_build_accessibility_tree
+            && self.can_query_windows
+            && self.can_focus_windows
+            && self.can_send_development_input
+        {
+            self.recommended_next_step = if succeeded {
+                READY_NEXT_STEP
+            } else {
+                SCREENSHOT_FAILED_NEXT_STEP
+            }
+            .to_string();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -444,9 +498,10 @@ fn hydrate_desktop_env_from_process_tree() {
 }
 
 fn hydrate_desktop_env_from_systemd_user() {
-    let Ok(output) = Command::new("systemctl")
-        .args(["--user", "show-environment"])
-        .output()
+    let mut command = Command::new("systemctl");
+    command.args(["--user", "show-environment"]);
+    let Ok(output) =
+        crate::command_runner::output_blocking(&mut command, "read systemd user environment")
     else {
         return;
     };
@@ -894,9 +949,10 @@ fn readiness_report_with_portal_keyboard(
     accessibility: &AccessibilityReport,
     windowing: &WindowingReport,
     input: &InputReport,
-    can_capture_screenshots: bool,
+    screenshot_routes_detected: bool,
 ) -> ReadinessReport {
     let mut blockers = Vec::new();
+    let mut warnings = Vec::new();
     let can_build_accessibility_tree = can_build_accessibility_tree(accessibility);
     let can_query_windows = windowing.can_list_windows;
     let can_focus_apps = windowing.can_focus_apps;
@@ -934,11 +990,13 @@ fn readiness_report_with_portal_keyboard(
         );
     }
 
-    if !can_capture_screenshots {
-        blockers.push(
-            "No screenshot route was detected: GNOME Shell is absent, the XDG portal does not export org.freedesktop.portal.Screenshot, this is not a native X11 session, and gnome-screenshot is not installed. get_app_state and screenshot return no image; element-aware actions from the accessibility tree still work."
-                .to_string(),
-        );
+    if screenshot_routes_detected {
+        warnings.push(SCREENSHOT_UNVERIFIED.to_string());
+        if platform.gnome_shell_version.ok && !platform.gnome_screenshot.ok {
+            warnings.push(SCREENSHOT_MISSING_GNOME_FALLBACK.to_string());
+        }
+    } else {
+        blockers.push(SCREENSHOT_UNAVAILABLE.to_string());
     }
 
     let recommended_next_step = if !can_build_accessibility_tree {
@@ -958,11 +1016,11 @@ fn readiness_report_with_portal_keyboard(
     } else if !can_send_development_input {
         "Enable a keyboard-capable input backend: enable the XDG RemoteDesktop portal or install wtype on compatible Wayland compositors, install xdotool for X11, or start ydotoold with a socket accessible to this desktop user."
             .to_string()
-    } else if !can_capture_screenshots {
+    } else if !screenshot_routes_detected {
         "Enable a screenshot route: install an XDG desktop portal backend that implements Screenshot for this desktop, or install gnome-screenshot. Accessibility-tree actions work meanwhile."
             .to_string()
     } else {
-        "Computer Use is ready: AT-SPI tree support, window targeting, and a Linux input backend are available."
+        "AT-SPI tree support, window targeting, and a Linux input backend are available. Call screenshot or get_app_state to verify screenshot capture."
             .to_string()
     };
 
@@ -973,9 +1031,15 @@ fn readiness_report_with_portal_keyboard(
         can_focus_apps,
         can_focus_windows,
         can_send_development_input,
-        can_capture_screenshots,
+        can_capture_screenshots: false,
+        screenshot_capture_status: if screenshot_routes_detected {
+            ScreenshotCaptureStatus::Unverified
+        } else {
+            ScreenshotCaptureStatus::Unavailable
+        },
         recommended_next_step,
         blockers,
+        warnings,
     }
 }
 
@@ -1056,7 +1120,9 @@ fn ydotool_socket_check() -> Check {
 }
 
 fn user_id() -> Option<String> {
-    let output = Command::new("id").arg("-u").output().ok()?;
+    let mut command = Command::new("id");
+    command.arg("-u");
+    let output = crate::command_runner::output_blocking(&mut command, "query user id").ok()?;
     output
         .status
         .success()
@@ -1473,7 +1539,10 @@ fn run_command(command: &str, args: &[&str], with_session_bus: bool) -> Check {
         }
     }
 
-    match cmd.output() {
+    // Introspection can block while a portal retrieves backend properties.
+    // Bound every probe and reap its process group instead of stalling doctor
+    // and every get_app_state request waiting for that diagnostic.
+    match crate::command_runner::output_blocking(&mut cmd, &format!("run diagnostic {command}")) {
         Ok(output) if output.status.success() => {
             let detail = String::from_utf8_lossy(&output.stdout).trim().to_string();
             Check::ok(if detail.is_empty() {
@@ -1492,13 +1561,60 @@ fn run_command(command: &str, args: &[&str], with_session_bus: bool) -> Check {
                 detail
             })
         }
-        Err(error) => Check::fail(error.to_string()),
+        Err(error) => Check::fail(format!("{error:#}")),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_command_timeout_reaps_the_hung_process() {
+        use std::time::{Duration, Instant};
+
+        let pid_path = std::env::temp_dir().join(format!(
+            "cul-diagnostic-timeout-{}-{}.pid",
+            std::process::id(),
+            getrandom::u64().unwrap()
+        ));
+        let started = Instant::now();
+        let result = run_command(
+            "/bin/sh",
+            &[
+                "-c",
+                "printf '%s' \"$$\" > \"$1\"; exec /bin/sleep 60",
+                "diagnostic-timeout-test",
+                pid_path.to_str().unwrap(),
+            ],
+            false,
+        );
+        let elapsed = started.elapsed();
+        let pid = fs::read_to_string(&pid_path);
+        let _ = fs::remove_file(&pid_path);
+        let pid: u32 = pid.expect("fixture must record its pid").parse().unwrap();
+
+        assert!(!result.ok, "hung diagnostic must fail");
+        assert!(result.detail.contains("timed out after 2000 ms"));
+        assert!(elapsed < Duration::from_secs(4), "took {elapsed:?}");
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "diagnostic child must be killed and reaped before returning"
+        );
+    }
+
+    #[test]
+    fn diagnostic_spawn_failure_keeps_the_os_cause() {
+        let path = std::env::temp_dir().join(format!(
+            "cul-missing-diagnostic-{}-{}",
+            std::process::id(),
+            getrandom::u64().unwrap()
+        ));
+        let result = run_command(path.to_str().unwrap(), &[], false);
+        assert!(!result.ok);
+        assert!(result.detail.contains("failed to run diagnostic"));
+        assert!(result.detail.contains("os error 2"));
+    }
 
     #[test]
     fn setup_repairs_saved_key_even_when_runtime_is_ready() {
@@ -2127,13 +2243,16 @@ mod tests {
         let windowing = windowing_report(true, false);
         let input = input_report(true);
 
-        let readiness = readiness_report(
+        let mut readiness = readiness_report(
             &platform,
             &portal_report(Check::fail("missing")),
             &accessibility,
             &windowing,
             &input,
         );
+
+        readiness.record_screenshot_result(true);
+        assert!(readiness.can_capture_screenshots);
 
         assert!(readiness.can_query_windows);
         assert!(!readiness.can_focus_windows);
@@ -2211,6 +2330,11 @@ mod tests {
         let readiness = readiness_report(&platform, &portals, &accessibility, &windowing, &input);
 
         assert!(!readiness.can_capture_screenshots);
+        assert_eq!(
+            readiness.screenshot_capture_status,
+            ScreenshotCaptureStatus::Unavailable
+        );
+        assert!(readiness.warnings.is_empty());
         assert!(readiness
             .blockers
             .iter()
@@ -2238,11 +2362,16 @@ mod tests {
 
         assert_eq!(capabilities.screenshot, ["x11", "gnome_screenshot"]);
         assert_eq!(capabilities.preferred.screenshot.as_deref(), Some("x11"));
-        assert!(readiness.can_capture_screenshots);
+        assert!(!readiness.can_capture_screenshots);
+        assert_eq!(
+            readiness.screenshot_capture_status,
+            ScreenshotCaptureStatus::Unverified
+        );
+        assert!(readiness.blockers.is_empty());
     }
 
     #[test]
-    fn readiness_and_capabilities_share_the_screenshot_route_list() {
+    fn screenshot_route_detection_is_not_capture_verification() {
         let mut platform = platform_report();
         platform.gnome_shell_version = Check::fail("missing");
         platform.gnome_screenshot = Check::fail("missing");
@@ -2252,11 +2381,37 @@ mod tests {
         let windowing = windowing_report(true, true);
         let input = input_report(true);
 
-        let readiness = readiness_report(&platform, &portals, &accessibility, &windowing, &input);
+        let mut readiness =
+            readiness_report(&platform, &portals, &accessibility, &windowing, &input);
         let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
 
-        assert!(readiness.can_capture_screenshots);
+        assert!(!readiness.can_capture_screenshots);
+        assert_eq!(
+            readiness.screenshot_capture_status,
+            ScreenshotCaptureStatus::Unverified
+        );
+        assert_eq!(readiness.warnings, [SCREENSHOT_UNVERIFIED]);
+        assert!(readiness.blockers.is_empty());
         assert_eq!(capabilities.screenshot, ["portal"]);
+
+        readiness.record_screenshot_result(false);
+        assert!(!readiness.can_capture_screenshots);
+        assert_eq!(
+            readiness.screenshot_capture_status,
+            ScreenshotCaptureStatus::Failed
+        );
+        assert_eq!(readiness.blockers, [SCREENSHOT_FAILED]);
+        assert!(readiness.warnings.is_empty());
+        assert_eq!(readiness.recommended_next_step, SCREENSHOT_FAILED_NEXT_STEP);
+
+        readiness.record_screenshot_result(true);
+        assert!(readiness.can_capture_screenshots);
+        assert_eq!(
+            readiness.screenshot_capture_status,
+            ScreenshotCaptureStatus::Verified
+        );
+        assert!(readiness.blockers.is_empty());
+        assert_eq!(readiness.recommended_next_step, READY_NEXT_STEP);
     }
 
     #[test]
