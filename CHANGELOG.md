@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.12] - 2026-10-07
+
 ### Added
 - Add a native GNOME Shell activity indicator with cursor motion, click pulses, keycaps, typed-text masking, agent colors and idle fading. The helper preserves shared capture exclusion and rejects captures when hiding is not acknowledged.
 - On-screen indicator, on by default: `computer-use-linux-indicator` draws a
@@ -788,7 +790,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.11...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.12...HEAD
+[0.7.12]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.11...v0.7.12
 [0.7.11]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.10...v0.7.11
 [0.7.10]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.9...v0.7.10
 [0.7.9]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.8...v0.7.9
