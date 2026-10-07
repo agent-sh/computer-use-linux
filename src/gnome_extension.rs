@@ -6,7 +6,7 @@ use crate::windows::{window_permission_hint, WindowInfo};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::{
-    env, fs,
+    env, fs, io,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -39,32 +39,39 @@ pub struct SetupCommandReport {
 pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
     hydrate_session_bus_env();
 
+    let user_dir = extension_dir();
     let system_dir = Path::new(SYSTEM_EXTENSIONS_DIR).join(UUID);
     let system_installed = system_dir.join("metadata.json").is_file();
     let extension_dir = if system_installed {
         system_dir
     } else {
-        extension_dir()
+        user_dir.clone()
     };
     let extension_was_enabled = gnome_extension_enabled();
     let mut wrote_files = false;
     let mut changed_files = false;
-    let mut write_error = None;
-    // A user copy would shadow the packaged system extension.
-    if !system_installed {
-        match write_extension_files(&extension_dir) {
+    let mut file_error = None;
+    let mut removed_user_copy = false;
+    if system_installed {
+        // A user copy shadows the packaged system extension.
+        match remove_user_copy(&user_dir) {
+            Ok(removed) => removed_user_copy = removed,
+            Err(error) => file_error = Some(error),
+        }
+    } else {
+        match write_extension_files(&user_dir) {
             Ok(report) => {
                 wrote_files = report.wrote_files;
                 changed_files = report.changed_files;
             }
-            Err(error) => write_error = Some(error),
+            Err(error) => file_error = Some(error),
         }
     }
 
-    let enable_command = if let Some(error) = &write_error {
+    let enable_command = if let Some(error) = &file_error {
         SetupCommandReport {
             ok: false,
-            detail: format!("extension file write failed: {error}"),
+            detail: format!("extension file setup failed: {error}"),
         }
     } else {
         run_gnome_extensions_enable()
@@ -79,12 +86,20 @@ pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
         }
     };
 
-    let requires_shell_reload =
-        setup_requires_shell_reload(windows_error.as_ref(), extension_was_enabled, changed_files);
-    let message = if write_error.is_some() {
-        "Could not install the computer-use-linux GNOME Shell extension files.".to_string()
+    // GNOME Shell keeps the removed user copy loaded until it reloads.
+    let requires_shell_reload = removed_user_copy
+        || setup_requires_shell_reload(
+            windows_error.as_ref(),
+            extension_was_enabled,
+            changed_files,
+        );
+    let message = if file_error.is_some() {
+        "Could not set up the computer-use-linux GNOME Shell extension files.".to_string()
     } else if !enable_command.ok {
-        "computer-use-linux GNOME Shell extension files were installed, but enabling the extension failed. Enable it with gnome-extensions after GNOME Shell sees the new extension."
+        "computer-use-linux GNOME Shell extension files are available, but enabling the extension failed. Enable it with gnome-extensions after GNOME Shell sees the new extension."
+            .to_string()
+    } else if removed_user_copy {
+        "Removed a user copy of the computer-use-linux GNOME Shell extension that hid the system extension. Log out and back in so that GNOME Shell loads the system extension."
             .to_string()
     } else if windows_error.is_none() && requires_shell_reload {
         shell_reload_message(extension_was_enabled).to_string()
@@ -92,7 +107,7 @@ pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
         "computer-use-linux GNOME Shell extension is active and window targeting is available."
             .to_string()
     } else {
-        "computer-use-linux GNOME Shell extension files were installed and enable was requested, but GNOME Shell is not serving the window-control DBus API yet. Log out and back in, then retry setup_window_targeting."
+        "computer-use-linux GNOME Shell extension files are available and enable was requested, but GNOME Shell is not serving the window-control DBus API yet. Log out and back in, then retry setup_window_targeting."
             .to_string()
     };
 
@@ -137,6 +152,17 @@ fn write_extension_files(extension_dir: &Path) -> Result<ExtensionWriteReport, S
         wrote_files: true,
         changed_files,
     })
+}
+
+fn remove_user_copy(extension_dir: &Path) -> Result<bool, String> {
+    match fs::remove_dir_all(extension_dir) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "failed to remove {}: {error}",
+            extension_dir.display()
+        )),
+    }
 }
 
 fn file_content_changed(path: &Path, expected: &str) -> bool {
@@ -404,6 +430,16 @@ mod tests {
         let third = write_extension_files(&extension_dir.0).unwrap();
         assert!(third.wrote_files);
         assert!(third.changed_files);
+    }
+
+    #[test]
+    fn user_copy_removal_reports_whether_a_copy_existed() {
+        let extension_dir = TestExtensionDirectory::new();
+        write_extension_files(&extension_dir.0).unwrap();
+
+        assert!(remove_user_copy(&extension_dir.0).unwrap());
+        assert!(!extension_dir.0.exists());
+        assert!(!remove_user_copy(&extension_dir.0).unwrap());
     }
 
     #[test]
