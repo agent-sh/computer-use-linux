@@ -6,9 +6,11 @@ use crate::windows::{window_permission_hint, WindowInfo};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::{
+    collections::HashMap,
     env, fs, io,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 pub const UUID: &str = identity::GNOME_EXTENSION_UUID;
@@ -86,8 +88,18 @@ pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
         }
     };
 
-    // GNOME Shell keeps the removed user copy loaded until it reloads.
-    let requires_shell_reload = removed_user_copy
+    // Enabling an extension does not replace the object cached by GNOME Shell.
+    let system_reload_pending = if system_installed {
+        let loaded_path = loaded_extension_path().await;
+        system_extension_requires_shell_reload(
+            removed_user_copy,
+            loaded_path.as_deref(),
+            &extension_dir,
+        )
+    } else {
+        false
+    };
+    let requires_shell_reload = system_reload_pending
         || setup_requires_shell_reload(
             windows_error.as_ref(),
             extension_was_enabled,
@@ -98,8 +110,8 @@ pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
     } else if !enable_command.ok {
         "computer-use-linux GNOME Shell extension files are available, but enabling the extension failed. Enable it with gnome-extensions after GNOME Shell sees the new extension."
             .to_string()
-    } else if removed_user_copy {
-        "Removed a user copy of the computer-use-linux GNOME Shell extension that hid the system extension. Log out and back in so that GNOME Shell loads the system extension."
+    } else if system_reload_pending {
+        "GNOME Shell must reload before the computer-use-linux system extension is active. Log out and back in so that GNOME Shell loads the system extension."
             .to_string()
     } else if windows_error.is_none() && requires_shell_reload {
         shell_reload_message(extension_was_enabled).to_string()
@@ -163,6 +175,45 @@ fn remove_user_copy(extension_dir: &Path) -> Result<bool, String> {
             extension_dir.display()
         )),
     }
+}
+
+async fn loaded_extension_path() -> Option<PathBuf> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let connection = zbus::Connection::session().await.ok()?;
+        loaded_extension_path_on_connection(&connection)
+            .await
+            .ok()
+            .flatten()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn loaded_extension_path_on_connection(
+    connection: &zbus::Connection,
+) -> Result<Option<PathBuf>, zbus::Error> {
+    let proxy = zbus::Proxy::new(
+        connection,
+        "org.gnome.Shell",
+        "/org/gnome/Shell",
+        "org.gnome.Shell.Extensions",
+    )
+    .await?;
+    let info: HashMap<String, zbus::zvariant::OwnedValue> =
+        proxy.call("GetExtensionInfo", &(UUID,)).await?;
+    Ok(info
+        .get("path")
+        .and_then(|value| <&str>::try_from(value).ok())
+        .map(PathBuf::from))
+}
+
+fn system_extension_requires_shell_reload(
+    removed_user_copy: bool,
+    loaded_path: Option<&Path>,
+    system_dir: &Path,
+) -> bool {
+    removed_user_copy || loaded_path.is_some_and(|path| path != system_dir)
 }
 
 fn file_content_changed(path: &Path, expected: &str) -> bool {
@@ -440,6 +491,94 @@ mod tests {
         assert!(remove_user_copy(&extension_dir.0).unwrap());
         assert!(!extension_dir.0.exists());
         assert!(!remove_user_copy(&extension_dir.0).unwrap());
+    }
+
+    struct FakeShellExtensions {
+        path: std::sync::Arc<std::sync::Mutex<PathBuf>>,
+    }
+
+    #[zbus::interface(name = "org.gnome.Shell.Extensions")]
+    impl FakeShellExtensions {
+        fn get_extension_info(&self, uuid: &str) -> HashMap<String, zbus::zvariant::OwnedValue> {
+            assert_eq!(uuid, UUID);
+            HashMap::from([(
+                "path".to_string(),
+                zbus::zvariant::OwnedValue::from(zbus::zvariant::Str::from(
+                    self.path.lock().unwrap().to_string_lossy().as_ref(),
+                )),
+            )])
+        }
+    }
+
+    #[tokio::test]
+    async fn system_migration_keeps_reload_warning_until_shell_changes_loaded_path() {
+        use std::io::{BufRead, BufReader};
+        use std::process::Stdio;
+
+        struct PrivateBus(std::process::Child);
+        impl Drop for PrivateBus {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut bus = PrivateBus(
+            Command::new("dbus-daemon")
+                .args(["--session", "--nofork", "--nopidfile", "--print-address=1"])
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut address = String::new();
+        BufReader::new(bus.0.stdout.take().unwrap())
+            .read_line(&mut address)
+            .unwrap();
+        let user_dir = TestExtensionDirectory::new();
+        write_extension_files(&user_dir.0).unwrap();
+        let system_dir = Path::new(SYSTEM_EXTENSIONS_DIR).join(UUID);
+        let path = std::sync::Arc::new(std::sync::Mutex::new(user_dir.0.clone()));
+        let _service = zbus::connection::Builder::address(address.trim())
+            .unwrap()
+            .name("org.gnome.Shell")
+            .unwrap()
+            .serve_at(
+                "/org/gnome/Shell",
+                FakeShellExtensions { path: path.clone() },
+            )
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let client = zbus::connection::Builder::address(address.trim())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        let removed = remove_user_copy(&user_dir.0).unwrap();
+        let loaded = loaded_extension_path_on_connection(&client).await.unwrap();
+        assert_eq!(loaded.as_deref(), Some(user_dir.0.as_path()));
+        assert!(system_extension_requires_shell_reload(
+            removed,
+            loaded.as_deref(),
+            &system_dir
+        ));
+
+        let removed = remove_user_copy(&user_dir.0).unwrap();
+        assert!(!removed);
+        let loaded = loaded_extension_path_on_connection(&client).await.unwrap();
+        assert!(
+            system_extension_requires_shell_reload(removed, loaded.as_deref(), &system_dir),
+            "a second setup before Shell restarts must retain the reload warning"
+        );
+
+        *path.lock().unwrap() = system_dir.clone();
+        let loaded = loaded_extension_path_on_connection(&client).await.unwrap();
+        assert!(!system_extension_requires_shell_reload(
+            false,
+            loaded.as_deref(),
+            &system_dir
+        ));
     }
 
     #[test]
