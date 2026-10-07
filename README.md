@@ -92,6 +92,14 @@ On GNOME, a read-only keymap preflight rejects the whole string before input if 
 - `activate_window` — focus a window by `window_id`, `pid`, `app_id`, `wm_class`, `title`, or terminal selectors
 - `move_window` / `resize_window` — reposition or resize a window in desktop coordinates (GNOME Shell extension backend); useful to recover windows that are partially off-screen
 
+**On-screen indicator**
+
+While an agent acts, the server drives `computer-use-linux-indicator`, a click-through overlay that shows what it is doing: a software cursor tinted per agent that glides along an arc to each coordinate `click`, `drag`, or `scroll` target and ripples on click (AT-SPI actions such as `perform_action`, `set_value`, and element clicks show in the pill without moving it, since no pointer moves); keycaps for `press_key` and a typing line for `type_text`; a glow along every screen edge; and a status pill such as *Claude is using your computer · click*. Pointer actions wait 350 ms so the cursor lands before the real input. While `screenshot` or `get_app_state` captures the screen, the overlay draws nothing, so agents never see it: not their own, not one shown for another agent, and not one that another agent starts mid-capture. This holds with `COMPUTER_USE_LINUX_INDICATOR=0` too, which only stops a server from showing its own actions. The capture waits for the compositor only when something was on screen. The agent name comes from the MCP client's `clientInfo`.
+
+The server starts the overlay on the first action and it exits after ten idle minutes; nothing is drawn, and no surfaces exist, between bursts of activity. It needs a compositor with `wlr-layer-shell` (COSMIC, KDE Plasma, Hyprland, Sway, niri, …); on GNOME the server notices the overlay cannot start and stops trying. Set `COMPUTER_USE_LINUX_INDICATOR=0` to turn it off.
+
+Captures require the shared capture lock and, when an overlay is running, its acknowledgement that it has hidden. A missing or invalid acknowledgement, a stalled socket, or a failed lock returns a capture error. Concurrent captures keep separate holds; their acknowledgements are exchanged in order.
+
 **Conditional host execution**
 
 - `complete_interaction` - optional desktop completion notification, registered only with `COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE=1`. Repeated calls can create repeated notifications; it does not provide desktop exclusivity.
@@ -140,7 +148,7 @@ Validated manually on Ubuntu 25.10 (GNOME Shell 50.1, Wayland). niri window list
 | Hyprland | `hyprctl clients -j` and `hyprctl dispatch focuswindow` | Requires `hyprctl` in the desktop session. |
 | niri | `niri msg` with a direct JSON IPC fallback | Lists toplevels and focuses exact window IDs. Export the session's `NIRI_SOCKET`; otherwise discovery requires an unambiguous socket matching `WAYLAND_DISPLAY`. The fallback works without the `niri` binary. Missing positions remain `null`; bounds are omitted if output scaling is unknown or mixed. |
 | i3 | `i3-msg`; optional `xprop` for PID hydration | Lists and focuses i3 windows over the active i3 IPC socket. |
-| COSMIC Wayland | `computer-use-linux-cosmic` helper | Installed automatically by `./install.sh`, `cargo install`, and npm. For custom/manual layouts, put the helper next to the main binary, on `PATH`, or point `COMPUTER_USE_LINUX_COSMIC_HELPER` at it. |
+| COSMIC Wayland | `computer-use-linux-cosmic` helper | Installed automatically by `./install.sh`, `cargo install`, and npm. For custom/manual layouts, put the helper next to the main binary, on `PATH`, or point `COMPUTER_USE_LINUX_COSMIC_HELPER` at it. The on-screen indicator was validated here (three outputs, mixed fractional scaling). |
 | Sway / generic wlroots | no dedicated backend yet | AT-SPI, screenshots, and global `ydotool` input can still work; exact window list/focus is currently unavailable unless another backend applies. |
 | Generic X11 / XFCE / other EWMH WMs | `wmctrl` plus `xprop` | Lists, focuses, moves, and resizes windows; keyboard input prefers `xdotool`/XTEST, and scroll uses xdotool wheel buttons. Window origins are read from the X server, since `wmctrl -lG` counts the frame offset twice. |
 
@@ -209,7 +217,7 @@ Linux x86_64 / aarch64 builds are published with each tag. Each binary ships a `
 ```bash
 target=x86_64-unknown-linux-gnu
 base=https://github.com/agent-sh/computer-use-linux/releases/latest/download
-for binary in computer-use-linux computer-use-linux-cosmic; do
+for binary in computer-use-linux computer-use-linux-cosmic computer-use-linux-indicator; do
   asset="$binary-$target"
   curl -L -O "$base/$asset"
   curl -L -O "$base/$asset.sha256"
@@ -415,6 +423,10 @@ Most setups need none of these — `doctor` and the installers pick sensible def
 | --- | --- |
 | `COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE` | Set exactly to `1` to expose the optional `complete_interaction` notification tool. Requires `notify-send` and a desktop notification service; disabled by default. |
 | `COMPUTER_USE_LINUX_COSMIC_HELPER` | Path to the `computer-use-linux-cosmic` helper when it isn't next to the binary or on `PATH`. |
+| `COMPUTER_USE_LINUX_INDICATOR` | Set to `0` (or `false`/`off`/`no`) to turn off the on-screen indicator. On by default. |
+| `COMPUTER_USE_LINUX_INDICATOR_BIN` | Path to the `computer-use-linux-indicator` overlay when it isn't next to the binary or on `PATH`. |
+| `COMPUTER_USE_LINUX_INDICATOR_HIDE_TEXT` | Set exactly to `1` to mask all typed text and keycaps in the indicator. `set_value` values are always masked. |
+| `COMPUTER_USE_LINUX_AGENT_NAME` | Name shown in the indicator instead of the one derived from the MCP client's `clientInfo`. |
 | `CU_DISABLE_ABS_POINTER` | Disable the uinput absolute pointer. Wayland coordinate actions then need the RemoteDesktop portal; they refuse input rather than use ydotool's relative-motion approximation. Native X11 fallback is unchanged. |
 | `COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER` / `…_KEYBOARD` | Prefer the RemoteDesktop portal on Wayland, skipping auto-detection. Pointer forcing skips the absolute uinput backend. Forced ydotool or XTEST keyboard overrides take precedence; KDE literal text keeps its clipboard route. Portal startup and text conversion failures return errors without replaying through ydotool. |
 | `COMPUTER_USE_LINUX_PORTAL_SCROLL_INVERT` | Set to `1` to reverse vertical scrolling through the RemoteDesktop portal. Defaults to normal direction on both GNOME and KDE Plasma; horizontal direction is unchanged. |
@@ -439,7 +451,7 @@ files.
 | `COMPUTER_USE_LINUX_BIN` | Run this absolute binary path instead of the one bundled by the npm package. Relative paths are ignored. |
 | `COMPUTER_USE_LINUX_DOWNLOAD_BASE` | Override the GitHub release base URL the installer downloads from (mirrors, air-gapped hosts). |
 | `COMPUTER_USE_LINUX_SKIP_DOWNLOAD=1` | Skip the post-install binary download entirely. |
-| `COMPUTER_USE_LINUX_LOCAL_BINARY` / `…_LOCAL_COSMIC_HELPER` | Install from a local build instead of downloading (used by CI and local testing). |
+| `COMPUTER_USE_LINUX_LOCAL_BINARY` / `…_LOCAL_COSMIC_HELPER` / `…_LOCAL_INDICATOR` | Install from a local build instead of downloading (used by CI and local testing). |
 
 ## Architecture
 
@@ -455,6 +467,7 @@ files.
 - **niri backend** — prefers `niri msg`, falling back to direct JSON IPC over the same session socket. `is_minimized` maps to `hidden`. Bounds use `layout.window_size` (or `tile_size`) and, when available, the tile position plus the window's offset and the output's logical origin. Uniform output scaling converts these to device pixels; unknown or mixed scaling omits bounds. Missing window positions stay `null`, so listing and focusing still work without enabling coordinate targeting. An accepted focus action is verified by querying the focused window again.
 - **GNOME extension fallback** — recent GNOME builds deny `org.gnome.Shell.Introspect.GetWindows` to non-blessed clients. The bundled Shell extension exposes window data and exact activation under `dev.avifenesh.ComputerUseLinux.WindowControl`.
 - **COSMIC helper** — `computer-use-linux-cosmic` talks to COSMIC toplevel protocols and is resolved from `COMPUTER_USE_LINUX_COSMIC_HELPER`, next to the running binary, or from `PATH`.
+- **Indicator overlay** — the server sends one JSON datagram per action (`{"agent","tool","x","y","space","keys","text"}`, where `x`/`y` are screenshot pixels and `space` is the capture size; or `{"capture":"begin"}`/`{"capture":"end"}` around captures; `begin` is answered with `shown` or `empty` when the sender's socket is bound) to `$XDG_RUNTIME_DIR/computer-use-linux-indicator.sock`. `computer-use-linux-indicator` (resolved like the COSMIC helper, via `COMPUTER_USE_LINUX_INDICATOR_BIN`) draws nothing while any server holds a shared `flock` on `computer-use-linux-indicator.capture` next to the socket (held for the length of each capture and released by the kernel if a server dies), and otherwise draws on small `wlr-layer-shell` surfaces with [`tiny-skia`](https://crates.io/crates/tiny-skia) into shared-memory buffers, honouring fractional scaling through `wp_fractional_scale_v1` and `wp_viewporter`. The cursor surface moves by changing its margins, so a glide redraws nothing. Other front ends, such as a GNOME Shell extension, can consume the same datagrams.
 - **Terminal enrichment** — `list_windows` cross-references each terminal window with its controlling TTY and the foreground process on that TTY, so `type_text` / `press_key` can target "the terminal where `pytest` is running" without the host ever knowing the window id.
 
 ## Security
@@ -466,6 +479,7 @@ Computer-use tooling is, by definition, a privilege-escalation surface. The thre
 - **Persisted remote control is opt-in.** `COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP=1` stores the portal's single-use restore token in the user state directory, mode `0600`. A same-user process that can read that file can restore remote control without a new prompt until the desktop revokes the grant. Leave the variable unset to keep a prompt on every new process.
 - **AT-SPI exposes window contents to any client on your session bus.** Enabling the AT-SPI bridge (`setup_accessibility`) is a prerequisite for this binary; it's also what screen readers use, and it shares the same trust boundary.
 - **The GNOME Shell extension** is loaded only into your user's GNOME Shell, runs in the Shell's JS sandbox, and exposes a single DBus interface on the user session bus. It does not request any extra permissions.
+- **The indicator shows what agents type.** `type_text` text (its last 64 characters) and `press_key` keycaps are drawn on screen unless the target is, or might be, a password field: both are replaced by a fixed mask when the focused element's AT-SPI role is a password role or cannot be read within 250 ms. `set_value` values are always masked, because an app can change a field to a password after its accessibility snapshot. The text also travels over a socket in the user's private runtime directory. Set `COMPUTER_USE_LINUX_INDICATOR_HIDE_TEXT=1` to mask all typed text and keycaps, or `COMPUTER_USE_LINUX_INDICATOR=0` to turn the indicator off.
 - **No network.** This binary opens no TCP/UDP listener, makes no outbound Internet connections, and ships no telemetry. It does use local session transports such as DBus and the per-user `ydotoold` Unix socket.
 - **Mutating tools are explicit.** The MCP tool list annotates read-only versus mutating tools, and CI fails if the published tool annotations drift from the table above. Treat those annotations as hints; the host is still responsible for user approval and policy.
 

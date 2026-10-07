@@ -226,6 +226,10 @@ function runtimeEnvironment(): Record<string, string> {
 		"NIX_LD_LIBRARY_PATH",
 		"RUST_LOG",
 		"COMPUTER_USE_LINUX_COSMIC_HELPER",
+		"COMPUTER_USE_LINUX_AGENT_NAME",
+		"COMPUTER_USE_LINUX_INDICATOR",
+		"COMPUTER_USE_LINUX_INDICATOR_BIN",
+		"COMPUTER_USE_LINUX_INDICATOR_HIDE_TEXT",
 		"COMPUTER_USE_LINUX_ENABLE_SHELL",
 		"COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD",
 		"COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER",
@@ -276,6 +280,17 @@ function defaultFindBinary(): BinaryLaunch | null {
 		);
 		if (!env.COMPUTER_USE_LINUX_COSMIC_HELPER && executable(cosmicHelper)) {
 			env.COMPUTER_USE_LINUX_COSMIC_HELPER = cosmicHelper;
+		}
+		const indicator = join(
+			__dirname,
+			"..",
+			"..",
+			"npm",
+			"bin",
+			"computer-use-linux-indicator",
+		);
+		if (!env.COMPUTER_USE_LINUX_INDICATOR_BIN && executable(indicator)) {
+			env.COMPUTER_USE_LINUX_INDICATOR_BIN = indicator;
 		}
 		return { binaryPath: bundledBinary, env };
 	}
