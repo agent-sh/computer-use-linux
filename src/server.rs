@@ -390,6 +390,7 @@ impl ComputerUseLinux {
             .await;
         let (screenshot, screenshot_error) = if include_screenshot {
             let result: Result<ScreenshotCapture> = async {
+                let _pipeline = crate::screenshot_impl::screenshot_pipeline_permit().await?;
                 let raw = {
                     let _hold = self.indicator.hold_for_capture().await?;
                     capture_screenshot_raw().await
@@ -397,23 +398,21 @@ impl ComputerUseLinux {
                 diagnostics.readiness.record_screenshot_result(raw.is_ok());
                 let raw = raw?;
                 self.cache_desktop_size(raw.width, raw.height);
-                if let Some(window) = window_context.as_ref() {
+                let crop = if let Some(window) = window_context.as_ref() {
                     ensure_readonly_screenshot_target_is_visible(window)?;
-                    let crop = self.window_crop_rect_for_capture(window, &raw).await?;
-                    prepare_app_state_screenshot(
-                        raw,
-                        Some(crop),
-                        screenshot_target_requested,
-                        screenshot_options,
-                    )
+                    Some(self.window_crop_rect_for_capture(window, &raw).await?)
                 } else {
+                    None
+                };
+                crate::screenshot_impl::run_image_task(move || {
                     prepare_app_state_screenshot(
                         raw,
-                        None,
+                        crop,
                         screenshot_target_requested,
                         screenshot_options,
                     )
-                }
+                })
+                .await
             }
             .await;
             match result {
@@ -562,6 +561,7 @@ impl ComputerUseLinux {
     }
 
     async fn capture_screenshot(&self, params: ScreenshotParams) -> Result<CallToolResult> {
+        let _pipeline = crate::screenshot_impl::screenshot_pipeline_permit().await?;
         let target = params.window_target();
         let target_window = match target.as_ref() {
             Some(target) => Some(
@@ -600,8 +600,15 @@ impl ComputerUseLinux {
                     .window_crop_rect_for_capture(window, &raw_capture)
                     .await
                     .context("targeted screenshot crop failed")?;
-                let (bytes, width, height) = crop_png(&raw_capture.bytes, x, y, width, height)
-                    .map_err(|error| anyhow::anyhow!("targeted screenshot crop failed: {error}"))?;
+                let (raw_capture, bytes, width, height) =
+                    crate::screenshot_impl::run_image_task(move || {
+                        let (bytes, width, height) =
+                            crop_png(&raw_capture.bytes, x, y, width, height).map_err(|error| {
+                                anyhow::anyhow!("targeted screenshot crop failed: {error}")
+                            })?;
+                        Ok((raw_capture, bytes, width, height))
+                    })
+                    .await?;
                 (
                     RawScreenshotCapture {
                         mime_type: raw_capture.mime_type,
@@ -615,8 +622,12 @@ impl ComputerUseLinux {
             }
             None => (raw_capture, false),
         };
-        let capture = prepare_screenshot_payload(capture, params.screenshot_options())
-            .context("screenshot resize failed")?;
+        let options = params.screenshot_options();
+        let capture = crate::screenshot_impl::run_image_task(move || {
+            prepare_screenshot_payload(capture, options)
+        })
+        .await
+        .context("screenshot resize failed")?;
 
         let mut caption = serde_json::json!({
             "width": capture.width,

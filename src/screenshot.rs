@@ -115,6 +115,16 @@ enum ScreenshotCleanup {
     Preserve,
 }
 
+struct OwnedScreenshotCleanup(ScreenshotCleanup);
+
+impl Drop for OwnedScreenshotCleanup {
+    fn drop(&mut self) {
+        if let ScreenshotCleanup::DeletePath(path) = &self.0 {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 impl ScreenshotPayloadOptions {
     fn resolve(self) -> ResolvedScreenshotPayloadOptions {
         let max_width = self
@@ -274,8 +284,28 @@ fn forced_backend() -> Result<Option<ScreenshotBackend>> {
 }
 
 pub async fn capture_screenshot() -> Result<ScreenshotCapture> {
+    let _pipeline = screenshot_pipeline_permit().await?;
     let raw = capture_screenshot_raw().await?;
-    prepare_screenshot_payload(raw, ScreenshotPayloadOptions::default())
+    run_image_task(move || prepare_screenshot_payload(raw, ScreenshotPayloadOptions::default()))
+        .await
+}
+
+pub(crate) async fn screenshot_pipeline_permit() -> Result<tokio::sync::SemaphorePermit<'static>> {
+    static CAPTURE_PIPELINE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    Ok(CAPTURE_PIPELINE.acquire().await?)
+}
+
+pub(crate) async fn run_image_task<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    static IMAGE_WORKER: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let permit = IMAGE_WORKER.acquire().await?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .context("screenshot processing task failed")?
 }
 
 pub fn prepare_screenshot_payload(
@@ -550,11 +580,13 @@ async fn read_png_as_capture(
     source: &str,
     cleanup: ScreenshotCleanup,
 ) -> Result<RawScreenshotCapture> {
-    let result = read_png_as_capture_inner(&path, source);
-    if let ScreenshotCleanup::DeletePath(path) = cleanup {
-        let _ = fs::remove_file(path);
-    }
-    result
+    let source = source.to_string();
+    let cleanup = OwnedScreenshotCleanup(cleanup);
+    run_image_task(move || {
+        let _cleanup = cleanup;
+        read_png_as_capture_inner(&path, &source)
+    })
+    .await
 }
 
 fn read_png_as_capture_inner(path: &Path, source: &str) -> Result<RawScreenshotCapture> {
@@ -1011,6 +1043,41 @@ mod tests {
         );
         assert!(capture.bytes < capture.original_bytes);
         assert!(capture.data_url.starts_with("data:image/jpeg;base64,"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_queued_capture_removes_its_owned_file() {
+        let cache = std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache"));
+        let path = cache.join(format!(
+            "cul-cancelled-capture-{}.png",
+            getrandom::u64().unwrap()
+        ));
+        fs::write(&path, valid_png(1, 1)).unwrap();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let busy = tokio::spawn(run_image_task(move || {
+            started.send(()).unwrap();
+            wait.recv().unwrap();
+            Ok(())
+        }));
+        ready.await.unwrap();
+        let mut queued = tokio::spawn(read_png_as_capture(
+            path.clone(),
+            "owned-test-capture",
+            ScreenshotCleanup::DeletePath(path.clone()),
+        ));
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut queued)
+            .await
+            .is_err());
+        queued.abort();
+        assert!(queued.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+        busy.await.unwrap().unwrap();
+        let removed = !path.exists();
+        let _ = fs::remove_file(path);
+        assert!(removed, "cancelled screenshot left its owned file behind");
     }
 
     #[tokio::test]

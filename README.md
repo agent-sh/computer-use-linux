@@ -98,6 +98,8 @@ While an agent acts, the server drives `computer-use-linux-indicator`, a click-t
 
 The server starts the indicator on the first action and it exits after ten idle minutes. It stays hidden between bursts of activity. Compositors with `wlr-layer-shell` use the shared-memory overlay. GNOME uses native Shell actors through the bundled extension. Run `setup_window_targeting` once, then log out and back in after installing or updating the extension. Both renderers use the same capture lock and acknowledgement protocol. Set `COMPUTER_USE_LINUX_INDICATOR=0` to turn it off.
 
+Screenshot processing uses one blocking worker per server. Captures enter one pipeline before reading pixels, so concurrent requests do not queue decoded full-screen images. A source can contain up to 134,217,728 pixels; serial processing bounds decoded-image memory while letting MCP answer other requests during resizing and encoding. Session discovery is reused after a successful probe and refreshed when session variables change. Failed discovery is retried.
+
 Captures require the shared capture lock and, when an overlay is running, its acknowledgement that it has hidden. A missing or invalid acknowledgement, a stalled socket, or a failed lock returns a capture error. Concurrent captures keep separate holds; their acknowledgements are exchanged in order.
 
 **Conditional host execution**

@@ -12,6 +12,7 @@ use std::{
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::Command,
+    sync::Mutex,
 };
 
 const DESKTOP_ENV_KEYS: &[&str] = &[
@@ -442,9 +443,17 @@ fn capability_map_with_portal_keyboard(
 }
 
 pub fn hydrate_session_bus_env() {
+    static HYDRATED_ENV: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+    let mut hydrated = HYDRATED_ENV
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let current = desktop_environment();
+    if hydrated.as_ref() == Some(&current) {
+        return;
+    }
     hydrate_common_command_path();
     hydrate_desktop_env_from_process_tree();
-    hydrate_desktop_env_from_systemd_user();
+    let systemd_discovery_succeeded = hydrate_desktop_env_from_systemd_user();
 
     if env_var("XDG_RUNTIME_DIR").is_none() {
         if let Some(runtime) = xdg_runtime_dir() {
@@ -465,6 +474,25 @@ pub fn hydrate_session_bus_env() {
             }
         }
     }
+    let current = desktop_environment();
+    if systemd_discovery_succeeded
+        && current.contains_key("DBUS_SESSION_BUS_ADDRESS")
+        && current.contains_key("XDG_RUNTIME_DIR")
+        && current.contains_key("XDG_CURRENT_DESKTOP")
+        && current.contains_key("XDG_SESSION_TYPE")
+        && process_env_has_graphical_display(&current)
+    {
+        *hydrated = Some(current);
+    }
+}
+
+fn desktop_environment() -> HashMap<String, String> {
+    DESKTOP_ENV_KEYS
+        .iter()
+        .copied()
+        .chain(["PATH"])
+        .filter_map(|key| env_var(key).map(|value| (key.to_string(), value)))
+        .collect()
 }
 
 fn hydrate_common_command_path() {
@@ -497,19 +525,20 @@ fn hydrate_desktop_env_from_process_tree() {
     }
 }
 
-fn hydrate_desktop_env_from_systemd_user() {
+fn hydrate_desktop_env_from_systemd_user() -> bool {
     let mut command = Command::new("systemctl");
     command.args(["--user", "show-environment"]);
     let Ok(output) =
         crate::command_runner::output_blocking(&mut command, "read systemd user environment")
     else {
-        return;
+        return false;
     };
     if !output.status.success() {
-        return;
+        return false;
     }
     let env_map = parse_line_environment(&output.stdout);
     hydrate_desktop_env_from_map(&env_map);
+    true
 }
 
 fn hydrate_desktop_env_from_map(process_env: &HashMap<String, String>) {
