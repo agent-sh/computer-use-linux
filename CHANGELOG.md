@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
 - Add a native GNOME Shell activity indicator with cursor motion, click pulses, keycaps, typed-text masking, agent colors and idle fading. The helper preserves shared capture exclusion and rejects captures when hiding is not acknowledged.
-- Mask generic text-box roles, terminal focus and generic enum fallback roles. A GTK obscured entry can advertise the same text-box role as a public entry.
+
+### Fixed
 - Refresh already-enabled GNOME extension assets during installation and report the required session restart.
+- Mask generic text-box roles, terminal focus and generic enum fallback roles in typed text and keycaps. GTK obscured entries can advertise the same text-box role as public entries.
+
 
 ### Added
 - On-screen indicator, on by default: `computer-use-linux-indicator` draws a
@@ -23,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or unknown focus. Needs `wlr-layer-shell`; set
   `COMPUTER_USE_LINUX_INDICATOR=0` to turn it off. Installed by `./install.sh`,
   `cargo install`, npm, and published as a release asset.
+
+### Fixed
+
+- `setup-window-targeting` enables the system extension in `/usr/share/gnome-shell/extensions` if a distribution package installed it. It installs the user extension in `~/.local/share/gnome-shell/extensions` only if there is no system extension. If there is a system extension, setup removes the user extension from earlier setups and asks for a GNOME Shell reload. Before, setup always installed the user extension, and GNOME Shell used it instead of the system extension, so package updates had no effect.
+- The GNOME Shell extension supports GNOME Shell 51.
+- On at-spi2-core 2.62 and later, the doctor check `screen_reader_enabled` failed with "No such property ScreenReaderEnabled", because 2.62 removed that D-Bus property. If the property does not exist, doctor now reads the `org.gnome.desktop.a11y.applications screen-reader-enabled` setting. With older at-spi2-core versions, doctor still reads the property.
+- The doctor checks `at_spi_enabled` and `screen_reader_enabled` now show text such as "AT-SPI IsEnabled is false" and "Screen reader is off". Before, they showed raw D-Bus output such as `b false` or `(<false>,)`.
 
 ## [0.7.11] - 2026-10-04
 

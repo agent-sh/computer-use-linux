@@ -822,8 +822,8 @@ fn accessibility_report() -> AccessibilityReport {
                 "toolkit-accessibility",
             ],
         ),
-        at_spi_enabled: atspi_status_property_check("IsEnabled"),
-        screen_reader_enabled: atspi_status_property_check("ScreenReaderEnabled"),
+        at_spi_enabled: at_spi_enabled_check(),
+        screen_reader_enabled: screen_reader_enabled_check(),
     }
 }
 
@@ -1503,6 +1503,41 @@ fn atspi_status_property_check(property: &str) -> Check {
     )
 }
 
+// check_detail_contains_true reads this detail, so keep "true" in it.
+fn at_spi_enabled_check() -> Check {
+    describe_bool(
+        atspi_status_property_check("IsEnabled"),
+        "AT-SPI IsEnabled is true",
+        "AT-SPI IsEnabled is false",
+    )
+}
+
+// at-spi2-core 2.62 removed ScreenReaderEnabled; it mirrored this key.
+fn screen_reader_enabled_check() -> Check {
+    let mut check = atspi_status_property_check("ScreenReaderEnabled");
+    if !check.ok {
+        check = command_check_with_session_bus(
+            "gsettings",
+            &[
+                "get",
+                "org.gnome.desktop.a11y.applications",
+                "screen-reader-enabled",
+            ],
+        );
+    }
+    describe_bool(check, "Screen reader is on", "Screen reader is off")
+}
+
+// Replaces raw busctl, gdbus or gsettings boolean output with text.
+fn describe_bool(check: Check, on: &str, off: &str) -> Check {
+    let detail = check.detail.to_ascii_lowercase();
+    match (check.ok, detail.contains("true"), detail.contains("false")) {
+        (true, true, false) => Check::ok(on),
+        (true, false, true) => Check::ok(off),
+        _ => check,
+    }
+}
+
 fn gdbus_call_check(destination: &str, object_path: &str, method: &str, args: &[&str]) -> Check {
     let mut command_args = vec![
         "call",
@@ -1568,6 +1603,16 @@ fn run_command(command: &str, args: &[&str], with_session_bus: bool) -> Check {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn describe_bool_reads_busctl_gdbus_and_gsettings_output() {
+        for (raw, expected) in [("b true", "on"), ("(<false>,)", "off"), ("false", "off")] {
+            assert_eq!(describe_bool(Check::ok(raw), "on", "off").detail, expected);
+        }
+        let failed = describe_bool(Check::fail("no such property"), "on", "off");
+        assert!(!failed.ok);
+        assert_eq!(failed.detail, "no such property");
+    }
 
     #[test]
     fn diagnostic_command_timeout_reaps_the_hung_process() {

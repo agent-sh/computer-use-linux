@@ -6,9 +6,11 @@ use crate::windows::{window_permission_hint, WindowInfo};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::{
-    env, fs,
+    collections::HashMap,
+    env, fs, io,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 pub const UUID: &str = identity::GNOME_EXTENSION_UUID;
@@ -16,6 +18,7 @@ const METADATA_JSON: &str =
     include_str!("../gnome-shell-extension/computer-use-linux@avifenesh.dev/metadata.json");
 const EXTENSION_JS: &str =
     include_str!("../gnome-shell-extension/computer-use-linux@avifenesh.dev/extension.js");
+const SYSTEM_EXTENSIONS_DIR: &str = "/usr/share/gnome-shell/extensions";
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct WindowTargetingSetupReport {
@@ -38,23 +41,39 @@ pub struct SetupCommandReport {
 pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
     hydrate_session_bus_env();
 
-    let extension_dir = extension_dir();
+    let user_dir = extension_dir();
+    let system_dir = Path::new(SYSTEM_EXTENSIONS_DIR).join(UUID);
+    let system_installed = system_dir.join("metadata.json").is_file();
+    let extension_dir = if system_installed {
+        system_dir
+    } else {
+        user_dir.clone()
+    };
     let extension_was_enabled = gnome_extension_enabled();
     let mut wrote_files = false;
     let mut changed_files = false;
-    let mut write_error = None;
-    match write_extension_files(&extension_dir) {
-        Ok(report) => {
-            wrote_files = report.wrote_files;
-            changed_files = report.changed_files;
+    let mut file_error = None;
+    let mut removed_user_copy = false;
+    if system_installed {
+        // A user copy shadows the packaged system extension.
+        match remove_user_copy(&user_dir) {
+            Ok(removed) => removed_user_copy = removed,
+            Err(error) => file_error = Some(error),
         }
-        Err(error) => write_error = Some(error),
+    } else {
+        match write_extension_files(&user_dir) {
+            Ok(report) => {
+                wrote_files = report.wrote_files;
+                changed_files = report.changed_files;
+            }
+            Err(error) => file_error = Some(error),
+        }
     }
 
-    let enable_command = if let Some(error) = &write_error {
+    let enable_command = if let Some(error) = &file_error {
         SetupCommandReport {
             ok: false,
-            detail: format!("extension file write failed: {error}"),
+            detail: format!("extension file setup failed: {error}"),
         }
     } else {
         run_gnome_extensions_enable()
@@ -69,12 +88,30 @@ pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
         }
     };
 
-    let requires_shell_reload =
-        setup_requires_shell_reload(windows_error.as_ref(), extension_was_enabled, changed_files);
-    let message = if !wrote_files {
-        "Could not install the computer-use-linux GNOME Shell extension files.".to_string()
+    // Enabling an extension does not replace the object cached by GNOME Shell.
+    let system_reload_pending = if system_installed {
+        let loaded_path = loaded_extension_path().await;
+        system_extension_requires_shell_reload(
+            removed_user_copy,
+            loaded_path.as_deref(),
+            &extension_dir,
+        )
+    } else {
+        false
+    };
+    let requires_shell_reload = system_reload_pending
+        || setup_requires_shell_reload(
+            windows_error.as_ref(),
+            extension_was_enabled,
+            changed_files,
+        );
+    let message = if file_error.is_some() {
+        "Could not set up the computer-use-linux GNOME Shell extension files.".to_string()
     } else if !enable_command.ok {
-        "computer-use-linux GNOME Shell extension files were installed, but enabling the extension failed. Enable it with gnome-extensions after GNOME Shell sees the new extension."
+        "computer-use-linux GNOME Shell extension files are available, but enabling the extension failed. Enable it with gnome-extensions after GNOME Shell sees the new extension."
+            .to_string()
+    } else if system_reload_pending {
+        "GNOME Shell must reload before the computer-use-linux system extension is active. Log out and back in so that GNOME Shell loads the system extension."
             .to_string()
     } else if windows_error.is_none() && requires_shell_reload {
         shell_reload_message(extension_was_enabled).to_string()
@@ -82,7 +119,7 @@ pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
         "computer-use-linux GNOME Shell extension is active and window targeting is available."
             .to_string()
     } else {
-        "computer-use-linux GNOME Shell extension files were installed and enable was requested, but GNOME Shell is not serving the window-control DBus API yet. Log out and back in, then retry setup_window_targeting."
+        "computer-use-linux GNOME Shell extension files are available and enable was requested, but GNOME Shell is not serving the window-control DBus API yet. Log out and back in, then retry setup_window_targeting."
             .to_string()
     };
 
@@ -127,6 +164,56 @@ fn write_extension_files(extension_dir: &Path) -> Result<ExtensionWriteReport, S
         wrote_files: true,
         changed_files,
     })
+}
+
+fn remove_user_copy(extension_dir: &Path) -> Result<bool, String> {
+    match fs::remove_dir_all(extension_dir) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "failed to remove {}: {error}",
+            extension_dir.display()
+        )),
+    }
+}
+
+async fn loaded_extension_path() -> Option<PathBuf> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let connection = zbus::Connection::session().await.ok()?;
+        loaded_extension_path_on_connection(&connection)
+            .await
+            .ok()
+            .flatten()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn loaded_extension_path_on_connection(
+    connection: &zbus::Connection,
+) -> Result<Option<PathBuf>, zbus::Error> {
+    let proxy = zbus::Proxy::new(
+        connection,
+        "org.gnome.Shell",
+        "/org/gnome/Shell",
+        "org.gnome.Shell.Extensions",
+    )
+    .await?;
+    let info: HashMap<String, zbus::zvariant::OwnedValue> =
+        proxy.call("GetExtensionInfo", &(UUID,)).await?;
+    Ok(info
+        .get("path")
+        .and_then(|value| <&str>::try_from(value).ok())
+        .map(PathBuf::from))
+}
+
+fn system_extension_requires_shell_reload(
+    removed_user_copy: bool,
+    loaded_path: Option<&Path>,
+    system_dir: &Path,
+) -> bool {
+    removed_user_copy || loaded_path.is_some_and(|path| path != system_dir)
 }
 
 fn file_content_changed(path: &Path, expected: &str) -> bool {
@@ -394,6 +481,104 @@ mod tests {
         let third = write_extension_files(&extension_dir.0).unwrap();
         assert!(third.wrote_files);
         assert!(third.changed_files);
+    }
+
+    #[test]
+    fn user_copy_removal_reports_whether_a_copy_existed() {
+        let extension_dir = TestExtensionDirectory::new();
+        write_extension_files(&extension_dir.0).unwrap();
+
+        assert!(remove_user_copy(&extension_dir.0).unwrap());
+        assert!(!extension_dir.0.exists());
+        assert!(!remove_user_copy(&extension_dir.0).unwrap());
+    }
+
+    struct FakeShellExtensions {
+        path: std::sync::Arc<std::sync::Mutex<PathBuf>>,
+    }
+
+    #[zbus::interface(name = "org.gnome.Shell.Extensions")]
+    impl FakeShellExtensions {
+        fn get_extension_info(&self, uuid: &str) -> HashMap<String, zbus::zvariant::OwnedValue> {
+            assert_eq!(uuid, UUID);
+            HashMap::from([(
+                "path".to_string(),
+                zbus::zvariant::OwnedValue::from(zbus::zvariant::Str::from(
+                    self.path.lock().unwrap().to_string_lossy().as_ref(),
+                )),
+            )])
+        }
+    }
+
+    #[tokio::test]
+    async fn system_migration_keeps_reload_warning_until_shell_changes_loaded_path() {
+        use std::io::{BufRead, BufReader};
+        use std::process::Stdio;
+
+        struct PrivateBus(std::process::Child);
+        impl Drop for PrivateBus {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut bus = PrivateBus(
+            Command::new("dbus-daemon")
+                .args(["--session", "--nofork", "--nopidfile", "--print-address=1"])
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut address = String::new();
+        BufReader::new(bus.0.stdout.take().unwrap())
+            .read_line(&mut address)
+            .unwrap();
+        let user_dir = TestExtensionDirectory::new();
+        write_extension_files(&user_dir.0).unwrap();
+        let system_dir = Path::new(SYSTEM_EXTENSIONS_DIR).join(UUID);
+        let path = std::sync::Arc::new(std::sync::Mutex::new(user_dir.0.clone()));
+        let _service = zbus::connection::Builder::address(address.trim())
+            .unwrap()
+            .name("org.gnome.Shell")
+            .unwrap()
+            .serve_at(
+                "/org/gnome/Shell",
+                FakeShellExtensions { path: path.clone() },
+            )
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let client = zbus::connection::Builder::address(address.trim())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        let removed = remove_user_copy(&user_dir.0).unwrap();
+        let loaded = loaded_extension_path_on_connection(&client).await.unwrap();
+        assert_eq!(loaded.as_deref(), Some(user_dir.0.as_path()));
+        assert!(system_extension_requires_shell_reload(
+            removed,
+            loaded.as_deref(),
+            &system_dir
+        ));
+
+        let removed = remove_user_copy(&user_dir.0).unwrap();
+        assert!(!removed);
+        let loaded = loaded_extension_path_on_connection(&client).await.unwrap();
+        assert!(
+            system_extension_requires_shell_reload(removed, loaded.as_deref(), &system_dir),
+            "a second setup before Shell restarts must retain the reload warning"
+        );
+
+        *path.lock().unwrap() = system_dir.clone();
+        let loaded = loaded_extension_path_on_connection(&client).await.unwrap();
+        assert!(!system_extension_requires_shell_reload(
+            false,
+            loaded.as_deref(),
+            &system_dir
+        ));
     }
 
     #[test]
