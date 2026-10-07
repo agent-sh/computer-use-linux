@@ -16,6 +16,7 @@ const METADATA_JSON: &str =
     include_str!("../gnome-shell-extension/computer-use-linux@avifenesh.dev/metadata.json");
 const EXTENSION_JS: &str =
     include_str!("../gnome-shell-extension/computer-use-linux@avifenesh.dev/extension.js");
+const SYSTEM_EXTENSIONS_DIR: &str = "/usr/share/gnome-shell/extensions";
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct WindowTargetingSetupReport {
@@ -38,17 +39,26 @@ pub struct SetupCommandReport {
 pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
     hydrate_session_bus_env();
 
-    let extension_dir = extension_dir();
+    let system_dir = Path::new(SYSTEM_EXTENSIONS_DIR).join(UUID);
+    let system_installed = system_dir.join("metadata.json").is_file();
+    let extension_dir = if system_installed {
+        system_dir
+    } else {
+        extension_dir()
+    };
     let extension_was_enabled = gnome_extension_enabled();
     let mut wrote_files = false;
     let mut changed_files = false;
     let mut write_error = None;
-    match write_extension_files(&extension_dir) {
-        Ok(report) => {
-            wrote_files = report.wrote_files;
-            changed_files = report.changed_files;
+    // A user copy would shadow the packaged system extension.
+    if !system_installed {
+        match write_extension_files(&extension_dir) {
+            Ok(report) => {
+                wrote_files = report.wrote_files;
+                changed_files = report.changed_files;
+            }
+            Err(error) => write_error = Some(error),
         }
-        Err(error) => write_error = Some(error),
     }
 
     let enable_command = if let Some(error) = &write_error {
@@ -71,7 +81,7 @@ pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
 
     let requires_shell_reload =
         setup_requires_shell_reload(windows_error.as_ref(), extension_was_enabled, changed_files);
-    let message = if !wrote_files {
+    let message = if write_error.is_some() {
         "Could not install the computer-use-linux GNOME Shell extension files.".to_string()
     } else if !enable_command.ok {
         "computer-use-linux GNOME Shell extension files were installed, but enabling the extension failed. Enable it with gnome-extensions after GNOME Shell sees the new extension."
