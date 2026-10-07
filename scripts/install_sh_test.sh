@@ -327,7 +327,11 @@ test_doctor_raw_fallback_rejects_missing_install_prerequisite() (
 test_enabled_gnome_extension_is_upgraded() (
     # Exercise the upgrade path without touching the live GNOME session.
     export XDG_CURRENT_DESKTOP=GNOME XDG_SESSION_TYPE=wayland
-    export XDG_DATA_HOME="$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/cul-gnome-upgrade.XXXXXX")"
+    local cache="${XDG_CACHE_HOME:-$HOME/.cache}"
+    mkdir -p "${cache}" || return 1
+    local data_home
+    data_home="$(mktemp -d "${cache}/cul-gnome-upgrade.XXXXXX")" || return 1
+    export XDG_DATA_HOME="${data_home}"
     trap 'rm -rf -- "${XDG_DATA_HOME}"' EXIT
     source "${INSTALLER}"
     local installed="${XDG_DATA_HOME}/gnome-shell/extensions/${EXT_UUID}"
