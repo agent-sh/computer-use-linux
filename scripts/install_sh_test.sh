@@ -324,6 +324,33 @@ test_doctor_raw_fallback_rejects_missing_install_prerequisite() (
     assert_contains "${output}" "doctor did not report ready" || return 1
 )
 
+test_enabled_gnome_extension_is_upgraded() (
+    # Exercise the upgrade path without touching the live GNOME session.
+    export XDG_CURRENT_DESKTOP=GNOME XDG_SESSION_TYPE=wayland
+    export XDG_DATA_HOME="$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/cul-gnome-upgrade.XXXXXX")"
+    trap 'rm -rf -- "${XDG_DATA_HOME}"' EXIT
+    source "${INSTALLER}"
+    local installed="${XDG_DATA_HOME}/gnome-shell/extensions/${EXT_UUID}"
+    mkdir -p "${installed}"
+    printf '%s\n' '// old extension' >"${installed}/extension.js"
+    printf '%s\n' '{"version":2}' >"${installed}/metadata.json"
+    gnome-extensions() {
+        case "$1" in
+            list) printf '%s\n' "${EXT_UUID}" ;;
+            pack) : >"bridge.shell-extension.zip" ;;
+            install)
+                cp "${EXT_SRC_DIR}/extension.js" "${installed}/extension.js"
+                cp "${EXT_SRC_DIR}/metadata.json" "${installed}/metadata.json" ;;
+            enable) return 1 ;;
+        esac
+    }
+    local output
+    output="$(install_gnome_extension)" || return 1
+    cmp -s "${EXT_SRC_DIR}/extension.js" "${installed}/extension.js" || return 1
+    cmp -s "${EXT_SRC_DIR}/metadata.json" "${installed}/metadata.json" || return 1
+    assert_contains "${output}" 'log out and back in' || return 1
+)
+
 run_test() {
     local name="$1" test_fn="$2"
     if "${test_fn}"; then
@@ -349,3 +376,5 @@ run_test "doctor accepts platform capability blockers" test_doctor_accepts_platf
 run_test "doctor rejects missing install prerequisites" test_doctor_rejects_missing_install_prerequisite
 run_test "doctor raw fallback accepts platform capability blockers" test_doctor_raw_fallback_accepts_platform_capability_blockers
 run_test "doctor raw fallback rejects missing install prerequisites" test_doctor_raw_fallback_rejects_missing_install_prerequisite
+
+run_test "enabled GNOME extension assets are upgraded" test_enabled_gnome_extension_is_upgraded

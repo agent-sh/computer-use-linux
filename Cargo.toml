@@ -51,7 +51,7 @@ skrifa = { version = "0.42", default-features = false, features = ["std"] }
 # The indicator overlay: layer-shell surfaces drawn on the CPU into shm buffers.
 smithay-client-toolkit = { version = "0.21.1", default-features = false, features = ["calloop"] }
 tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd"] }
-tokio = { version = "1.51.1", features = ["io-util", "macros", "process", "rt", "signal", "sync", "time"] }
+tokio = { version = "1.51.1", features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 wayland-client = "0.31.11"
 wayland-protocols = { version = "0.32.9", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }

@@ -237,7 +237,7 @@ pub(crate) async fn activate_extension_window(window_id: u64) -> Result<()> {
     }
 }
 
-async fn verified_extension_proxy(connection: &zbus::Connection) -> Result<Proxy<'_>> {
+pub(crate) async fn verified_extension_proxy(connection: &zbus::Connection) -> Result<Proxy<'_>> {
     let owner = verified_extension_owner(connection).await?;
     Proxy::new(
         connection,

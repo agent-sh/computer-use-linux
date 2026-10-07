@@ -1,7 +1,7 @@
 {
   "uuid": "computer-use-linux@avifenesh.dev",
   "name": "Linux Computer Use Window Control",
-  "description": "Local GNOME Shell window listing and focus bridge for Linux Computer Use MCP.",
+  "description": "Local GNOME Shell window control and agent activity indicator for Linux Computer Use MCP.",
   "shell-version": [
     "45",
     "46",
@@ -10,5 +10,5 @@
     "49",
     "50"
   ],
-  "version": 2
+  "version": 3
 }

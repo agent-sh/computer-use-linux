@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add a native GNOME Shell activity indicator with cursor motion, click pulses, keycaps, typed-text masking, agent colors and idle fading. The helper preserves shared capture exclusion and rejects captures when hiding is not acknowledged.
+- Mask generic text-box roles, terminal focus and generic enum fallback roles. A GTK obscured entry can advertise the same text-box role as a public entry.
+- Refresh already-enabled GNOME extension assets during installation and report the required session restart.
+
 ### Added
 - On-screen indicator, on by default: `computer-use-linux-indicator` draws a
   software cursor that glides to coordinate pointer targets and ripples on

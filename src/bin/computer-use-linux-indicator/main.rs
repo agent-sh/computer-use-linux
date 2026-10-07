@@ -16,6 +16,7 @@
 
 mod draw;
 mod font;
+mod gnome;
 
 use std::{
     collections::hash_map::DefaultHasher,
@@ -1278,6 +1279,20 @@ delegate_registry!(App);
 smithay_client_toolkit::delegate_dispatch2!(App);
 
 fn run() -> Result<(), String> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_none()
+        && computer_use_linux::indicator::is_gnome_session()
+    {
+        return gnome::run().map_err(|error| format!("{error:#}"));
+    }
+    match run_layer_shell() {
+        Err(error) if error == "the compositor has no wlr-layer-shell" => {
+            gnome::run().map_err(|error| format!("{error:#}"))
+        }
+        result => result,
+    }
+}
+
+fn run_layer_shell() -> Result<(), String> {
     let path = socket_path().ok_or("XDG_RUNTIME_DIR is not set")?;
     // One overlay per session. Agents may start it at the same moment, so a
     // lock, not a probe of the socket, decides which instance stays. The lock

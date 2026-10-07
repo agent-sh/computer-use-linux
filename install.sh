@@ -588,8 +588,8 @@ install_gnome_extension() {
     if [[ -z "${session_type}" ]] && command -v loginctl >/dev/null 2>&1 && [[ -n "${XDG_SESSION_ID:-}" ]]; then
         session_type="$(loginctl show-session "${XDG_SESSION_ID}" -p Type --value 2>/dev/null || true)"
     fi
-    if [[ "${session_type}" != "wayland" ]]; then
-        log_skip "not a Wayland session (extension only needed under GNOME Wayland)"
+    if [[ "${session_type}" != "wayland" && "${session_type}" != "x11" ]]; then
+        log_skip "not a GNOME desktop session"
         return 0
     fi
     if ! command -v gnome-extensions >/dev/null 2>&1; then
@@ -601,10 +601,17 @@ install_gnome_extension() {
         return 0
     fi
 
-    # Already installed & enabled? Nothing to do.
+    # Enabled extensions still need refreshed assets after an upgrade. GNOME
+    # keeps the loaded module until the session restarts.
+    local extension_dir="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/${EXT_UUID}"
+    local was_enabled=0
     if gnome-extensions list --enabled 2>/dev/null | grep -qx "${EXT_UUID}"; then
-        log_ok "extension ${EXT_UUID} already enabled"
-        return 0
+        was_enabled=1
+        if cmp -s "${EXT_SRC_DIR}/extension.js" "${extension_dir}/extension.js" &&
+           cmp -s "${EXT_SRC_DIR}/metadata.json" "${extension_dir}/metadata.json"; then
+            log_ok "extension ${EXT_UUID} already enabled and up to date"
+            return 0
+        fi
     fi
 
     local pack_dir
@@ -619,6 +626,12 @@ install_gnome_extension() {
     gnome-extensions install --force "${zipfile}" || { log_fail "gnome-extensions install failed"; rm -rf "${pack_dir}"; return 1; }
     log_ok "extension installed (${zipfile##*/})"
     rm -rf "${pack_dir}"
+
+    if [[ ${was_enabled} -eq 1 ]]; then
+        log_ok "enabled extension assets updated"
+        log_info "log out and back in to load the updated window control and activity indicator"
+        return 0
+    fi
 
     if gnome-extensions enable "${EXT_UUID}" 2>/dev/null; then
         log_ok "extension enabled"

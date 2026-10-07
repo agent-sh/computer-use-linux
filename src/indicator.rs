@@ -109,6 +109,83 @@ pub fn capture_lock_path(socket: &Path) -> PathBuf {
     socket.with_extension("capture")
 }
 
+/// Whether the session uses the GNOME Shell renderer.
+pub fn is_gnome_session() -> bool {
+    env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .split(':')
+        .any(|desktop| desktop.eq_ignore_ascii_case("gnome"))
+}
+
+/// Updates the indicator in the verified GNOME Shell extension. The age keeps
+/// a capture resume from extending the idle deadline.
+pub async fn show_gnome_indicator(
+    connection: &zbus::Connection,
+    event: &IndicatorEvent,
+    age_ms: u32,
+) -> anyhow::Result<()> {
+    let proxy = crate::windowing::backends::gnome::verified_extension_proxy(connection).await?;
+    let _: () = proxy
+        .call("ShowIndicator", &(serde_json::to_string(event)?, age_ms))
+        .await?;
+    Ok(())
+}
+
+/// State of the activity renderer in the verified GNOME Shell extension.
+pub async fn gnome_indicator_state(connection: &zbus::Connection) -> anyhow::Result<String> {
+    let proxy = crate::windowing::backends::gnome::verified_extension_proxy(connection).await?;
+    Ok(proxy.call("GetIndicatorState", &()).await?)
+}
+
+/// Hides the GNOME indicator and reports whether compositor settling is needed.
+/// An absent or older extension cannot show an indicator.
+pub async fn hide_gnome_indicator(connection: &zbus::Connection) -> anyhow::Result<bool> {
+    let bus = zbus::fdo::DBusProxy::new(connection).await?;
+    if !bus
+        .name_has_owner(crate::identity::DBUS_SERVICE.try_into()?)
+        .await?
+    {
+        return Ok(false);
+    }
+    let proxy = crate::windowing::backends::gnome::verified_extension_proxy(connection).await?;
+    match proxy.call("HideIndicator", &()).await {
+        Ok(shown) => Ok(shown),
+        Err(error) if error.to_string().contains("UnknownMethod") => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn settle_gnome_indicator_if_present() -> anyhow::Result<()> {
+    // Unit-test senders must never connect to the real desktop bus. A server
+    // launched without desktop metadata can still share GNOME's renderer.
+    let runtime_bus = env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            // SAFETY: geteuid takes no arguments and only reads the process uid.
+            PathBuf::from(format!("/run/user/{}", unsafe { libc::geteuid() }))
+        })
+        .join("bus");
+    if cfg!(test)
+        || (!is_gnome_session()
+            && env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none()
+            && !runtime_bus.exists())
+    {
+        return Ok(());
+    }
+    let hidden = tokio::time::timeout(CAPTURE_REPLY_WAIT, async {
+        let connection = zbus::Connection::session().await?;
+        hide_gnome_indicator(&connection).await
+    })
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!("GNOME indicator did not acknowledge hiding before capturing")
+    })??;
+    if hidden {
+        tokio::time::sleep(HIDE_SETTLE).await;
+    }
+    Ok(())
+}
+
 /// Maps an MCP `clientInfo` to the name shown on screen.
 pub fn agent_display_name(name: &str, title: Option<&str>) -> String {
     let lower = name.to_ascii_lowercase();
@@ -341,7 +418,8 @@ impl Indicator {
                         ErrorKind::NotFound | ErrorKind::ConnectionRefused
                     ) =>
                 {
-                    return Ok(hold)
+                    settle_gnome_indicator_if_present().await?;
+                    return Ok(hold);
                 }
                 // A full queue: the overlay is running but not reading.
                 Err(error)
@@ -450,7 +528,9 @@ impl Indicator {
                 Overlay::Started(at) if at.elapsed() < SPAWN_WAIT => return false,
                 _ => {}
             }
-            if env::var_os("WAYLAND_DISPLAY").is_none() || spawn_overlay().is_err() {
+            if (!is_gnome_session() && env::var_os("WAYLAND_DISPLAY").is_none())
+                || spawn_overlay().is_err()
+            {
                 *overlay = Overlay::Unavailable;
                 return false;
             }
@@ -513,10 +593,16 @@ fn client_socket() -> Option<UnixDatagram> {
 /// password field (`password text`, or the `PasswordText` fallback name), or
 /// a role that could not be read and so might be one.
 pub(crate) fn is_secret_role(role: &str) -> bool {
+    // Generic enum fallback names do not establish whether an editable field
+    // obscures input. GTK's fresh "text box" role is similarly ambiguous.
+    if matches!(role.trim(), "Entry" | "Text") {
+        return true;
+    }
     let role = role.trim().to_ascii_lowercase();
     role.is_empty()
         || role == crate::atspi_tree::UNKNOWN_ROLE
         || role == "invalid"
+        || matches!(role.as_str(), "text box" | "textbox" | "terminal")
         || role.contains("password")
 }
 
@@ -581,6 +667,23 @@ mod tests {
         assert!(is_secret_role("Unknown"));
         assert!(is_secret_role("Invalid"));
         assert!(is_secret_role(" "));
+    }
+
+    #[test]
+    fn generic_text_boxes_do_not_establish_password_safety() {
+        // GTK exposes obscured entries with the same text-box role as public
+        // entries. A successful role read does not establish clear-text input.
+        assert!(is_secret_role("text box"));
+        assert!(is_secret_role("TextBox"));
+    }
+
+    #[test]
+    fn enum_fallback_text_and_terminal_roles_are_masked() {
+        assert!(is_secret_role("Entry"));
+        assert!(is_secret_role("Text"));
+        assert!(is_secret_role("terminal"));
+        // A fresh non-generic role read keeps the original public-text path.
+        assert!(!is_secret_role("entry"));
     }
 
     /// A sender talking to a stand-in overlay at `path`.
