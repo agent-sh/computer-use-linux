@@ -180,6 +180,8 @@ pub(crate) struct Indicator {
     /// The overlay's socket.
     path: Option<PathBuf>,
     overlay: Mutex<Overlay>,
+    /// Replies share one socket; captures must not consume each other's ACKs.
+    capture_handshake: tokio::sync::Mutex<()>,
 }
 
 impl Default for Indicator {
@@ -200,6 +202,7 @@ impl Default for Indicator {
             socket,
             path: live.then(socket_path).flatten(),
             overlay: Mutex::new(Overlay::NotStarted),
+            capture_handshake: tokio::sync::Mutex::new(()),
         }
     }
 }
@@ -272,23 +275,32 @@ impl Indicator {
         self.send(&self.event(tool)).await;
     }
 
-    pub(crate) async fn keys(&self, chord: &str) {
+    pub(crate) async fn keys(&self, chord: &str, secret: bool) {
         let event = IndicatorEvent {
-            keys: chord
-                .split('+')
-                .map(str::trim)
-                .filter(|key| !key.is_empty())
-                .map(str::to_string)
-                .collect(),
+            // Character-by-character password entry must not leak through keycaps.
+            keys: if self.mask_text || secret {
+                vec!["••••••••".to_string()]
+            } else {
+                chord
+                    .split('+')
+                    .map(str::trim)
+                    .filter(|key| !key.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            },
             ..self.event("press_key")
         };
         self.send(&event).await;
     }
 
-    /// Shows entered text; `secret` masks it regardless of the opt-in.
+    /// Shows entered text; `set_value` and `secret` are always masked.
     pub(crate) async fn text(&self, tool: &str, text: &str, secret: bool) {
         let event = IndicatorEvent {
-            text: Some(shown_text(text, self.mask_text || secret)),
+            // An app can change a settable field to a password after the snapshot.
+            text: Some(shown_text(
+                text,
+                self.mask_text || secret || tool == "set_value",
+            )),
             ..self.event(tool)
         };
         self.send(&event).await;
@@ -298,13 +310,17 @@ impl Indicator {
     /// waits until the compositor has dropped whatever was showing. Works with
     /// this server's indicator disabled too: another agent's overlay must not
     /// end up in this server's captures. Fails when a running overlay cannot
-    /// be told to hide, rather than capture it.
+    /// confirm it has hidden, rather than capture it.
     pub(crate) async fn hold_for_capture(&self) -> anyhow::Result<CaptureHold<'_>> {
+        let _handshake = self.capture_handshake.lock().await;
         let hold = CaptureHold {
             indicator: self,
-            lock: self.take_capture_lock().await,
+            lock: self.take_capture_lock().await?,
         };
         let Some(socket) = &self.socket else {
+            if self.path.is_some() {
+                anyhow::bail!("no client socket to confirm the action indicator overlay is hidden");
+            }
             return Ok(hold);
         };
         let mut reply = [0u8; 16];
@@ -342,38 +358,52 @@ impl Indicator {
         while Instant::now() < deadline {
             match socket.recv_from(&mut reply) {
                 // Only the overlay's socket, in the user's private runtime
-                // directory, may waive the wait.
+                // directory, can confirm that its surfaces were removed.
                 Ok((len, from)) if from.as_pathname() == self.path.as_deref() => {
-                    if &reply[..len] == CAPTURE_REPLY_EMPTY {
-                        return Ok(hold);
+                    match &reply[..len] {
+                        CAPTURE_REPLY_EMPTY => return Ok(hold),
+                        CAPTURE_REPLY_SHOWN => {
+                            tokio::time::sleep(HIDE_SETTLE).await;
+                            return Ok(hold);
+                        }
+                        _ => anyhow::bail!(
+                            "invalid action indicator overlay acknowledgement before capturing"
+                        ),
                     }
-                    break;
                 }
                 Ok(_) => {}
-                Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    tokio::time::sleep(Duration::from_millis(5)).await
+                }
+                Err(error) => anyhow::bail!(
+                    "could not confirm the action indicator overlay is hidden before capturing: {error}"
+                ),
             }
         }
-        // Shown, or no answer: assume it was visible.
-        tokio::time::sleep(HIDE_SETTLE).await;
-        Ok(hold)
+        anyhow::bail!("action indicator overlay did not acknowledge hiding before capturing")
     }
 
-    async fn take_capture_lock(&self) -> Option<File> {
+    async fn take_capture_lock(&self) -> anyhow::Result<Option<File>> {
+        let Some(path) = self.path.as_deref() else {
+            return Ok(None);
+        };
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(capture_lock_path(self.path.as_deref()?))
-            .ok()?;
+            .open(capture_lock_path(path))
+            .map_err(|error| anyhow::anyhow!("could not open indicator capture lock: {error}"))?;
         // The overlay tests the lock exclusively for an instant; retry past it.
         for _ in 0..20 {
             match file.try_lock_shared() {
-                Ok(()) => return Some(file),
+                Ok(()) => return Ok(Some(file)),
                 Err(TryLockError::WouldBlock) => tokio::time::sleep(Duration::from_millis(1)).await,
-                Err(TryLockError::Error(_)) => return None,
+                Err(TryLockError::Error(error)) => {
+                    anyhow::bail!("could not take indicator capture lock: {error}")
+                }
             }
         }
-        None
+        anyhow::bail!("indicator capture lock remained busy")
     }
 
     fn send_raw(&self, event: &IndicatorEvent) -> io::Result<()> {
@@ -452,8 +482,11 @@ pub(crate) struct CaptureHold<'a> {
 
 impl Drop for CaptureHold<'_> {
     fn drop(&mut self) {
-        // Release first, so the overlay finds the lock free.
-        drop(self.lock.take());
+        // A concurrently spawning child can inherit the descriptor until exec.
+        // Explicitly unlock before notifying the overlay, even while it is open.
+        if let Some(lock) = self.lock.take() {
+            let _ = lock.unlock();
+        }
         let _ = self.indicator.send_raw(&IndicatorEvent {
             capture: Some(Capture::End),
             ..Default::default()
@@ -562,6 +595,7 @@ mod tests {
             socket: Some(socket),
             path: Some(path.to_path_buf()),
             overlay: Mutex::new(Overlay::Unavailable),
+            capture_handshake: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -584,11 +618,18 @@ mod tests {
 
     /// Takes a capture hold against a stand-in overlay that answers `begin`
     /// with `reply`, from its own socket or, when `spoofed`, from another one.
-    /// Returns how long taking the hold took.
-    async fn hold_with_reply(name: &str, reply: &'static [u8], spoofed: bool) -> Duration {
+    /// Returns how long taking the hold took, or its error.
+    async fn hold_with_reply(
+        name: &str,
+        reply: &'static [u8],
+        spoofed: bool,
+    ) -> anyhow::Result<Duration> {
         let dir = scratch_dir(name);
         let socket = dir.join(SOCKET_NAME);
         let overlay = UnixDatagram::bind(&socket).unwrap();
+        overlay
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let impostor = UnixDatagram::bind(dir.join("impostor.sock")).unwrap();
         let sender = sender_for(&socket, true);
         let answer = std::thread::spawn(move || {
@@ -601,22 +642,38 @@ mod tests {
             assert_eq!(&buf[..len], br#"{"capture":"end"}"#);
         });
         let started = Instant::now();
-        let hold = sender.hold_for_capture().await.unwrap();
+        let hold = sender.hold_for_capture().await;
         let took = started.elapsed();
-        assert!(capture_held(&socket));
-        drop(hold);
+        let result = hold.map(|hold| {
+            assert!(capture_held(&socket));
+            drop(hold);
+            took
+        });
         assert!(!capture_held(&socket));
         answer.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
-        took
+        result
     }
 
     #[tokio::test]
     async fn captures_wait_only_while_the_overlay_was_on_screen() {
-        assert!(hold_with_reply("empty", CAPTURE_REPLY_EMPTY, false).await < HIDE_SETTLE);
-        assert!(hold_with_reply("shown", CAPTURE_REPLY_SHOWN, false).await >= HIDE_SETTLE);
-        // Only the overlay's own socket may waive the wait.
-        assert!(hold_with_reply("spoofed", CAPTURE_REPLY_EMPTY, true).await >= HIDE_SETTLE);
+        assert!(
+            hold_with_reply("empty", CAPTURE_REPLY_EMPTY, false)
+                .await
+                .unwrap()
+                < HIDE_SETTLE
+        );
+        assert!(
+            hold_with_reply("shown", CAPTURE_REPLY_SHOWN, false)
+                .await
+                .unwrap()
+                >= HIDE_SETTLE
+        );
+        // Neither another sender nor an unknown reply can authorize a capture.
+        assert!(hold_with_reply("spoofed", CAPTURE_REPLY_EMPTY, true)
+            .await
+            .is_err());
+        assert!(hold_with_reply("invalid", b"garbage", false).await.is_err());
     }
 
     #[tokio::test]
@@ -635,15 +692,159 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capture_release_unlocks_an_inherited_descriptor() {
+        let dir = scratch_dir("inherited-lock");
+        let socket = dir.join(SOCKET_NAME);
+        let sender = sender_for(&socket, true);
+        let hold = sender.hold_for_capture().await.unwrap();
+        let _inherited = hold.lock.as_ref().unwrap().try_clone().unwrap();
+        assert!(capture_held(&socket));
+        drop(hold);
+        assert!(!capture_held(&socket));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn captures_fail_while_a_stalled_overlay_cannot_be_told_to_hide() {
         let dir = scratch_dir("stalled");
         let socket = dir.join(SOCKET_NAME);
         let _overlay = UnixDatagram::bind(&socket).unwrap();
         let sender = sender_for(&socket, true);
-        let stuffer = UnixDatagram::unbound().unwrap();
-        stuffer.set_nonblocking(true).unwrap();
-        while stuffer.send_to(b"{}", &socket).is_ok() {}
+        // Fill this sender's buffer: a different socket can still enqueue begin.
+        let socket_sender = sender.socket.as_ref().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            assert!(Instant::now() < deadline, "sender never became blocked");
+            match socket_sender.send_to(b"{}", &socket) {
+                Ok(_) => {}
+                Err(error) => {
+                    assert_eq!(error.kind(), ErrorKind::WouldBlock);
+                    break;
+                }
+            }
+        }
+        let error = sender.hold_for_capture().await.err().unwrap();
+        assert!(error.to_string().contains("could not hide"), "{error}");
+        assert!(!capture_held(&socket));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn captures_fail_when_a_running_overlay_does_not_reply() {
+        let dir = scratch_dir("silent");
+        let socket = dir.join(SOCKET_NAME);
+        let overlay = UnixDatagram::bind(&socket).unwrap();
+        overlay.set_nonblocking(true).unwrap();
+        let sender = sender_for(&socket, true);
+        let error = sender.hold_for_capture().await.err().unwrap();
+        assert!(error.to_string().contains("did not acknowledge"), "{error}");
+        let mut buf = [0u8; 64];
+        let len = overlay.recv(&mut buf).unwrap();
+        assert_eq!(&buf[..len], br#"{"capture":"begin"}"#);
+        assert!(!capture_held(&socket));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn set_values_are_masked_even_when_the_cached_role_was_public() {
+        let dir = scratch_dir("set-value-mask");
+        let socket = dir.join(SOCKET_NAME);
+        let overlay = UnixDatagram::bind(&socket).unwrap();
+        overlay
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let sender = sender_for(&socket, true);
+        sender.text("set_value", "secret", false).await;
+        let mut buf = [0u8; 512];
+        let len = overlay.recv(&mut buf).unwrap();
+        let event: IndicatorEvent = serde_json::from_slice(&buf[..len]).unwrap();
+        assert_eq!(event.text.as_deref(), Some("••••••••"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn keycaps_mask_secret_focus_and_the_hide_text_setting() {
+        let dir = scratch_dir("key-mask");
+        let socket = dir.join(SOCKET_NAME);
+        let overlay = UnixDatagram::bind(&socket).unwrap();
+        overlay
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut sender = sender_for(&socket, true);
+        for (secret, hide_text, expected) in [
+            (true, false, vec!["••••••••"]),
+            (false, true, vec!["••••••••"]),
+            (false, false, vec!["Shift", "a"]),
+        ] {
+            sender.mask_text = hide_text;
+            sender.keys("Shift+a", secret).await;
+            let mut buf = [0u8; 512];
+            let len = overlay.recv(&mut buf).unwrap();
+            let event: IndicatorEvent = serde_json::from_slice(&buf[..len]).unwrap();
+            assert_eq!(event.keys, expected);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn captures_fail_when_the_capture_lock_cannot_be_taken() {
+        let dir = scratch_dir("unavailable-lock");
+        let socket = dir.join(SOCKET_NAME);
+        let lock_path = capture_lock_path(&socket);
+        std::fs::create_dir(&lock_path).unwrap();
+        let sender = sender_for(&socket, true);
         assert!(sender.hold_for_capture().await.is_err());
+        std::fs::remove_dir(&lock_path).unwrap();
+        let lock = File::create(&lock_path).unwrap();
+        lock.try_lock().unwrap();
+        assert!(sender.hold_for_capture().await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn captures_fail_without_a_client_socket_in_a_live_runtime() {
+        let dir = scratch_dir("no-client-socket");
+        let socket = dir.join(SOCKET_NAME);
+        let mut sender = sender_for(&socket, true);
+        sender.socket = None;
+        assert!(sender.hold_for_capture().await.is_err());
+        assert!(!capture_held(&socket));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn concurrent_captures_do_not_consume_each_others_replies() {
+        let dir = scratch_dir("concurrent");
+        let socket = dir.join(SOCKET_NAME);
+        let overlay = UnixDatagram::bind(&socket).unwrap();
+        overlay
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let sender = sender_for(&socket, true);
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        let answer = std::thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            for n in 0..2 {
+                let (len, from) = overlay.recv_from(&mut buf).unwrap();
+                assert_eq!(&buf[..len], br#"{"capture":"begin"}"#);
+                overlay.send_to_addr(CAPTURE_REPLY_EMPTY, &from).unwrap();
+                if n == 0 {
+                    ack_tx.send(()).unwrap();
+                }
+            }
+        });
+        let mut first = Box::pin(sender.hold_for_capture());
+        assert!(futures_util::poll!(first.as_mut()).is_pending());
+        ack_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        // Poll the second request before the first can consume its queued ACK.
+        let (second, first) = tokio::join!(biased; sender.hold_for_capture(), first);
+        let (first, second) = (first.unwrap(), second.unwrap());
+        assert!(capture_held(&socket));
+        drop(first);
+        assert!(capture_held(&socket), "the second capture is still running");
+        drop(second);
+        assert!(!capture_held(&socket));
+        answer.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -654,11 +855,29 @@ mod tests {
         let overlay = UnixDatagram::bind(&socket).unwrap();
         overlay.set_nonblocking(true).unwrap();
         let sender = sender_for(&socket, false);
-        let hold = sender.hold_for_capture().await.unwrap();
+        let hold = sender.hold_for_capture();
+        let acknowledge = async {
+            let mut buf = [0u8; 64];
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                assert!(Instant::now() < deadline, "capture begin was not received");
+                match overlay.recv_from(&mut buf) {
+                    Ok((len, from)) => {
+                        assert_eq!(&buf[..len], br#"{"capture":"begin"}"#);
+                        overlay.send_to_addr(CAPTURE_REPLY_EMPTY, &from).unwrap();
+                        break;
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        tokio::time::sleep(Duration::from_millis(1)).await
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            }
+        };
+        let (hold, ()) = tokio::join!(hold, acknowledge);
+        let hold = hold.unwrap();
         assert!(capture_held(&socket));
         let mut buf = [0u8; 64];
-        let len = overlay.recv(&mut buf).unwrap();
-        assert_eq!(&buf[..len], br#"{"capture":"begin"}"#);
         // It reports no actions of its own.
         sender.action("click").await;
         assert!(overlay.recv(&mut buf).is_err());

@@ -49,6 +49,24 @@ fetch() {
   fi
 }
 
+# Only a missing release asset is optional; network and checksum errors fail.
+fetch_optional() {
+  case "$1" in
+    file://*) [ -e "${1#file://}" ] || return 10 ;;
+  esac
+  if command -v curl >/dev/null 2>&1; then
+    code=$(curl -fsSL --retry 2 -o "$2" -w '%{http_code}' "$1") && return 0
+    [ "$code" = "404" ] && return 10
+  elif command -v wget >/dev/null 2>&1; then
+    out=$(wget -S -O "$2" "$1" 2>&1) && return 0
+    echo "$out" >&2
+    echo "$out" | grep -q ' 404 ' && return 10
+  else
+    say "curl or wget is required to download the server binary"
+  fi
+  return 1
+}
+
 sha256() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | cut -d' ' -f1
@@ -66,9 +84,23 @@ install_release() {
   trap 'exit 143' TERM
 
   for name in computer-use-linux computer-use-linux-cosmic computer-use-linux-indicator; do
+    # A cache made by an older launcher can already contain the main binaries.
+    [ ! -x "$cache_dir/$name" ] || continue
     asset="$name-$target"
     say "downloading $asset v$version"
-    fetch "$base/$asset" "$tmp/$name"
+    if [ "$name" = computer-use-linux-indicator ]; then
+      status=0
+      fetch_optional "$base/$asset" "$tmp/$name" || status=$?
+      if [ "$status" -eq 10 ]; then
+        rm -f "$tmp/$name"
+        say "release v$version has no indicator; running without the overlay"
+        : >"$tmp/.no-indicator"
+        continue
+      fi
+      [ "$status" -eq 0 ] || return "$status"
+    else
+      fetch "$base/$asset" "$tmp/$name"
+    fi
     fetch "$base/$asset.sha256" "$tmp/$name.sha256"
     expected=$(grep -o -E '[0-9a-fA-F]{64}' "$tmp/$name.sha256" | head -n 1 | tr 'A-F' 'a-f')
     actual=$(sha256 "$tmp/$name")
@@ -82,14 +114,21 @@ install_release() {
   # Concurrent first starts each stage their own copy; rename keeps the swap
   # atomic, and the helpers land before the main binary that gates reuse.
   mkdir -p "$cache_dir"
-  mv -f "$tmp/computer-use-linux-cosmic" "$helper"
-  mv -f "$tmp/computer-use-linux-indicator" "$indicator"
-  mv -f "$tmp/computer-use-linux" "$binary"
+  for name in computer-use-linux-cosmic computer-use-linux-indicator computer-use-linux; do
+    if [ -f "$tmp/$name" ]; then
+      mv -f "$tmp/$name" "$cache_dir/$name"
+    fi
+  done
+  if [ -f "$tmp/.no-indicator" ]; then
+    mv -f "$tmp/.no-indicator" "$cache_dir/.no-indicator"
+  elif [ -x "$indicator" ]; then
+    rm -f "$cache_dir/.no-indicator"
+  fi
   rm -rf "$tmp"
   trap - EXIT INT TERM
 }
 
-if [ ! -x "$binary" ] || [ ! -x "$helper" ] || [ ! -x "$indicator" ]; then
+if [ ! -x "$binary" ] || [ ! -x "$helper" ] || { [ ! -x "$indicator" ] && [ ! -f "$cache_dir/.no-indicator" ]; }; then
   install_release
 fi
 
@@ -105,7 +144,7 @@ if [ -z "${COMPUTER_USE_LINUX_COSMIC_HELPER:-}" ]; then
   COMPUTER_USE_LINUX_COSMIC_HELPER="$helper"
   export COMPUTER_USE_LINUX_COSMIC_HELPER
 fi
-if [ -z "${COMPUTER_USE_LINUX_INDICATOR_BIN:-}" ]; then
+if [ -z "${COMPUTER_USE_LINUX_INDICATOR_BIN:-}" ] && [ -x "$indicator" ]; then
   COMPUTER_USE_LINUX_INDICATOR_BIN="$indicator"
   export COMPUTER_USE_LINUX_INDICATOR_BIN
 fi

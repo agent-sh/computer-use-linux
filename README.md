@@ -98,6 +98,8 @@ While an agent acts, the server drives `computer-use-linux-indicator`, a click-t
 
 The server starts the overlay on the first action and it exits after ten idle minutes; nothing is drawn, and no surfaces exist, between bursts of activity. It needs a compositor with `wlr-layer-shell` (COSMIC, KDE Plasma, Hyprland, Sway, niri, …); on GNOME the server notices the overlay cannot start and stops trying. Set `COMPUTER_USE_LINUX_INDICATOR=0` to turn it off.
 
+Captures require the shared capture lock and, when an overlay is running, its acknowledgement that it has hidden. A missing or invalid acknowledgement, a stalled socket, or a failed lock returns a capture error. Concurrent captures keep separate holds; their acknowledgements are exchanged in order.
+
 **Conditional host execution**
 
 - `complete_interaction` - optional desktop completion notification, registered only with `COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE=1`. Repeated calls can create repeated notifications; it does not provide desktop exclusivity.
@@ -423,7 +425,7 @@ Most setups need none of these — `doctor` and the installers pick sensible def
 | `COMPUTER_USE_LINUX_COSMIC_HELPER` | Path to the `computer-use-linux-cosmic` helper when it isn't next to the binary or on `PATH`. |
 | `COMPUTER_USE_LINUX_INDICATOR` | Set to `0` (or `false`/`off`/`no`) to turn off the on-screen indicator. On by default. |
 | `COMPUTER_USE_LINUX_INDICATOR_BIN` | Path to the `computer-use-linux-indicator` overlay when it isn't next to the binary or on `PATH`. |
-| `COMPUTER_USE_LINUX_INDICATOR_HIDE_TEXT` | Set exactly to `1` to show text typed by `type_text`/`set_value` as `•` in the indicator. |
+| `COMPUTER_USE_LINUX_INDICATOR_HIDE_TEXT` | Set exactly to `1` to mask all typed text and keycaps in the indicator. `set_value` values are always masked. |
 | `COMPUTER_USE_LINUX_AGENT_NAME` | Name shown in the indicator instead of the one derived from the MCP client's `clientInfo`. |
 | `CU_DISABLE_ABS_POINTER` | Disable the uinput absolute pointer. Wayland coordinate actions then need the RemoteDesktop portal; they refuse input rather than use ydotool's relative-motion approximation. Native X11 fallback is unchanged. |
 | `COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER` / `…_KEYBOARD` | Prefer the RemoteDesktop portal on Wayland, skipping auto-detection. Pointer forcing skips the absolute uinput backend. Forced ydotool or XTEST keyboard overrides take precedence; KDE literal text keeps its clipboard route. Portal startup and text conversion failures return errors without replaying through ydotool. |
@@ -477,7 +479,7 @@ Computer-use tooling is, by definition, a privilege-escalation surface. The thre
 - **Persisted remote control is opt-in.** `COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP=1` stores the portal's single-use restore token in the user state directory, mode `0600`. A same-user process that can read that file can restore remote control without a new prompt until the desktop revokes the grant. Leave the variable unset to keep a prompt on every new process.
 - **AT-SPI exposes window contents to any client on your session bus.** Enabling the AT-SPI bridge (`setup_accessibility`) is a prerequisite for this binary; it's also what screen readers use, and it shares the same trust boundary.
 - **The GNOME Shell extension** is loaded only into your user's GNOME Shell, runs in the Shell's JS sandbox, and exposes a single DBus interface on the user session bus. It does not request any extra permissions.
-- **The indicator shows what agents type.** `type_text` and `set_value` text (its last 64 characters) is drawn on screen unless the target is, or might be, a password field: text is replaced by a fixed mask when the element's AT-SPI role is a password role or cannot be read, or when the focused element of the app receiving the keystrokes cannot be read within 250 ms. The text also travels over a socket in the user's private runtime directory. Set `COMPUTER_USE_LINUX_INDICATOR_HIDE_TEXT=1` to mask it, or `COMPUTER_USE_LINUX_INDICATOR=0` to turn the indicator off.
+- **The indicator shows what agents type.** `type_text` text (its last 64 characters) and `press_key` keycaps are drawn on screen unless the target is, or might be, a password field: both are replaced by a fixed mask when the focused element's AT-SPI role is a password role or cannot be read within 250 ms. `set_value` values are always masked, because an app can change a field to a password after its accessibility snapshot. The text also travels over a socket in the user's private runtime directory. Set `COMPUTER_USE_LINUX_INDICATOR_HIDE_TEXT=1` to mask all typed text and keycaps, or `COMPUTER_USE_LINUX_INDICATOR=0` to turn the indicator off.
 - **No network.** This binary opens no TCP/UDP listener, makes no outbound Internet connections, and ships no telemetry. It does use local session transports such as DBus and the per-user `ydotoold` Unix socket.
 - **Mutating tools are explicit.** The MCP tool list annotates read-only versus mutating tools, and CI fails if the published tool annotations drift from the table above. Treat those annotations as hints; the host is still responsible for user approval and policy.
 

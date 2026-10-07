@@ -1077,23 +1077,7 @@ impl ComputerUseLinux {
             }
         };
 
-        // Judge the element that receives the value; one the cache does not
-        // know (e.g. a raw element_identifier) is masked.
-        let secret = self
-            .last_snapshot
-            .lock()
-            .ok()
-            .and_then(|cached| {
-                cached
-                    .nodes
-                    .iter()
-                    .find(|node| node.object_ref == object_ref)
-                    .map(|node| node.role.clone())
-            })
-            .is_none_or(|role| crate::indicator::is_secret_role(&role));
-        self.indicator
-            .text("set_value", &params.value, secret)
-            .await;
+        self.indicator.text("set_value", &params.value, false).await;
         match set_element_value(&object_ref, &params.value).await {
             Ok(ValueSetInvocation::Numeric { value }) => Json(ActionOutput {
                 ok: true,
@@ -1623,7 +1607,6 @@ impl ComputerUseLinux {
                 });
             }
         };
-        self.indicator.keys(&params.key).await;
         let Some((chord_modifiers, chord_key)) = key_chord(&params.key) else {
             return Json(ActionOutput {
                 ok: false,
@@ -1633,6 +1616,8 @@ impl ComputerUseLinux {
                 received,
             });
         };
+        let secret = self.typing_into_secret(focus.as_ref()).await;
+        self.indicator.keys(&params.key, secret).await;
         if self.should_prefer_portal_keyboard_for_chords().await {
             match self.ensure_portal_keyboard_session().await {
                 Ok(Some(session)) => {

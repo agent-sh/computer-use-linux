@@ -56,7 +56,9 @@ function download(url, destination, redirects = 5) {
 
       if (response.statusCode !== 200) {
         response.resume();
-        reject(new Error(`download failed with HTTP ${response.statusCode}: ${url}`));
+        const error = new Error(`download failed with HTTP ${response.statusCode}: ${url}`);
+        error.statusCode = response.statusCode;
+        reject(error);
         return;
       }
 
@@ -67,6 +69,19 @@ function download(url, destination, redirects = 5) {
     });
     request.on('error', reject);
   });
+}
+
+// Releases before the overlay omit its asset; only HTTP 404 is optional.
+async function downloadOptional(url, destination) {
+  try {
+    await download(url, destination);
+    return true;
+  } catch (error) {
+    if (error.statusCode === 404) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 function parseSha256(text) {
@@ -123,25 +138,29 @@ async function main() {
     await download(`${baseUrl}/${asset}.sha256`, tmpSha);
     await download(`${baseUrl}/${cosmicAsset}`, tmpCosmic);
     await download(`${baseUrl}/${cosmicAsset}.sha256`, tmpCosmicSha);
-    await download(`${baseUrl}/${indicatorAsset}`, tmpIndicator);
-    await download(`${baseUrl}/${indicatorAsset}.sha256`, tmpIndicatorSha);
+    const hasIndicator = await downloadOptional(`${baseUrl}/${indicatorAsset}`, tmpIndicator);
+    if (hasIndicator) {
+      await download(`${baseUrl}/${indicatorAsset}.sha256`, tmpIndicatorSha);
+    }
 
     const expected = parseSha256(fs.readFileSync(tmpSha, 'utf8'));
     const actual = sha256File(tmpBinary);
     if (actual !== expected) {
-      fail(`sha256 mismatch for ${asset}: expected ${expected}, got ${actual}`);
+      throw new Error(`sha256 mismatch for ${asset}: expected ${expected}, got ${actual}`);
     }
 
     const expectedCosmic = parseSha256(fs.readFileSync(tmpCosmicSha, 'utf8'));
     const actualCosmic = sha256File(tmpCosmic);
     if (actualCosmic !== expectedCosmic) {
-      fail(`sha256 mismatch for ${cosmicAsset}: expected ${expectedCosmic}, got ${actualCosmic}`);
+      throw new Error(`sha256 mismatch for ${cosmicAsset}: expected ${expectedCosmic}, got ${actualCosmic}`);
     }
 
-    const expectedIndicator = parseSha256(fs.readFileSync(tmpIndicatorSha, 'utf8'));
-    const actualIndicator = sha256File(tmpIndicator);
-    if (actualIndicator !== expectedIndicator) {
-      fail(`sha256 mismatch for ${indicatorAsset}: expected ${expectedIndicator}, got ${actualIndicator}`);
+    if (hasIndicator) {
+      const expectedIndicator = parseSha256(fs.readFileSync(tmpIndicatorSha, 'utf8'));
+      const actualIndicator = sha256File(tmpIndicator);
+      if (actualIndicator !== expectedIndicator) {
+        throw new Error(`sha256 mismatch for ${indicatorAsset}: expected ${expectedIndicator}, got ${actualIndicator}`);
+      }
     }
 
     fs.mkdirSync(binDir, { recursive: true });
@@ -149,9 +168,13 @@ async function main() {
     fs.chmodSync(binaryPath, 0o755);
     fs.copyFileSync(tmpCosmic, cosmicHelperPath);
     fs.chmodSync(cosmicHelperPath, 0o755);
-    fs.copyFileSync(tmpIndicator, indicatorPath);
-    fs.chmodSync(indicatorPath, 0o755);
-    console.log(`[computer-use-linux] installed ${asset}, ${cosmicAsset} and ${indicatorAsset}`);
+    if (hasIndicator) {
+      fs.copyFileSync(tmpIndicator, indicatorPath);
+      fs.chmodSync(indicatorPath, 0o755);
+    } else {
+      fs.rmSync(indicatorPath, { force: true });
+    }
+    console.log(`[computer-use-linux] installed ${asset} and ${cosmicAsset}${hasIndicator ? ` and ${indicatorAsset}` : ' (release has no indicator)'}`);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

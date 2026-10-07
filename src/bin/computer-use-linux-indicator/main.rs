@@ -280,7 +280,7 @@ struct App {
     /// When surfaces were last removed; the compositor may still show them.
     removed_at: Option<Instant>,
     /// Held shared by servers while they capture the screen.
-    capture_lock: Option<File>,
+    capture_lock: File,
     watching_hold: bool,
     sprite: Option<(u64, Pixmap)>,
     animating: bool,
@@ -353,7 +353,7 @@ impl App {
     }
 
     fn capture_held(&self) -> bool {
-        self.capture_lock.as_ref().is_some_and(lock_held)
+        lock_held(&self.capture_lock)
     }
 
     /// Takes every surface off the screen until no capture holds the overlay
@@ -1098,8 +1098,8 @@ fn lock_held(lock: &File) -> bool {
             false
         }
         Err(TryLockError::WouldBlock) => true,
-        // Unknowable: never freeze the overlay on it.
-        Err(TryLockError::Error(_)) => false,
+        // A failed probe cannot authorize drawing into an in-progress capture.
+        Err(TryLockError::Error(_)) => true,
     }
 }
 
@@ -1292,7 +1292,7 @@ fn run() -> Result<(), String> {
         .truncate(false)
         .write(true)
         .open(capture_lock_path(&path))
-        .ok();
+        .map_err(|error| format!("capture lock file: {error}"))?;
 
     let conn =
         Connection::connect_to_env().map_err(|error| format!("no Wayland session: {error}"))?;

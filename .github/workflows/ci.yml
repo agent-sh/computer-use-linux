@@ -140,6 +140,7 @@ jobs:
           test "$cargo_version" = "$npm_version"
       - run: node --check npm/install.js
       - run: node --check npm/bin/computer-use-linux.js
+      - run: python3 scripts/indicator_packaging_test.py
       - run: cargo build --locked
       - name: Test npm wrapper against local binary
         run: |
