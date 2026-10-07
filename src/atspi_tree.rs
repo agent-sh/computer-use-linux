@@ -837,6 +837,9 @@ async fn read_node(
     }
 }
 
+/// Role reported when neither AT-SPI role read succeeds.
+pub(crate) const UNKNOWN_ROLE: &str = "unknown";
+
 async fn role_name(proxy: &AccessibleProxy<'_>) -> String {
     if let Ok(role) = proxy.get_role_name().await {
         if !role.trim().is_empty() {
@@ -847,7 +850,7 @@ async fn role_name(proxy: &AccessibleProxy<'_>) -> String {
         .get_role()
         .await
         .map(|role| format!("{role:?}"))
-        .unwrap_or_else(|_| "unknown".to_string())
+        .unwrap_or_else(|_| UNKNOWN_ROLE.to_string())
 }
 
 async fn bounds(proxy: &AccessibleProxy<'_>) -> Option<Bounds> {

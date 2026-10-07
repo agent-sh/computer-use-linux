@@ -87,6 +87,8 @@ pub struct ComputerUseLinux {
     /// Cached physical desktop size from the most recent full-frame capture;
     /// used for off-screen warnings and portal logical-coordinate mapping.
     desktop_size: Arc<Mutex<Option<(u32, u32)>>>,
+    /// On-screen activity overlay (opt-out via `COMPUTER_USE_LINUX_INDICATOR=0`).
+    indicator: Arc<crate::indicator::Indicator>,
 }
 
 fn sanitize_unsigned_integer_formats(value: &mut serde_json::Value) {
@@ -310,6 +312,7 @@ impl ComputerUseLinux {
     ) -> Json<ActivateWindowOutput> {
         let target = params.into_target();
         let received = Some(serde_json::json!(target.clone()));
+        self.indicator.action("activate_window").await;
         match focus_window_target(&target).await {
             Ok(focus) => {
                 let ok = focus_satisfies_target(&focus, &target);
@@ -354,6 +357,15 @@ impl ComputerUseLinux {
         &self,
         Parameters(params): Parameters<GetAppStateParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let captures = params.include_screenshot.unwrap_or(true);
+        let result = self.app_state(params).await;
+        if captures {
+            self.indicator.action("get_app_state").await;
+        }
+        result
+    }
+
+    async fn app_state(&self, params: GetAppStateParams) -> Result<CallToolResult, ErrorData> {
         let verbose = params.verbose.unwrap_or(false);
         let mut diagnostics = tokio::task::spawn_blocking(doctor_report)
             .await
@@ -378,7 +390,10 @@ impl ComputerUseLinux {
             .await;
         let (screenshot, screenshot_error) = if include_screenshot {
             let result: Result<ScreenshotCapture> = async {
-                let raw = capture_screenshot_raw().await;
+                let raw = {
+                    let _hold = self.indicator.hold_for_capture().await?;
+                    capture_screenshot_raw().await
+                };
                 diagnostics.readiness.record_screenshot_result(raw.is_ok());
                 let raw = raw?;
                 self.cache_desktop_size(raw.width, raw.height);
@@ -538,10 +553,12 @@ impl ComputerUseLinux {
         )
     )]
     async fn screenshot(&self, Parameters(params): Parameters<ScreenshotParams>) -> CallToolResult {
-        match self.capture_screenshot(params).await {
+        let result = match self.capture_screenshot(params).await {
             Ok(result) => result,
             Err(error) => CallToolResult::error(vec![ContentBlock::text(format!("{error:#}"))]),
-        }
+        };
+        self.indicator.action("screenshot").await;
+        result
     }
 
     async fn capture_screenshot(&self, params: ScreenshotParams) -> Result<CallToolResult> {
@@ -561,9 +578,12 @@ impl ComputerUseLinux {
             .as_ref()
             .and_then(|window| window.title.clone());
 
-        let raw_capture = capture_screenshot_raw()
-            .await
-            .context("screenshot failed")?;
+        let raw_capture = {
+            let _hold = self.indicator.hold_for_capture().await?;
+            capture_screenshot_raw()
+                .await
+                .context("screenshot failed")?
+        };
         self.cache_desktop_size(raw_capture.width, raw_capture.height);
 
         // Warn when the target window extends past the visible desktop: the
@@ -784,6 +804,7 @@ impl ComputerUseLinux {
             action_index,
         } = target
         {
+            self.indicator.action("click").await;
             let invocation = if let Some(name) = action_name
                 .as_deref()
                 .filter(|name| !name.trim().is_empty())
@@ -830,6 +851,9 @@ impl ComputerUseLinux {
         let ClickTarget::Coordinates(x, y) = target else {
             unreachable!("click target must resolve to coordinates or an AT-SPI action");
         };
+        self.indicator
+            .pointer("click", (x, y), self.indicator_space())
+            .await;
         let button = mouse_button_code(params.button.as_deref());
         let click_count = params.click_count.unwrap_or(1).clamp(1, 10).to_string();
         // Preferred backend: the uinput absolute pointer. Unlike ydotool's
@@ -1053,6 +1077,7 @@ impl ComputerUseLinux {
             }
         };
 
+        self.indicator.text("set_value", &params.value, false).await;
         match set_element_value(&object_ref, &params.value).await {
             Ok(ValueSetInvocation::Numeric { value }) => Json(ActionOutput {
                 ok: true,
@@ -1262,6 +1287,14 @@ impl ComputerUseLinux {
                 });
             }
         };
+        match target_point {
+            Some(point) => {
+                self.indicator
+                    .pointer("scroll", point, self.indicator_space())
+                    .await
+            }
+            None => self.indicator.action("scroll").await,
+        }
         let (dx, dy) = match direction {
             ScrollDirection::Up => (0, units),
             ScrollDirection::Down => (0, -units),
@@ -1435,6 +1468,14 @@ impl ComputerUseLinux {
     async fn drag(&self, Parameters(params): Parameters<DragParams>) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params));
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        let space = self.indicator_space();
+        self.indicator
+            .pointer("drag", (params.start_x, params.start_y), space)
+            .await;
+        // Lead the overlay cursor to the drop point while the drag runs.
+        self.indicator
+            .follow("drag", (params.end_x, params.end_y), space)
+            .await;
         // Preferred backend: the uinput absolute pointer (accurate landing).
         if self.ensure_abs_pointer().await {
             let pointer = Arc::clone(&self.abs_pointer);
@@ -1575,6 +1616,8 @@ impl ComputerUseLinux {
                 received,
             });
         };
+        let secret = self.typing_into_secret(focus.as_ref()).await;
+        self.indicator.keys(&params.key, secret).await;
         if self.should_prefer_portal_keyboard_for_chords().await {
             match self.ensure_portal_keyboard_session().await {
                 Ok(Some(session)) => {
@@ -1721,6 +1764,8 @@ impl ComputerUseLinux {
                 });
             }
         };
+        let secret = self.typing_into_secret(focus.as_ref()).await;
+        self.indicator.text("type_text", &params.text, secret).await;
         if self.should_prefer_kde_clipboard_text_backend() {
             match self.ensure_portal_keyboard_session().await {
                 Ok(Some(session)) => {
@@ -1914,6 +1959,7 @@ impl ComputerUseLinux {
     ) -> Json<WindowGeometryOutput> {
         let received = Some(serde_json::json!(params.clone()));
         let target = params.target.clone().into_target();
+        self.indicator.action("move_window").await;
         self.window_geometry_op(received, &target, |window| async move {
             registry::move_window(&window, params.x, params.y).await
         })
@@ -1936,6 +1982,7 @@ impl ComputerUseLinux {
     ) -> Json<WindowGeometryOutput> {
         let received = Some(serde_json::json!(params.clone()));
         let target = params.target.clone().into_target();
+        self.indicator.action("resize_window").await;
         self.window_geometry_op(received, &target, |window| async move {
             registry::resize_window(&window, params.width, params.height).await
         })
@@ -2230,11 +2277,12 @@ async fn execute_shell(params: RunShellParams) -> RunShellOutput {
 }
 
 pub async fn serve_mcp() -> Result<()> {
-    ComputerUseLinux::default()
-        .serve(rmcp::transport::stdio())
-        .await?
-        .waiting()
-        .await?;
+    let server = ComputerUseLinux::default();
+    let indicator = Arc::clone(&server.indicator);
+    let running = server.serve(rmcp::transport::stdio()).await?;
+    // The handshake is done, so the peer knows the client's name.
+    indicator.attach(running.peer().clone());
+    running.waiting().await?;
     Ok(())
 }
 
@@ -3439,6 +3487,42 @@ impl ComputerUseLinux {
         session.logical_point_from_capture(x, y, capture_size)
     }
 
+    /// Capture size for overlay points, which are in screenshot pixels like
+    /// the click tools. Only a cached size is used: capturing the screen just
+    /// for the overlay could prompt the user.
+    fn indicator_space(&self) -> Option<(u32, u32)> {
+        *self.desktop_size.lock().ok()?
+    }
+
+    /// Whether typed text would land in a password field. Unknown counts as
+    /// yes, so the overlay never shows a secret it could not rule out.
+    async fn typing_into_secret(&self, focus: Option<&WindowFocusResult>) -> bool {
+        if !self.indicator.enabled() {
+            return true;
+        }
+        let focused_role = async {
+            let pid = match focus {
+                Some(focus) => focus
+                    .focused_window
+                    .as_ref()
+                    .and_then(|window| window.pid)
+                    .or(focus.requested_window.pid),
+                None => focused_window().await.ok().flatten()?.pid,
+            };
+            // Only the app that receives the keystrokes can tell where they
+            // land; another app may keep a stale focused element.
+            match probe_focused_element(Some(pid?)).await.ok()? {
+                FocusProbe::Found(element) => Some(element.role),
+                _ => None,
+            }
+        };
+        timeout(Duration::from_millis(250), focused_role)
+            .await
+            .ok()
+            .flatten()
+            .is_none_or(|role| crate::indicator::is_secret_role(&role))
+    }
+
     /// COORDINATE SPACES: window bounds (list_windows / extension frame rects)
     /// and the extension monitor layout are in LOGICAL pixels, while click/
     /// scroll coordinates and screenshot captures are in PHYSICAL capture
@@ -3891,6 +3975,7 @@ impl ComputerUseLinux {
             }
         };
 
+        self.indicator.action("perform_action").await;
         match invoke_accessibility_action(&object_ref, requested_action).await {
             Ok(invocation) => Json(ActionOutput {
                 ok: invocation.ok,
