@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- On-screen indicator, on by default: `computer-use-linux-indicator` draws a
+  software cursor that glides to coordinate pointer targets and ripples on
+  click, keycaps and a typing line for keyboard input,
+  an edge glow, and a status pill naming the agent from the MCP `clientInfo`.
+  Pointer actions wait 350 ms for the cursor to land; AT-SPI actions report
+  their status without moving it. Screen captures require the capture lock
+  and a valid hide acknowledgement from a running overlay. `set_value`
+  values are always masked; keycaps and typed text are masked for password
+  or unknown focus. Needs `wlr-layer-shell`; set
+  `COMPUTER_USE_LINUX_INDICATOR=0` to turn it off. Installed by `./install.sh`,
+  `cargo install`, npm, and published as a release asset.
+
 ### Fixed
 
 - `setup-window-targeting` enables the system extension in `/usr/share/gnome-shell/extensions` if a distribution package installed it. It installs the user extension in `~/.local/share/gnome-shell/extensions` only if there is no system extension. If there is a system extension, setup removes the user extension from earlier setups and asks for a GNOME Shell reload. Before, setup always installed the user extension, and GNOME Shell used it instead of the system extension, so package updates had no effect.
