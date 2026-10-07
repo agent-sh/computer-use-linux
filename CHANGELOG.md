@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `setup-window-targeting` enables the system extension in `/usr/share/gnome-shell/extensions` if a distribution package installed it. It installs the user extension in `~/.local/share/gnome-shell/extensions` only if there is no system extension. If there is a system extension, setup removes the user extension from earlier setups and asks for a GNOME Shell reload. Before, setup always installed the user extension, and GNOME Shell used it instead of the system extension, so package updates had no effect.
+- The GNOME Shell extension supports GNOME Shell 51.
 
 ## [0.7.11] - 2026-10-04
 
