@@ -172,14 +172,27 @@ async fn settle_gnome_indicator_if_present() -> anyhow::Result<()> {
     {
         return Ok(());
     }
-    let hidden = tokio::time::timeout(CAPTURE_REPLY_WAIT, async {
+    let probe = tokio::time::timeout(CAPTURE_REPLY_WAIT, async {
         let connection = zbus::Connection::session().await?;
-        hide_gnome_indicator(&connection).await
+        let bus = zbus::fdo::DBusProxy::new(&connection).await?;
+        let present = bus
+            .name_has_owner(crate::identity::DBUS_SERVICE.try_into()?)
+            .await?;
+        Ok::<_, anyhow::Error>(present.then_some(connection))
     })
-    .await
-    .map_err(|_| {
-        anyhow::anyhow!("GNOME indicator did not acknowledge hiding before capturing")
-    })??;
+    .await;
+    let connection = match probe {
+        Ok(Ok(Some(connection))) => connection,
+        Ok(Ok(None)) => return Ok(()),
+        Ok(Err(error)) if is_gnome_session() => return Err(error),
+        Err(error) if is_gnome_session() => return Err(error.into()),
+        _ => return Ok(()),
+    };
+    let hidden = tokio::time::timeout(CAPTURE_REPLY_WAIT, hide_gnome_indicator(&connection))
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("GNOME indicator did not acknowledge hiding before capturing")
+        })??;
     if hidden {
         tokio::time::sleep(HIDE_SETTLE).await;
     }

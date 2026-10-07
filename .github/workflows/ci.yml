@@ -64,7 +64,7 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - run: cargo test --locked --target ${{ matrix.target }} --no-fail-fast
+      - run: XDG_CACHE_HOME="$RUNNER_TEMP/cul-test-cache" cargo test --locked --target ${{ matrix.target }} --no-fail-fast
 
   installer-shell:
     name: install.sh regressions
@@ -72,7 +72,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash -n install.sh scripts/install_sh_test.sh
-      - run: scripts/install_sh_test.sh
+      - run: XDG_CACHE_HOME="$RUNNER_TEMP/cul-installer-cache" scripts/install_sh_test.sh
 
   rustdoc-and-package:
     name: rustdoc and cargo package

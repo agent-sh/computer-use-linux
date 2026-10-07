@@ -1054,6 +1054,7 @@ mod tests {
             "cul-cancelled-capture-{}.png",
             getrandom::u64().unwrap()
         ));
+        fs::create_dir_all(&cache).unwrap();
         fs::write(&path, valid_png(1, 1)).unwrap();
         let (release, wait) = std::sync::mpsc::channel();
         let (started, ready) = tokio::sync::oneshot::channel();
