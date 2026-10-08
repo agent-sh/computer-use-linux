@@ -167,7 +167,7 @@ enum ScreenshotCleanup {
 }
 
 struct OwnedScreenshotCleanup {
-    strategy: ScreenshotCleanup,
+    strategy: Option<ScreenshotCleanup>,
     portal_file: Option<File>,
 }
 
@@ -199,37 +199,58 @@ impl OwnedScreenshotCleanup {
             _ => None,
         };
         Self {
-            strategy,
+            strategy: Some(strategy),
             portal_file,
+        }
+    }
+}
+
+impl OwnedScreenshotCleanup {
+    fn cleanup_now(&mut self) {
+        if let Some(strategy) = self.strategy.take() {
+            cleanup_screenshot_path(strategy, self.portal_file.take());
         }
     }
 }
 
 impl Drop for OwnedScreenshotCleanup {
     fn drop(&mut self) {
-        let path = match &self.strategy {
-            ScreenshotCleanup::DeletePath(path) => Some(path),
-            ScreenshotCleanup::PortalPath { path, .. } => {
-                self.portal_file.as_ref().and_then(|file| {
-                    file.metadata()
-                        .ok()
-                        .zip(fs::symlink_metadata(path).ok())
-                        .filter(|(original, current)| {
-                            current.file_type().is_file()
-                                && (original.dev(), original.ino())
-                                    == (current.dev(), current.ino())
-                        })
-                        .map(|_| path)
-                })
-            }
-            #[cfg(test)]
-            ScreenshotCleanup::Preserve => None,
+        let Some(strategy) = self.strategy.take() else {
+            return;
         };
-        if let Some(path) = path {
-            if let Err(error) = fs::remove_file(path) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    eprintln!("Failed to remove screenshot capture file: {error}");
-                }
+        let portal_file = self.portal_file.take();
+        if matches!(strategy, ScreenshotCleanup::PortalPath { .. }) {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                // A queued read can be cancelled on the single-thread runtime.
+                // Keep the pinned file alive and unlink on a blocking worker.
+                runtime.spawn_blocking(move || cleanup_screenshot_path(strategy, portal_file));
+                return;
+            }
+        }
+        cleanup_screenshot_path(strategy, portal_file);
+    }
+}
+
+fn cleanup_screenshot_path(strategy: ScreenshotCleanup, portal_file: Option<File>) {
+    let path = match &strategy {
+        ScreenshotCleanup::DeletePath(path) => Some(path),
+        ScreenshotCleanup::PortalPath { path, .. } => portal_file.as_ref().and_then(|file| {
+            file.metadata()
+                .ok()
+                .zip(fs::symlink_metadata(path).ok())
+                .filter(|(original, current)| {
+                    current.file_type().is_file()
+                        && (original.dev(), original.ino()) == (current.dev(), current.ino())
+                })
+                .map(|_| path)
+        }),
+        #[cfg(test)]
+        ScreenshotCleanup::Preserve => None,
+    };
+    if let Some(path) = path {
+        if let Err(error) = fs::remove_file(path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("Failed to remove screenshot capture file: {error}");
             }
         }
     }
@@ -598,13 +619,6 @@ async fn read_portal_png_as_capture(
     path: PathBuf,
     request: PortalScreenshotRequest,
 ) -> Result<RawScreenshotCapture> {
-    // Resolve parent aliases while keeping final-component symlinks untrusted.
-    let path = path
-        .parent()
-        .and_then(|parent| fs::canonicalize(parent).ok())
-        .zip(path.file_name())
-        .map(|(parent, name)| parent.join(name))
-        .unwrap_or(path);
     // Portal URIs can reference user files. Snapshot names before requesting
     // capture, and pin the returned file until cleanup to prevent inode reuse.
     let cleanup = ScreenshotCleanup::PortalPath {
@@ -738,10 +752,39 @@ async fn read_png_as_capture(
     cleanup: ScreenshotCleanup,
 ) -> Result<RawScreenshotCapture> {
     let source = source.to_string();
-    let cleanup = OwnedScreenshotCleanup::new(cleanup);
+    let (path, mut cleanup) = if matches!(cleanup, ScreenshotCleanup::PortalPath { .. }) {
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::task::spawn_blocking(move || {
+                // Resolve parent aliases without following the final symlink.
+                let path = path
+                    .parent()
+                    .and_then(|parent| fs::canonicalize(parent).ok())
+                    .zip(path.file_name())
+                    .map(|(parent, name)| parent.join(name))
+                    .unwrap_or(path);
+                let cleanup = match cleanup {
+                    ScreenshotCleanup::PortalPath { request, .. } => {
+                        ScreenshotCleanup::PortalPath {
+                            path: path.clone(),
+                            request,
+                        }
+                    }
+                    other => other,
+                };
+                (path, OwnedScreenshotCleanup::new(cleanup))
+            }),
+        )
+        .await
+        .context("timed out preparing portal screenshot file")?
+        .context("portal screenshot preparation task failed")?
+    } else {
+        (path, OwnedScreenshotCleanup::new(cleanup))
+    };
     run_image_task(move || {
-        let _cleanup = cleanup;
-        read_png_as_capture_inner(&path, &source)
+        let result = read_png_as_capture_inner(&path, &source);
+        cleanup.cleanup_now();
+        result
     })
     .await
 }
