@@ -8,10 +8,10 @@ use image::imageops::FilterType;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
-    fs::{self, OpenOptions},
+    collections::{HashMap, HashSet},
+    fs::{self, File, OpenOptions},
     io::{Cursor, Read},
-    os::unix::fs::OpenOptionsExt,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -109,18 +109,149 @@ struct ResolvedScreenshotPayloadOptions {
     quality: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ScreenshotCleanup {
-    DeletePath(PathBuf),
-    Preserve,
+#[derive(Debug)]
+struct PortalScreenshotRequest {
+    requested_at: SystemTime,
+    pictures: Option<PortalPicturesSnapshot>,
 }
 
-struct OwnedScreenshotCleanup(ScreenshotCleanup);
+#[derive(Debug)]
+struct PortalPicturesSnapshot {
+    path: PathBuf,
+    directory: File,
+    names: HashSet<std::ffi::OsString>,
+}
+
+impl PortalPicturesSnapshot {
+    fn new(path: PathBuf) -> std::io::Result<Self> {
+        let path = fs::canonicalize(path)?;
+        let directory = File::open(&path)?;
+        let names = fs::read_dir(&path)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<HashSet<_>>>()?;
+        Ok(Self {
+            path,
+            directory,
+            names,
+        })
+    }
+
+    fn contains_new_path(&self, path: &Path) -> bool {
+        if path.parent() != Some(self.path.as_path()) {
+            return false;
+        }
+        let same_directory = self
+            .directory
+            .metadata()
+            .ok()
+            .zip(fs::metadata(&self.path).ok())
+            .is_some_and(|(before, current)| {
+                (before.dev(), before.ino()) == (current.dev(), current.ino())
+            });
+        same_directory
+            && path
+                .file_name()
+                .is_some_and(|name| !self.names.contains(name))
+    }
+}
+
+#[derive(Debug)]
+enum ScreenshotCleanup {
+    DeletePath(PathBuf),
+    #[cfg(test)]
+    Preserve,
+    PortalPath {
+        path: PathBuf,
+        request: PortalScreenshotRequest,
+    },
+}
+
+struct OwnedScreenshotCleanup {
+    strategy: Option<ScreenshotCleanup>,
+    portal_file: Option<File>,
+}
+
+impl OwnedScreenshotCleanup {
+    fn new(strategy: ScreenshotCleanup) -> Self {
+        let portal_file = match &strategy {
+            ScreenshotCleanup::PortalPath { path, request } => OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(path)
+                .ok()
+                .filter(|file| {
+                    file.metadata().is_ok_and(|metadata| {
+                        if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } {
+                            return false;
+                        }
+                        if let Some(pictures) = &request.pictures {
+                            if path.parent() == Some(pictures.path.as_path()) {
+                                return pictures.contains_new_path(path);
+                            }
+                        }
+                        // Unknown locations need proof of creation after the request.
+                        // Missing birth times preserve the file.
+                        metadata
+                            .created()
+                            .is_ok_and(|created| created >= request.requested_at)
+                    })
+                }),
+            _ => None,
+        };
+        Self {
+            strategy: Some(strategy),
+            portal_file,
+        }
+    }
+}
+
+impl OwnedScreenshotCleanup {
+    fn cleanup_now(&mut self) {
+        if let Some(strategy) = self.strategy.take() {
+            cleanup_screenshot_path(strategy, self.portal_file.take());
+        }
+    }
+}
 
 impl Drop for OwnedScreenshotCleanup {
     fn drop(&mut self) {
-        if let ScreenshotCleanup::DeletePath(path) = &self.0 {
-            let _ = fs::remove_file(path);
+        let Some(strategy) = self.strategy.take() else {
+            return;
+        };
+        let portal_file = self.portal_file.take();
+        if matches!(strategy, ScreenshotCleanup::PortalPath { .. }) {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                // A queued read can be cancelled on the single-thread runtime.
+                // Keep the pinned file alive and unlink on a blocking worker.
+                runtime.spawn_blocking(move || cleanup_screenshot_path(strategy, portal_file));
+                return;
+            }
+        }
+        cleanup_screenshot_path(strategy, portal_file);
+    }
+}
+
+fn cleanup_screenshot_path(strategy: ScreenshotCleanup, portal_file: Option<File>) {
+    let path = match &strategy {
+        ScreenshotCleanup::DeletePath(path) => Some(path),
+        ScreenshotCleanup::PortalPath { path, .. } => portal_file.as_ref().and_then(|file| {
+            file.metadata()
+                .ok()
+                .zip(fs::symlink_metadata(path).ok())
+                .filter(|(original, current)| {
+                    current.file_type().is_file()
+                        && (original.dev(), original.ino()) == (current.dev(), current.ino())
+                })
+                .map(|_| path)
+        }),
+        #[cfg(test)]
+        ScreenshotCleanup::Preserve => None,
+    };
+    if let Some(path) = path {
+        if let Err(error) = fs::remove_file(path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("Failed to remove screenshot capture file: {error}");
+            }
         }
     }
 }
@@ -422,6 +553,33 @@ async fn capture_with_portal() -> Result<RawScreenshotCapture> {
     let mut options: HashMap<&str, Value<'_>> = HashMap::new();
     options.insert("handle_token", Value::from(token.as_str()));
     options.insert("interactive", Value::from(false));
+    let mut pictures_command = Command::new("xdg-user-dir");
+    pictures_command.arg("PICTURES");
+    let pictures = crate::command_runner::output(pictures_command, "locate Pictures directory")
+        .await
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|path| PathBuf::from(path.trim_end_matches('\n')))
+        .filter(|path| path.is_absolute());
+    let pictures = match pictures {
+        // Match the command helper's one-second metadata budget. A stalled
+        // Pictures mount must not prevent the portal request from starting.
+        Some(path) => match tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::task::spawn_blocking(move || PortalPicturesSnapshot::new(path)),
+        )
+        .await
+        {
+            Ok(Ok(Ok(snapshot))) => Some(snapshot),
+            _ => None,
+        },
+        None => None,
+    };
+    let request = PortalScreenshotRequest {
+        requested_at: SystemTime::now(),
+        pictures,
+    };
     let handle: OwnedObjectPath = portal_proxy
         .call("Screenshot", &("", options))
         .await
@@ -454,7 +612,20 @@ async fn capture_with_portal() -> Result<RawScreenshotCapture> {
         .context("XDG portal screenshot uri was not a string")?;
     let path = file_uri_to_path(&uri)?;
 
-    read_png_as_capture(path, "xdg-desktop-portal", ScreenshotCleanup::Preserve).await
+    read_portal_png_as_capture(path, request).await
+}
+
+async fn read_portal_png_as_capture(
+    path: PathBuf,
+    request: PortalScreenshotRequest,
+) -> Result<RawScreenshotCapture> {
+    // Portal URIs can reference user files. Snapshot names before requesting
+    // capture, and pin the returned file until cleanup to prevent inode reuse.
+    let cleanup = ScreenshotCleanup::PortalPath {
+        path: path.clone(),
+        request,
+    };
+    read_png_as_capture(path, "xdg-desktop-portal", cleanup).await
 }
 
 /// Upper bound on how long we wait for `gnome-screenshot` before killing it.
@@ -581,10 +752,39 @@ async fn read_png_as_capture(
     cleanup: ScreenshotCleanup,
 ) -> Result<RawScreenshotCapture> {
     let source = source.to_string();
-    let cleanup = OwnedScreenshotCleanup(cleanup);
+    let (path, mut cleanup) = if matches!(cleanup, ScreenshotCleanup::PortalPath { .. }) {
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::task::spawn_blocking(move || {
+                // Resolve parent aliases without following the final symlink.
+                let path = path
+                    .parent()
+                    .and_then(|parent| fs::canonicalize(parent).ok())
+                    .zip(path.file_name())
+                    .map(|(parent, name)| parent.join(name))
+                    .unwrap_or(path);
+                let cleanup = match cleanup {
+                    ScreenshotCleanup::PortalPath { request, .. } => {
+                        ScreenshotCleanup::PortalPath {
+                            path: path.clone(),
+                            request,
+                        }
+                    }
+                    other => other,
+                };
+                (path, OwnedScreenshotCleanup::new(cleanup))
+            }),
+        )
+        .await
+        .context("timed out preparing portal screenshot file")?
+        .context("portal screenshot preparation task failed")?
+    } else {
+        (path, OwnedScreenshotCleanup::new(cleanup))
+    };
     run_image_task(move || {
-        let _cleanup = cleanup;
-        read_png_as_capture_inner(&path, &source)
+        let result = read_png_as_capture_inner(&path, &source);
+        cleanup.cleanup_now();
+        result
     })
     .await
 }
@@ -1082,39 +1282,120 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn portal_capture_preserves_valid_returned_path() {
+    async fn portal_capture_removes_new_returned_path() {
         let path = test_path("portal-valid");
+        let requested_at = SystemTime::now();
+        // Linux filesystem timestamps can lag the wall clock by one tick.
+        // A real portal round trip also separates request and file creation.
+        tokio::time::sleep(Duration::from_millis(20)).await;
         fs::write(&path, valid_png(1, 1)).unwrap();
-
-        let capture = read_png_as_capture(
+        let capture = read_portal_png_as_capture(
             path.clone(),
-            "xdg-desktop-portal",
-            ScreenshotCleanup::Preserve,
+            PortalScreenshotRequest {
+                requested_at,
+                pictures: None,
+            },
         )
         .await
         .unwrap();
-
         assert_eq!(capture.source, "xdg-desktop-portal");
-        assert!(path.exists());
+        let retained = path.exists();
+        let _ = fs::remove_file(&path);
+        assert!(!retained, "portal screenshot was left behind");
+    }
+
+    #[tokio::test]
+    async fn portal_capture_removes_new_invalid_returned_path() {
+        let path = test_path("portal-invalid");
+        let requested_at = SystemTime::now();
+        // Linux filesystem timestamps can lag the wall clock by one tick.
+        // A real portal round trip also separates request and file creation.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        fs::write(&path, b"").unwrap();
+        let error = read_portal_png_as_capture(
+            path.clone(),
+            PortalScreenshotRequest {
+                requested_at,
+                pictures: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("screenshot file was empty"));
+        let retained = path.exists();
+        let _ = fs::remove_file(&path);
+        assert!(!retained, "failed portal screenshot was left behind");
+    }
+
+    #[tokio::test]
+    async fn portal_capture_preserves_preexisting_returned_path() {
+        let path = test_path("portal-existing");
+        fs::write(&path, valid_png(1, 1)).unwrap();
+        let requested_at = SystemTime::now();
+        let capture = read_portal_png_as_capture(
+            path.clone(),
+            PortalScreenshotRequest {
+                requested_at,
+                pictures: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(capture.source, "xdg-desktop-portal");
+        assert!(path.exists(), "preexisting user image was removed");
         let _ = fs::remove_file(path);
     }
 
     #[tokio::test]
-    async fn portal_capture_preserves_invalid_returned_path() {
-        let path = test_path("portal-invalid");
-        fs::write(&path, b"").unwrap();
+    async fn portal_capture_cleans_same_tick_picture_and_preserves_existing_name() {
+        let directory = test_path("portal-pictures");
+        fs::create_dir_all(&directory).unwrap();
+        let existing = directory.join("existing.png");
+        fs::write(&existing, valid_png(1, 1)).unwrap();
+        let pictures = PortalPicturesSnapshot::new(directory.clone()).unwrap();
+        let path = directory.join("new.png");
+        let request = PortalScreenshotRequest {
+            requested_at: SystemTime::now(),
+            pictures: Some(pictures),
+        };
+        fs::write(&path, valid_png(1, 1)).unwrap();
+        let capture = read_portal_png_as_capture(path.clone(), request)
+            .await
+            .unwrap();
+        assert_eq!(capture.source, "xdg-desktop-portal");
+        assert!(!path.exists(), "same-tick portal capture was left behind");
+        let pictures = PortalPicturesSnapshot::new(directory.clone()).unwrap();
+        fs::remove_file(&existing).unwrap();
+        fs::write(&existing, valid_png(1, 1)).unwrap();
+        let request = PortalScreenshotRequest {
+            requested_at: UNIX_EPOCH,
+            pictures: Some(pictures),
+        };
+        read_portal_png_as_capture(existing.clone(), request)
+            .await
+            .unwrap();
+        assert!(existing.exists(), "preexisting filename was removed");
+        fs::remove_dir_all(directory).unwrap();
+    }
 
-        let error = read_png_as_capture(
-            path.clone(),
-            "xdg-desktop-portal",
-            ScreenshotCleanup::Preserve,
-        )
-        .await
-        .unwrap_err();
-
-        assert!(error.to_string().contains("screenshot file was empty"));
-        assert!(path.exists());
-        let _ = fs::remove_file(path);
+    #[test]
+    fn portal_cleanup_preserves_a_replacement_file() {
+        let path = test_path("portal-replaced");
+        fs::write(&path, valid_png(1, 1)).unwrap();
+        let created = fs::metadata(&path).unwrap().created().unwrap();
+        let cleanup = OwnedScreenshotCleanup::new(ScreenshotCleanup::PortalPath {
+            path: path.clone(),
+            request: PortalScreenshotRequest {
+                requested_at: created,
+                pictures: None,
+            },
+        });
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, b"user replacement").unwrap();
+        drop(cleanup);
+        let result = fs::read(&path);
+        let _ = fs::remove_file(&path);
+        assert_eq!(result.unwrap(), b"user replacement");
     }
 
     #[tokio::test]

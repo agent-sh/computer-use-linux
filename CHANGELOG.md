@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.13] - 2026-10-08
+
+### Fixed
+- Remove new portal screenshot files after reading them, including invalid images and cancelled queued reads. Snapshot Pictures filenames before requesting capture, preserve existing names, and hold the returned file open so a replacement cannot reuse its inode.
+- Shorten ydotool test directory names so private scratch paths fit Unix socket limits.
+
 ## [0.7.12] - 2026-10-07
 
 ### Added

@@ -576,7 +576,7 @@ mod tests {
     impl TestDirectory {
         fn new(label: &str) -> Self {
             let path = env::temp_dir().join(format!(
-                "computer-use-linux-ydotool-{label}-{}-{}",
+                "cul-yd-{label}-{}-{}",
                 process::id(),
                 random_hex(8).expect("test nonce")
             ));

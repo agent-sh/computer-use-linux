@@ -20,7 +20,8 @@ if (result.status !== 0) {
 	process.exit(result.status ?? 1);
 }
 
-const pack = JSON.parse(result.stdout)[0];
+const packed = JSON.parse(result.stdout);
+const pack = Array.isArray(packed) ? packed[0] : Object.values(packed)[0];
 const paths = new Set(pack.files.map((file) => file.path));
 const missing = requiredFiles.filter((path) => !paths.has(path));
 if (missing.length > 0) {
