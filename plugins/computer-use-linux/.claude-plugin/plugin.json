@@ -1,6 +1,6 @@
 {
   "name": "computer-use-linux",
-  "version": "0.7.12",
+  "version": "0.7.13",
   "description": "Linux desktop control: AT-SPI accessibility trees, screenshots, compositor window targeting, and Wayland/X11 input.",
   "author": {
     "name": "agent-sh",
