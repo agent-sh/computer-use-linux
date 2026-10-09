@@ -172,6 +172,7 @@ describe("native Pi extension", () => {
 			expect(registered?.description).toContain(tool.description);
 			expect(registered?.executionMode).toBe("sequential");
 			expect(registered?.parameters).toMatchObject(tool.inputSchema);
+			expect(registered?.outputSchema).toBeDefined();
 		}
 		expect(
 			harness.tools.get("computer_use_linux_click")?.description,
@@ -275,6 +276,11 @@ describe("native Pi extension", () => {
 			{ type: "image", data: "aGVsbG8=", mimeType: "image/png" },
 		]);
 		expect(second.content).toEqual(first.content);
+		expect(first.structuredContent).toEqual({
+			text: "done",
+			images: [{ data: "aGVsbG8=", mimeType: "image/png" }],
+		});
+		expect(second.structuredContent).toEqual(first.structuredContent);
 	});
 
 	it("marks MCP tool-level failures as Pi tool errors", async () => {
@@ -353,6 +359,12 @@ describe("native Pi extension", () => {
 		);
 
 		expect(result.content.filter((block) => block.type === "image")).toHaveLength(4);
+		const structured = result.structuredContent as {
+			text: string;
+			images: Array<{ data: string; mimeType: string }>;
+		};
+		expect(structured.images).toHaveLength(4);
+		expect(structured.text).toContain("Result truncated by the Pi extension");
 		expect(
 			result.content
 				.filter((block) => block.type === "text")
