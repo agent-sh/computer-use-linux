@@ -497,27 +497,30 @@ const NativeToolOutputSchema = Type.Object({
 	}),
 	images: Type.Array(
 		Type.Object({
+			type: Type.Literal("image"),
 			data: Type.String({ description: "Base64 image data." }),
 			mimeType: Type.String({ description: "Image MIME type." }),
 		}),
 		{ description: "Image blocks of the converted MCP result." },
 	),
+	isError: Type.Boolean({ description: "Whether the MCP tool reported a failure." }),
 });
 
-function toNativeToolStructuredContent(content: PiContent[]): {
+function toNativeToolStructuredContent(content: PiContent[], isError: boolean): {
 	text: string;
-	images: Array<{ data: string; mimeType: string }>;
+	images: Array<{ type: "image"; data: string; mimeType: string }>;
+	isError: boolean;
 } {
 	const texts: string[] = [];
-	const images: Array<{ data: string; mimeType: string }> = [];
+	const images: Array<{ type: "image"; data: string; mimeType: string }> = [];
 	for (const block of content) {
 		if (block.type === "text") {
 			texts.push(block.text);
 		} else if (block.type === "image") {
-			images.push({ data: block.data, mimeType: block.mimeType });
+			images.push({ type: "image", data: block.data, mimeType: block.mimeType });
 		}
 	}
-	return { text: texts.join("\n"), images };
+	return { text: texts.join("\n"), images, isError };
 }
 
 function legacyConfigPath(): string {
@@ -638,7 +641,7 @@ export function createComputerUseLinuxExtension(
 							mcpIsError: result.isError === true,
 							tool: tool.name,
 						},
-						structuredContent: toNativeToolStructuredContent(content),
+						structuredContent: toNativeToolStructuredContent(content, result.isError === true),
 					};
 				},
 			});
