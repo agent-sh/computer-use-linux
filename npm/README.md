@@ -88,6 +88,10 @@ When installed through Pi, the package supplies native, dynamically loaded
 configuration is required. Native tools require Pi 0.84.4 or newer; the
 standalone CLI wrapper retains Node.js 18 support.
 
+In Pi codemode, native tools return `{ text, images, isError }`. Pass image
+blocks directly to `image(result.images[0])` and check `isError` before using
+a result.
+
 If you already built or installed the binary yourself, set
 `COMPUTER_USE_LINUX_BIN=/path/to/computer-use-linux` to make the wrapper use
 that executable instead.

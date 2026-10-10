@@ -3,6 +3,7 @@ import type {
 	ToolDefinition,
 	ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
+import { createCodemodeExtension } from "@earendil-works/pi-coding-agent";
 import {
 	chmodSync,
 	existsSync,
@@ -172,6 +173,7 @@ describe("native Pi extension", () => {
 			expect(registered?.description).toContain(tool.description);
 			expect(registered?.executionMode).toBe("sequential");
 			expect(registered?.parameters).toMatchObject(tool.inputSchema);
+			expect(registered?.outputSchema).toBeDefined();
 		}
 		expect(
 			harness.tools.get("computer_use_linux_click")?.description,
@@ -275,6 +277,42 @@ describe("native Pi extension", () => {
 			{ type: "image", data: "aGVsbG8=", mimeType: "image/png" },
 		]);
 		expect(second.content).toEqual(first.content);
+		expect(first.structuredContent).toEqual({
+			text: "done",
+			images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+			isError: false,
+		});
+		expect(second.structuredContent).toEqual(first.structuredContent);
+	});
+
+	it.each([
+		{ type: "image", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aENsAAAAASUVORK5CYII=", mimeType: "image/png" },
+		{ type: "resource", resource: { blob: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aENsAAAAASUVORK5CYII=", mimeType: "image/png" } },
+	])("preserves screenshot images through Pi's real codemode runtime: $type", async (imageBlock) => {
+		const harness = load();
+		await harness.emit("session_start");
+		FakeMcpClient.result = {
+			content: [{ type: "text", text: "screenshot" }, imageBlock],
+		};
+		createCodemodeExtension({ models: false, mode: "on", inlineBudget: 0 })(harness.pi);
+		const screenshot = harness.tools.get("computer_use_linux_screenshot")!;
+		const codemode = harness.tools.get("codemode")!;
+		const result = await codemode.execute("script", {
+			code: "const r = await tools.computer_use_linux_screenshot({}); text(r.text); image(r.images[0]);",
+		}, undefined, undefined, {
+			tools: [screenshot],
+			sessionManager: { getBranch: () => [] },
+			async executeTool(name: string, args: unknown) {
+				expect(name).toBe(screenshot.name);
+				return {
+					toolCall: { id: "script/1" },
+					isError: false,
+					result: await screenshot.execute("script/1", args, undefined, undefined, {} as never),
+				};
+			},
+		} as never);
+		expect(result.content).toContainEqual({ type: "text", text: "screenshot" });
+		expect(result.content).toContainEqual({ type: "image", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aENsAAAAASUVORK5CYII=", mimeType: "image/png" });
 	});
 
 	it("marks MCP tool-level failures as Pi tool errors", async () => {
@@ -304,6 +342,7 @@ describe("native Pi extension", () => {
 		} satisfies Partial<ToolResultEvent>);
 
 		expect(override).toEqual({ isError: true });
+		expect(result.structuredContent).toEqual({ text: "failed", images: [], isError: true });
 	});
 
 	it("bounds aggregate text results and always reports omitted blocks", async () => {
@@ -353,6 +392,12 @@ describe("native Pi extension", () => {
 		);
 
 		expect(result.content.filter((block) => block.type === "image")).toHaveLength(4);
+		const structured = result.structuredContent as {
+			text: string;
+			images: Array<{ data: string; mimeType: string }>;
+		};
+		expect(structured.images).toHaveLength(4);
+		expect(structured.text).toContain("Result truncated by the Pi extension");
 		expect(
 			result.content
 				.filter((block) => block.type === "text")
