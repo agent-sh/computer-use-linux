@@ -102,6 +102,7 @@ struct ToplevelRecord {
 
 impl ToplevelRecord {
     fn to_window(&self) -> Option<WindowInfo> {
+        self.foreign.as_ref()?;
         let identifier = self.identifier.as_deref()?;
         Some(WindowInfo {
             window_id: stable_window_id(identifier),
@@ -297,7 +298,7 @@ impl Snapshot {
     }
 
     fn prime(&mut self) -> Result<()> {
-        for _ in 0..2 {
+        for _ in 0..4 {
             self.event_queue
                 .roundtrip(&mut self.app_data)
                 .context("Wayland roundtrip failed")?;
@@ -306,16 +307,21 @@ impl Snapshot {
         // roundtrips above can complete before cosmic-comp delivers the
         // initial `State` events. Wait (bounded) for every known cosmic
         // handle to report state so `focused` reflects the compositor.
-        self.wait_for_condition(INIT_STATE_TIMEOUT, |app_data| {
+        let ready = self.wait_for_condition(INIT_STATE_TIMEOUT, |app_data| {
             app_data.records.iter().all(|record| {
-                record.cosmic.is_none()
-                    || record.cosmic.as_ref().is_some_and(|handle| {
-                        app_data
-                            .cosmic_state_seen
-                            .contains(&handle.id().protocol_id())
-                    })
+                record.foreign.is_none()
+                    || (record.identifier.is_some()
+                        && (record.cosmic.is_none()
+                            || record.cosmic.as_ref().is_some_and(|handle| {
+                                app_data
+                                    .cosmic_state_seen
+                                    .contains(&handle.id().protocol_id())
+                            })))
             })
         })?;
+        if !ready {
+            bail!("COSMIC initial toplevel state did not arrive before the snapshot deadline");
+        }
         Ok(())
     }
 
@@ -361,7 +367,15 @@ impl Snapshot {
                 if ready == 0 {
                     return Ok(false);
                 }
-                guard.read().context("Wayland read failed")?;
+                match guard.read() {
+                    Ok(_) => {}
+                    Err(wayland_client::backend::WaylandError::Io(error))
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) => {}
+                    Err(error) => return Err(error).context("Wayland read failed"),
+                }
             }
         }
     }
@@ -388,10 +402,13 @@ impl Snapshot {
             })
     }
 
-    fn monitor_layout(&self) -> Result<Vec<MonitorInfo>> {
+    fn monitor_layout(&mut self) -> Result<Vec<MonitorInfo>> {
         if self.app_data.output_manager.is_none() {
             bail!("COSMIC output management protocol is unavailable");
         }
+        self.wait_for_condition(INIT_STATE_TIMEOUT, |app_data| {
+            app_data.output_layout_ready || app_data.output_manager_finished
+        })?;
         if self.app_data.output_manager_finished || !self.app_data.output_layout_ready {
             bail!("COSMIC output management did not finish an atomic layout snapshot");
         }
@@ -444,10 +461,11 @@ impl Snapshot {
         );
         let verified = self.wait_for_condition(ACTIVATE_VERIFY_TIMEOUT, |app_data| {
             app_data.records.iter().any(|record| {
-                record
-                    .identifier
-                    .as_deref()
-                    .is_some_and(|id| stable_window_id(id) == target_id)
+                record.foreign.is_some()
+                    && record
+                        .identifier
+                        .as_deref()
+                        .is_some_and(|id| stable_window_id(id) == target_id)
                     && record.focused
             })
         })?;

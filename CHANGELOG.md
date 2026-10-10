@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Wait for COSMIC focus state and verify window activation. Report missing initial state as an error, discard closed windows, and wait for complete monitor layouts. (#245)
+
 ## [0.7.13] - 2026-10-08
 
 ### Fixed
