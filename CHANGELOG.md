@@ -802,7 +802,9 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.12...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.14...HEAD
+[0.7.14]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.13...v0.7.14
+[0.7.13]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.12...v0.7.13
 [0.7.12]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.11...v0.7.12
 [0.7.11]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.10...v0.7.11
 [0.7.10]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.9...v0.7.10
