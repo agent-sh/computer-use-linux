@@ -483,6 +483,46 @@ function convertMcpResult(result: McpCallToolResult): PiContent[] {
 	return converted;
 }
 
+/**
+ * Machine-readable result for codemode scripts.
+ *
+ * Pi's codemode sandbox only passes `structuredContent` to nested calls from
+ * tools that declare `outputSchema`; otherwise scripts receive text only and
+ * image blocks are dropped. Mirror the `read` tool pattern so screenshots and
+ * other image results stay reachable via `image()`.
+ */
+const NativeToolOutputSchema = Type.Object({
+	text: Type.String({
+		description: "Joined text blocks of the converted MCP result.",
+	}),
+	images: Type.Array(
+		Type.Object({
+			type: Type.Literal("image"),
+			data: Type.String({ description: "Base64 image data." }),
+			mimeType: Type.String({ description: "Image MIME type." }),
+		}),
+		{ description: "Image blocks of the converted MCP result." },
+	),
+	isError: Type.Boolean({ description: "Whether the MCP tool reported a failure." }),
+});
+
+function toNativeToolStructuredContent(content: PiContent[], isError: boolean): {
+	text: string;
+	images: Array<{ type: "image"; data: string; mimeType: string }>;
+	isError: boolean;
+} {
+	const texts: string[] = [];
+	const images: Array<{ type: "image"; data: string; mimeType: string }> = [];
+	for (const block of content) {
+		if (block.type === "text") {
+			texts.push(block.text);
+		} else if (block.type === "image") {
+			images.push({ type: "image", data: block.data, mimeType: block.mimeType });
+		}
+	}
+	return { text: texts.join("\n"), images, isError };
+}
+
 function legacyConfigPath(): string {
 	const agentDir =
 		process.env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), ".pi", "agent");
@@ -585,6 +625,7 @@ export function createComputerUseLinuxExtension(
 				label: `Computer Use: ${tool.name}`,
 				description: nativeToolDescription(tool),
 				parameters: toolParameters(tool.inputSchema),
+				outputSchema: NativeToolOutputSchema,
 				executionMode: "sequential",
 				async execute(_toolCallId, params, signal) {
 					const result = await getClient().callTool(
@@ -592,13 +633,15 @@ export function createComputerUseLinuxExtension(
 						params as Record<string, unknown>,
 						signal,
 					);
+					const content = convertMcpResult(result);
 					return {
-						content: convertMcpResult(result),
+						content,
 						details: {
 							computerUseLinux: true,
 							mcpIsError: result.isError === true,
 							tool: tool.name,
 						},
+						structuredContent: toNativeToolStructuredContent(content, result.isError === true),
 					};
 				},
 			});

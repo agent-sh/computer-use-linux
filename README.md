@@ -330,6 +330,16 @@ You can also search by capability:
 computer_use_linux_tools({ query: "observe a window and click a control" })
 ```
 
+Codemode scripts receive `{ text, images, isError }`. Each image is an MCP image
+block that can be passed directly to `image()`:
+
+```js
+const result = await tools.computer_use_linux_screenshot({});
+if (result.isError) throw new Error(result.text);
+text(result.text);
+for (const block of result.images) image(block);
+```
+
 No separate MCP adapter or manual MCP configuration is required. Pi starts one
 computer-use-linux process lazily on the first real tool call, reuses it for the
 session so accessibility snapshots remain valid, serializes desktop actions,

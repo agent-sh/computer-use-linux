@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Preserve screenshots in native Pi codemode calls with structured results and image blocks accepted by `image()`. Expose MCP tool errors in structured results. (#243)
+
 ## [0.7.13] - 2026-10-08
 
 ### Fixed

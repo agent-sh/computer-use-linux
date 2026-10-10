@@ -59,6 +59,16 @@ Pi does not start the desktop process when the loader runs. The first real tool
 call starts one computer-use-linux process, and the package reuses it for the
 session so `get_app_state` element indices and portal sessions remain valid.
 
+Codemode scripts receive `{ text, images, isError }`. Each image is an MCP image
+block that can be passed directly to `image()`:
+
+```js
+const result = await tools.computer_use_linux_screenshot({});
+if (result.isError) throw new Error(result.text);
+text(result.text);
+for (const block of result.images) image(block);
+```
+
 ## Safe operating loop
 
 1. Enable `get_app_state`, `list_windows`, and any likely action tools.
