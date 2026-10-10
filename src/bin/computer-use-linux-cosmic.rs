@@ -4,7 +4,9 @@ use cosmic_protocols::{
     toplevel_management::v1::client::zcosmic_toplevel_manager_v1,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::os::unix::io::{AsFd, AsRawFd};
+use std::time::{Duration, Instant};
 use wayland_client::{
     event_created_child,
     globals::{registry_queue_init, GlobalListContents},
@@ -20,6 +22,10 @@ use wayland_protocols_wlr::output_management::v1::client::{
 
 const HELP: &str = "computer-use-linux-cosmic\n\nUsage:\n  computer-use-linux-cosmic probe\n  computer-use-linux-cosmic list-windows\n  computer-use-linux-cosmic focused-window\n  computer-use-linux-cosmic monitor-layout\n  computer-use-linux-cosmic activate-window --window-id <id>";
 const BACKEND: &str = "cosmic-wayland";
+/// Bounded waits keep the helper inside the main crate's 2s command timeout:
+/// ~0.8s for initial cosmic state + ~0.8s for post-activation verification.
+const INIT_STATE_TIMEOUT: Duration = Duration::from_millis(800);
+const ACTIVATE_VERIFY_TIMEOUT: Duration = Duration::from_millis(800);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WindowInfo {
@@ -123,6 +129,11 @@ struct AppData {
     records: Vec<ToplevelRecord>,
     by_foreign_id: HashMap<u32, usize>,
     by_cosmic_id: HashMap<u32, usize>,
+    /// Cosmic protocol ids that have delivered at least one initial `State`
+    /// event. cosmic-comp answers `get_cosmic_toplevel` asynchronously, so a
+    /// fixed number of roundtrips can finish before the state arrives and the
+    /// snapshot would report every window as unfocused.
+    cosmic_state_seen: HashSet<u32>,
     output_manager: Option<zwlr_output_manager_v1::ZwlrOutputManagerV1>,
     output_layout_ready: bool,
     output_manager_finished: bool,
@@ -220,10 +231,16 @@ fn monitor_layout() -> Result<Vec<MonitorInfo>> {
 
 fn activate_window(window_id: u64) -> Result<ActivationOutput> {
     let mut snapshot = Snapshot::collect()?;
-    snapshot.activate(window_id)?;
+    let verified = snapshot.activate(window_id)?;
     Ok(ActivationOutput {
-        ok: true,
-        detail: format!("Requested COSMIC activation for window_id {window_id}."),
+        ok: verified,
+        detail: if verified {
+            format!("COSMIC activation verified focused for window_id {window_id}.")
+        } else {
+            format!(
+                "Requested COSMIC activation for window_id {window_id}, but focus was not observed before the verification deadline."
+            )
+        },
     })
 }
 
@@ -280,12 +297,73 @@ impl Snapshot {
     }
 
     fn prime(&mut self) -> Result<()> {
-        for _ in 0..4 {
+        for _ in 0..2 {
             self.event_queue
                 .roundtrip(&mut self.app_data)
                 .context("Wayland roundtrip failed")?;
         }
+        // `get_cosmic_toplevel` handles are answered asynchronously: the
+        // roundtrips above can complete before cosmic-comp delivers the
+        // initial `State` events. Wait (bounded) for every known cosmic
+        // handle to report state so `focused` reflects the compositor.
+        self.wait_for_condition(INIT_STATE_TIMEOUT, |app_data| {
+            app_data.records.iter().all(|record| {
+                record.cosmic.is_none()
+                    || record.cosmic.as_ref().is_some_and(|handle| {
+                        app_data
+                            .cosmic_state_seen
+                            .contains(&handle.id().protocol_id())
+                    })
+            })
+        })?;
         Ok(())
+    }
+
+    /// Dispatch Wayland events until `condition` holds or `budget` expires.
+    /// Uses `poll(2)` on the queue fd so a silent compositor cannot hang us;
+    /// returns `Ok(true)` when the condition held before the deadline.
+    fn wait_for_condition(
+        &mut self,
+        budget: Duration,
+        mut condition: impl FnMut(&AppData) -> bool,
+    ) -> Result<bool> {
+        let deadline = Instant::now() + budget;
+        loop {
+            self.event_queue
+                .dispatch_pending(&mut self.app_data)
+                .context("Wayland dispatch failed")?;
+            if condition(&self.app_data) {
+                return Ok(true);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(false);
+            }
+            self.event_queue.flush().context("Wayland flush failed")?;
+            if let Some(guard) = self.event_queue.prepare_read() {
+                let fd = self.event_queue.as_fd();
+                let mut poll_fd = libc::pollfd {
+                    fd: fd.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+                // SAFETY: `poll_fd` is a valid single-element array; `poll`
+                // only reads it and writes `revents`.
+                let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+                if ready < 0 {
+                    let errno = std::io::Error::last_os_error();
+                    if errno.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(anyhow!("Wayland socket poll failed: {errno}"));
+                }
+                if ready == 0 {
+                    return Ok(false);
+                }
+                guard.read().context("Wayland read failed")?;
+            }
+        }
     }
 
     fn windows(&self) -> Vec<WindowInfo> {
@@ -321,7 +399,7 @@ impl Snapshot {
             .ok_or_else(|| anyhow!("COSMIC output management returned an incomplete layout"))
     }
 
-    fn activate(&mut self, window_id: u64) -> Result<()> {
+    fn activate(&mut self, window_id: u64) -> Result<bool> {
         if !self.can_activate_windows() {
             bail!("COSMIC activation capability is unavailable");
         }
@@ -353,9 +431,27 @@ impl Snapshot {
             .ok_or_else(|| anyhow!("COSMIC toplevel management protocol not advertised"))?;
         manager.activate(cosmic, &seat);
         self.event_queue
-            .roundtrip(&mut self.app_data)
-            .context("Wayland roundtrip after activation failed")?;
-        Ok(())
+            .flush()
+            .context("Wayland flush after activation failed")?;
+        // Verify on the same connection instead of trusting the fire-and-
+        // forget request: the compositor emits a fresh `State` with
+        // `Activated` for the target once focus actually moves.
+        let target_id = stable_window_id(
+            record
+                .identifier
+                .as_deref()
+                .ok_or_else(|| anyhow!("matched window has no identifier"))?,
+        );
+        let verified = self.wait_for_condition(ACTIVATE_VERIFY_TIMEOUT, |app_data| {
+            app_data.records.iter().any(|record| {
+                record
+                    .identifier
+                    .as_deref()
+                    .is_some_and(|id| stable_window_id(id) == target_id)
+                    && record.focused
+            })
+        })?;
+        Ok(verified)
     }
 }
 
@@ -672,6 +768,7 @@ impl Dispatch<zcosmic_toplevel_handle_v1::ZcosmicToplevelHandleV1, ()> for AppDa
         let record = &mut app_data.records[index];
         match event {
             zcosmic_toplevel_handle_v1::Event::State { state } => {
+                app_data.cosmic_state_seen.insert(handle.id().protocol_id());
                 record.focused = false;
                 record.hidden = false;
                 for value in state.as_chunks::<4>().0 {
