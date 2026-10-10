@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.15] - 2026-10-10
+
+### Fixed
+- Treat focused AT-SPI terminals as keyboard targets without requiring an EditableText interface. Keep warnings for other non-editable controls. (#246)
+- Send X11 text newlines as Return instead of Linefeed, with one newline per CRLF pair. (#247)
+
 ## [0.7.14] - 2026-10-10
 
 ### Fixed
@@ -802,7 +808,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.14...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.15...HEAD
+[0.7.15]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.14...v0.7.15
 [0.7.14]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.13...v0.7.14
 [0.7.13]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.12...v0.7.13
 [0.7.12]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.11...v0.7.12

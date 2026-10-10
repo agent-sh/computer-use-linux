@@ -95,3 +95,7 @@ a result.
 If you already built or installed the binary yourself, set
 `COMPUTER_USE_LINUX_BIN=/path/to/computer-use-linux` to make the wrapper use
 that executable instead.
+
+X11 text input sends LF and CRLF line endings as Return. Focused terminals
+accept keyboard input even when AT-SPI does not expose EditableText. Focus
+feedback describes the target; re-observe its contents to confirm input.
