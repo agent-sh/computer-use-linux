@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.14] - 2026-10-10
+
 ### Fixed
 - Wait for COSMIC focus state and verify window activation. Report missing initial state as an error, discard closed windows, and wait for complete monitor layouts. (#245)
 - Preserve screenshots in native Pi codemode calls with structured results and image blocks accepted by `image()`. Expose MCP tool errors in structured results. (#243)

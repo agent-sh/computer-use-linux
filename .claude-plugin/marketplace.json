@@ -12,7 +12,7 @@
       "name": "computer-use-linux",
       "source": "./plugins/computer-use-linux",
       "description": "Linux desktop control: AT-SPI accessibility trees, screenshots, compositor window targeting, and Wayland/X11 input.",
-      "version": "0.7.13",
+      "version": "0.7.14",
       "category": "productivity"
     }
   ]
