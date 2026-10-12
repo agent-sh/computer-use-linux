@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.16] - 2026-10-13
+
+### Fixed
+- Replace the KWin backend atomic update with stable Rust primitives so source builds work on Rust 1.93.1. (#252)
+
 ## [0.7.15] - 2026-10-10
 
 ### Fixed
