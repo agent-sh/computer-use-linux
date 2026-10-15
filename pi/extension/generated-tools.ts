@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.16";
-export const GENERATED_TOOL_CATALOG_HASH = "666f4649084b7c1a240e6a0eacc01a55379b64a579355f50071211437e91229c";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "554322e70886f5c1e1a3ad06869c5be91c140103f71350ad635160e128c1563d";
+export const GENERATED_TOOL_CATALOG_HASH = "17febb6d652f7b89b2dacdd002d09fb0f5d97ce801943cdf9f4e661c47eb535b";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "eba50023d71fdded440f0cf6ed15abda711c640c8d5708735624a0ae22f2bb0a";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -1199,7 +1199,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Type literal text using keyboard input, optionally after focusing a target window or terminal selector.",
+    "description": "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Success confirms dispatch, not field-content verification; re-observe the target before retrying. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators; Hyprland rejects confirmed password fields; ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
