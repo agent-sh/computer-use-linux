@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.17] - 2026-10-16
+
+### Fixed
+- Stabilize Hyprland wtype input for long text in confirmed nonsecret fields. Keep terminal and unknown-field text on private stdin, limited to 100 Unicode characters per call, and reject confirmed password fields. (#256)
+- Preserve missing-focus warnings for content trees, including renderer hints computed before tree compaction. Recognize Electron editable states and qualify successful text input as dispatch-only. (#256)
+
 ## [0.7.16] - 2026-10-13
 
 ### Fixed
@@ -813,7 +819,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.16...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.17...HEAD
+[0.7.17]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.16...v0.7.17
 [0.7.16]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.15...v0.7.16
 [0.7.15]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.14...v0.7.15
 [0.7.14]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.13...v0.7.14
