@@ -146,19 +146,22 @@ Pi native tools skip this MCP `command` config; see [Pi setup](references/pi-set
 
 On Hyprland, `type_text` passes one literal wtype argument after `--` for a
 classified nonsecret field, avoiding stdin keymap-refresh corruption in Electron.
-Argument text is visible in process listings, so confirmed password fields are
-rejected. A missing, incomplete, or timed-out AT-SPI probe uses private stdin for
-at most 100 Unicode characters per call; larger unknown-field text must be split
-into smaller calls or the target's accessibility support enabled. The input
-probe has its own 1.5-second budget; the 250 ms indicator probe only masks text.
-Both protections apply with the indicator disabled. Other compatible compositors
-retain their existing stdin path. Wtype rejects NUL and text over 131,071 UTF-8
-bytes before focusing a window or displaying text. `ok: true` confirms dispatch
-only; every text backend leaves field contents unverified. Re-observe before
-retrying. Exact window focus alone does not suppress missing-focus warnings:
-only a complete scoped tree containing window/menu chrome without content makes
-the feedback informational. Such trees get a conditional Electron/Chromium hint
-computed before compaction; this is not positive Electron detection.
+Argument text is visible in process listings, so confirmed password roles are
+rejected. Terminals and ambiguous roles (`Entry`/`Text`, `text box`, unreadable
+roles), or a missing/incomplete/timed-out probe, use private stdin for at most
+100 Unicode characters per call. This includes terminals with AT-SPI support;
+they can still contain password prompts. Larger ambiguous-field text must be
+split into smaller calls or, for a nonterminal field, accessibility enabled.
+The input probe has its own 1.5-second budget; the 250 ms indicator probe only
+masks text. Both protections apply with the indicator disabled. Other compatible
+compositors retain their existing stdin path. Wtype rejects NUL and text over
+131,071 UTF-8 bytes before focusing a window or displaying text. `ok: true`
+confirms dispatch only; every text backend leaves field contents unverified.
+Re-observe before retrying. Exact window focus alone does not suppress missing-focus
+warnings: only a complete scoped tree containing window/menu chrome without
+content makes the feedback informational. Such trees get a conditional
+Electron/Chromium hint computed before compaction; this is not positive Electron
+detection.
 
 Plain left element/index/selector `click` prefers native AT-SPI `click`,
 `press`, or `toggle` over toolkit bounds, avoiding coordinate

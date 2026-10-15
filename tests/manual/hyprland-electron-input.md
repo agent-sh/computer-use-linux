@@ -232,3 +232,26 @@ the bounded stdin route, and menu ancestry must be evaluated before compaction.
 There is also explicit coverage for the 100/101 Unicode boundary, confirmed
 password rejection and the input-probe timeout. Native GTK/Qt focus-loss and
 renderer-disabled menu-only Electron were not separately exercised.
+
+### Second review: ambiguous roles are not confirmed passwords
+
+The overlay deliberately masks terminal, enum-fallback `Entry`/`Text`, generic
+`text box` and unreadable roles as well as actual password roles. The first
+routing follow-up mistakenly reused that masking predicate as a password test,
+so accessible terminals were rejected. A focused-terminal regression reproduced
+that failure before this correction.
+
+Input classification now has explicit password/nonsecret/ambiguous outcomes.
+Only a role containing `password` (case-insensitive) confirms a password for
+rejection. Masked roles and the native terminal flag use bounded stdin, even if
+the editable state/interface is present; they never qualify for argv. The overlay
+continues masking them. Normal nonterminal `entry`/`text` fields with the editable
+state retain the long-text argument route.
+
+The role-matrix regression exercises terminal metadata (including an inconsistent
+`entry` name with the native terminal flag), every ambiguous role family, both
+EditableText-interface values, 100-character stdin delivery and 101-character
+rejection. Separate cases preserve password alias rejection and the 3,000-character
+nonsecret-field route. This is injected AT-SPI metadata and fake-process coverage;
+no native VTE/Konsole session was exercised. The earlier Foot result validates
+the same unchanged stdin transport, not a terminal exposing AT-SPI.
