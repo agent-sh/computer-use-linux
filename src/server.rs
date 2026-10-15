@@ -55,6 +55,8 @@ const INPUT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 // Linux limits each exec argument (including its NUL) to 32 pages, at least
 // 128 KiB on supported platforms. Reject oversized text before sending input.
 const WTYPE_MAX_TEXT_BYTES: usize = 128 * 1024 - 1;
+const WTYPE_STDIN_MAX_CHARS: usize = 100;
+const WTYPE_FOCUS_TIMEOUT: Duration = Duration::from_millis(1500);
 const MAX_SCROLL_PAGES: f64 = 100.0;
 const YDOTOOL_TYPE_CHARS_PER_SECOND: u64 = 20;
 const KDE_CLIPBOARD_DBUS_TIMEOUT: Duration = Duration::from_secs(3);
@@ -429,6 +431,7 @@ impl ComputerUseLinux {
         let mut tree_scoped = false;
         let mut tree_root_pid = None;
         let mut accessibility_tree_truncated = false;
+        let mut shell_only_note = None;
         let (accessibility_tree, accessibility_tree_raw_count, accessibility_error) =
             if diagnostics.readiness.can_build_accessibility_tree {
                 let target_pid = window_context.as_ref().and_then(|window| window.pid);
@@ -445,7 +448,13 @@ impl ComputerUseLinux {
                         tree_root_pid = snapshot.root_pid;
                         accessibility_tree_truncated = snapshot.truncated;
                         let raw_count = snapshot.nodes.len();
-                        (compact_accessibility_tree(snapshot.nodes), raw_count, None)
+                        let (nodes, note) = compact_accessibility_tree_with_note(
+                            snapshot.nodes,
+                            tree_scoped,
+                            accessibility_tree_truncated,
+                        );
+                        shell_only_note = note;
+                        (nodes, raw_count, None)
                     }
                     Err(error) => (Vec::new(), 0, Some(format!("{error:#}"))),
                 }
@@ -512,15 +521,9 @@ impl ComputerUseLinux {
             message.push(' ');
             message.push_str(note);
         }
-        if accessibility_error.is_none() {
-            if let Some(note) = shell_only_accessibility_tree_note(
-                &accessibility_tree,
-                tree_scoped,
-                accessibility_tree_truncated,
-            ) {
-                message.push(' ');
-                message.push_str(note);
-            }
+        if let Some(note) = shell_only_note {
+            message.push(' ');
+            message.push_str(note);
         }
 
         // Full diagnostics are huge (portal/process dumps); emit them only on
@@ -1641,7 +1644,7 @@ impl ComputerUseLinux {
                 received,
             });
         };
-        let secret = self.typing_into_secret(focus.as_ref(), false).await;
+        let secret = self.typing_into_secret(focus.as_ref()).await;
         self.indicator.keys(&params.key, secret).await;
         if self.should_prefer_portal_keyboard_for_chords().await {
             match self.ensure_portal_keyboard_session().await {
@@ -1762,7 +1765,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "type_text",
-        description = "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Success confirms dispatch, not field-content verification; re-observe the target before retrying. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators; Hyprland argument mode rejects secret or unclassified fields (use set_value).",
+        description = "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Success confirms dispatch, not field-content verification; re-observe the target before retrying. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators; Hyprland rejects confirmed password fields; unknown fields use private stdin for at most 100 Unicode characters per call.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1804,9 +1807,24 @@ impl ComputerUseLinux {
                 });
             }
         };
-        let secret = self
-            .typing_into_secret(focus.as_ref(), wtype_mode == Some(WtypeTextMode::Argument))
-            .await;
+        let hyprland_argument_mode = wtype_mode == Some(WtypeTextMode::Argument);
+        let (wtype_mode, secret) = if hyprland_argument_mode {
+            match hyprland_wtype_delivery(&params.text, self.input_focus_probe(focus.as_ref()))
+                .await
+            {
+                Ok(mode) => (Some(mode), mode == WtypeTextMode::Stdin),
+                Err(message) => {
+                    return Json(action_result_with_focus(
+                        "type_text",
+                        Err(message),
+                        received,
+                        focus,
+                    ))
+                }
+            }
+        } else {
+            (wtype_mode, self.typing_into_secret(focus.as_ref()).await)
+        };
         if let Some(mode) = wtype_mode {
             if let Err(message) = validate_wtype_privacy(mode, secret) {
                 return Json(action_result_with_focus(
@@ -1972,6 +1990,9 @@ impl ComputerUseLinux {
             if used_wtype {
                 output.message =
                     "Action sent through wtype (Wayland virtual-keyboard protocol).".to_string();
+                if hyprland_argument_mode && mode == WtypeTextMode::Stdin {
+                    output.message.push_str(" AT-SPI could not classify the field; text was sent through stdin, limited to 100 Unicode characters per call.");
+                }
             }
             if output.ok && focus.is_some() {
                 let notes = self.input_landing_notes(focus.as_ref(), true).await;
@@ -2050,7 +2071,7 @@ impl ComputerUseLinux {
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
     version = "0.7.16",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send literal type_text through KDE clipboard integration on Plasma Wayland, wtype on compatible Wayland compositors, or portal keysyms on other Wayland sessions. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype uses a single literal argument after -- to avoid stdin keymap-refresh corruption; text is visible in process arguments, so password fields and fields whose secrecy cannot be determined are rejected. Use set_value on an editable field or expose renderer accessibility. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. A successful type_text result confirms dispatch only; every text backend leaves field contents unverified. Re-observe the target before retrying. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content."
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send literal type_text through KDE clipboard integration on Plasma Wayland, wtype on compatible Wayland compositors, or portal keysyms on other Wayland sessions. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype uses a single literal argument after -- to avoid stdin keymap-refresh corruption; text is visible in process arguments, so confirmed password fields are rejected (use set_value). Unknown fields, including apps without AT-SPI, use private stdin for at most 100 Unicode characters per call; split larger input into smaller calls or expose accessibility. Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. A successful type_text result confirms dispatch only; every text backend leaves field contents unverified. Re-observe the target before retrying. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content."
 )]
 impl ServerHandler for ComputerUseLinux {}
 
@@ -3559,36 +3580,30 @@ impl ComputerUseLinux {
         *self.desktop_size.lock().ok()?
     }
 
-    /// Whether typed text would land in a password field. Unknown counts as
-    /// yes, so the overlay never shows a secret it could not rule out.
-    async fn typing_into_secret(
-        &self,
-        focus: Option<&WindowFocusResult>,
-        check_even_without_indicator: bool,
-    ) -> bool {
-        if !check_even_without_indicator && !self.indicator.enabled() {
+    /// Cosmetic secrecy probe: timeout only masks the indicator, never gates input.
+    async fn typing_into_secret(&self, focus: Option<&WindowFocusResult>) -> bool {
+        if !self.indicator.enabled() {
             return true;
         }
-        let focused_secret = async {
-            let pid = match focus {
-                Some(focus) => focus
-                    .focused_window
-                    .as_ref()
-                    .and_then(|window| window.pid)
-                    .or(focus.requested_window.pid),
-                None => focused_window().await.ok().flatten()?.pid,
-            };
-            // Only the app that receives the keystrokes can tell where they
-            // land; another app may keep a stale focused element.
-            Some(focus_requires_secret_protection(
-                &probe_focused_element(Some(pid?)).await.ok()?,
-            ))
-        };
-        timeout(Duration::from_millis(250), focused_secret)
+        timeout(Duration::from_millis(250), self.input_focus_probe(focus))
             .await
             .ok()
             .flatten()
-            .unwrap_or(true)
+            .as_ref()
+            .is_none_or(focus_requires_secret_protection)
+    }
+
+    /// Probe only the receiving app; the caller chooses its own time budget.
+    async fn input_focus_probe(&self, focus: Option<&WindowFocusResult>) -> Option<FocusProbe> {
+        let pid = match focus {
+            Some(focus) => focus
+                .focused_window
+                .as_ref()
+                .and_then(|window| window.pid)
+                .or(focus.requested_window.pid),
+            None => focused_window().await.ok().flatten()?.pid,
+        }?;
+        probe_focused_element(Some(pid)).await.ok()
     }
 
     /// COORDINATE SPACES: window bounds (list_windows / extension frame rects)
@@ -4388,6 +4403,16 @@ fn shell_only_accessibility_tree_note(
         .then_some(
             "AT-SPI exposes only window/menu chrome; no content controls were observed. If this is an Electron/Chromium app, relaunch it with --force-renderer-accessibility to expose renderer content. Screenshots can still be used for observation; this tree does not establish that the UI is empty.",
         )
+}
+
+fn compact_accessibility_tree_with_note(
+    nodes: Vec<AccessibilityNode>,
+    scoped: bool,
+    truncated: bool,
+) -> (Vec<AccessibilityNode>, Option<&'static str>) {
+    // Menu ancestry is observation metadata; compaction can remove its nodes.
+    let note = shell_only_accessibility_tree_note(&nodes, scoped, truncated);
+    (compact_accessibility_tree(nodes), note)
 }
 
 fn compact_accessibility_tree(nodes: Vec<AccessibilityNode>) -> Vec<AccessibilityNode> {
@@ -5896,6 +5921,29 @@ fn preflight_type_text(text: &str, mode: Option<WtypeTextMode>) -> std::result::
     Ok(())
 }
 
+async fn hyprland_wtype_delivery(
+    text: &str,
+    probe: impl Future<Output = Option<FocusProbe>>,
+) -> std::result::Result<WtypeTextMode, String> {
+    let probe = timeout(WTYPE_FOCUS_TIMEOUT, probe).await.ok().flatten();
+    if let Some(FocusProbe::Found(element)) = probe.as_ref() {
+        if crate::indicator::is_secret_role(&element.role) {
+            return Err("Literal text was not sent: wtype argument mode is disabled for password fields. Use set_value on an editable field.".to_string());
+        }
+        if focused_element_is_editable(element) || element.is_terminal {
+            return Ok(WtypeTextMode::Argument);
+        }
+    }
+    // No accessibility support is common in terminals. Keep their existing
+    // stdin route, bounded to a single wtype batch so no mid-text keymap
+    // refresh is needed. Unknown text must never be exposed in argv.
+    if text.chars().count() <= WTYPE_STDIN_MAX_CHARS {
+        Ok(WtypeTextMode::Stdin)
+    } else {
+        Err(format!("Literal text was not sent: the focused field could not be classified. Hyprland's private stdin fallback accepts at most {WTYPE_STDIN_MAX_CHARS} Unicode characters per call to avoid keymap-refresh corruption. Send smaller calls and verify each one, or enable the target's accessibility support."))
+    }
+}
+
 fn validate_wtype_privacy(mode: WtypeTextMode, secret: bool) -> std::result::Result<(), String> {
     if mode == WtypeTextMode::Argument && secret {
         return Err("Literal text was not sent: wtype argument mode is disabled for password fields and fields whose secrecy could not be determined. Enable the target application's accessibility support or use set_value on an editable field.".to_string());
@@ -6778,6 +6826,51 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             shell_only_accessibility_tree_note(&[frame, panel, menu, button], true, false)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn review_hint_keeps_raw_menu_ancestry_after_compaction() {
+        let mut frame = node(0, None);
+        frame.role = "frame".to_string();
+        frame.depth = 1;
+        let mut panel = node(1, None);
+        panel.role = "panel".to_string();
+        panel.name = None;
+        panel.depth = 2;
+        panel.parent_index = Some(0);
+        let mut menu = node(2, None);
+        menu.role = "menu bar".to_string();
+        menu.name = None;
+        menu.depth = 3;
+        menu.parent_index = Some(1);
+        let mut button = node(3, None);
+        button.role = "button".to_string();
+        button.depth = 4;
+        button.parent_index = Some(2);
+        let nodes = vec![frame, panel, menu, button];
+        let (compacted, note) = compact_accessibility_tree_with_note(nodes.clone(), true, false);
+        assert_eq!(
+            compacted.len(),
+            2,
+            "unnamed panel and menu bar should be compacted away"
+        );
+        assert_eq!(compacted[1].parent_index, Some(0));
+        assert!(
+            shell_only_accessibility_tree_note(&compacted, true, false).is_none(),
+            "compacted data cannot recover the removed menu context"
+        );
+        assert!(
+            note.is_some(),
+            "raw menu ancestry must determine the observation hint"
+        );
+        assert!(
+            compact_accessibility_tree_with_note(nodes.clone(), false, false)
+                .1
+                .is_none()
+        );
+        assert!(compact_accessibility_tree_with_note(nodes, true, true)
+            .1
+            .is_none());
     }
 
     fn node_with_actions(
@@ -8674,7 +8767,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
     }
 
     #[tokio::test]
-    async fn review_secret_or_unknown_fields_never_start_wtype() {
+    async fn review_argument_mode_never_starts_wtype_for_protected_text() {
         // Even /bin/false and the fallback must never run. An exit-status
         // error would prove that validation happened too late.
         let error = run_wtype_type_text_or_fallback(
@@ -8699,6 +8792,86 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
         .err()
         .expect("secret text must be rejected");
         assert!(error.contains("password fields"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn review_slow_focus_probe_has_its_own_input_budget() {
+        let mode = hyprland_wtype_delivery("long text".repeat(100).as_str(), async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            Some(FocusProbe::Found(FocusedElementSummary {
+                role: "entry".to_string(),
+                name: None,
+                editable: false,
+                states: vec!["focused".to_string(), "editable".to_string()],
+                is_terminal: false,
+            }))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            mode,
+            WtypeTextMode::Argument,
+            "the indicator's 250 ms budget must not gate text dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_inaccessible_fields_keep_short_text_on_private_stdin() {
+        let text = "ş".repeat(WTYPE_STDIN_MAX_CHARS);
+        for probe in [
+            None,
+            Some(FocusProbe::NoAccessibleApp),
+            Some(FocusProbe::Incomplete),
+            Some(FocusProbe::NoneFocused),
+            Some(FocusProbe::ShellOnly),
+        ] {
+            let mode = hyprland_wtype_delivery(&text, async { probe })
+                .await
+                .unwrap();
+            assert_eq!(mode, WtypeTextMode::Stdin);
+            // cat accepts only '-' here; an argv text argument would instead
+            // be opened as a filename and fail. No desktop input is generated.
+            let result = run_wtype_type_text_or_fallback(
+                Path::new("/bin/cat"),
+                &text,
+                mode,
+                true,
+                || async { panic!("available stdin helper must not fall back") },
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.output.stdout, text.as_bytes());
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_stdin_limit_and_password_rejection_remain_explicit() {
+        let error = hyprland_wtype_delivery(&"ş".repeat(WTYPE_STDIN_MAX_CHARS + 1), async {
+            Some(FocusProbe::NoAccessibleApp)
+        })
+        .await
+        .unwrap_err();
+        assert!(error.contains("100 Unicode characters"), "{error}");
+        let error = hyprland_wtype_delivery("short", async {
+            Some(FocusProbe::Found(FocusedElementSummary {
+                role: "password text".to_string(),
+                name: None,
+                editable: true,
+                states: vec!["focused".to_string(), "editable".to_string()],
+                is_terminal: false,
+            }))
+        })
+        .await
+        .unwrap_err();
+        assert!(error.contains("password fields"), "{error}");
+        let mode = hyprland_wtype_delivery("short", std::future::pending())
+            .await
+            .unwrap();
+        assert_eq!(
+            mode,
+            WtypeTextMode::Stdin,
+            "timeout must not reject all input"
+        );
     }
 
     #[test]

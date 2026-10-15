@@ -141,13 +141,17 @@ validation of an installed replacement.
   text indicator, and remains at the command boundary as defense in depth.
 - Only Hyprland uses argument mode. Other compatible compositors retain stdin;
   this experiment does not establish a need to change those compositors.
-- Argument mode rejects password fields and unknown focus/secrecy, rather than
-  publishing their text in argv or silently returning to the known corrupting
-  stdin path. The secrecy probe runs even when the indicator is disabled.
-  Users can expose renderer accessibility or use `set_value` on an editable field.
+- Confirmed password fields are rejected before argument-mode dispatch.
+  Unknown fields use stdin for at most 100 Unicode characters (one wtype batch),
+  rather than publishing text in argv or reintroducing mid-text keymap refreshes.
+  Larger unknown-field input must use smaller calls or expose accessibility.
+  The input probe has a separate 1.5-second budget, even with the indicator off;
+  the cosmetic indicator retains its independent 250 ms probe.
   This is best-effort AT-SPI classification, not protection against a target
   changing its focused field after the probe. Terminal password prompts may not
   expose a password role through AT-SPI.
+- The shell-only observation hint is computed on the raw scoped snapshot before
+  compaction can discard unnamed menu ancestors and reparent their buttons.
 - A complete scoped shell-only focus result is separate from a content tree
   with no focused element. Exact compositor focus alone no longer softens the
   latter's warning. Failed/incomplete reads cannot establish a shell-only tree.
@@ -196,3 +200,35 @@ preflight fixture is ignored in direct discovery and exercised by its parent.
 Formatting, all-target checking/Clippy, MCP safety and plugin packaging checks
 passed. The final feedback classification assertion was checked separately.
 These are local results, not upstream CI. No installed executable was replaced.
+
+## PR #256 review follow-up
+
+The first review identified that the 250 ms cosmetic probe had become a hard
+input gate, and that unknown fields (including terminals without AT-SPI) were
+always rejected. Input routing now has a dedicated 1,500 ms budget: a confirmed
+nonsecret text target uses argv; a confirmed password role is rejected; a missing,
+incomplete, failed or timed-out probe uses stdin for up to 100 Unicode characters.
+That bound is wtype 0.4's single stdin batch, not a claim that arbitrary long stdin
+input is fixed. No automatic partial-input retry or multi-process chunking was
+added. Existing non-Hyprland stdin behavior is unchanged.
+
+The renderer hint now uses raw snapshot ancestry before display compaction. The
+regression fixture passes an unnamed panel/menu-bar chain through the production
+compaction-and-note helper, confirms those ancestors disappear from the returned
+tree, and checks that the previously computed hint survives. Content, unscoped
+and truncated cases remain excluded.
+
+In the native follow-up, an isolated Foot window with no accessible nodes received
+100 synthetic Unicode characters exactly through stdin while the indicator was
+disabled. A 101-character call was explicitly rejected and the PTY received no
+additional input. The receiver ran in raw mode, so no shell command was executed.
+The first fixture attempt stopped before input because it incorrectly equated
+`tree_scoped=true` with a nonempty accessibility tree; the actual tree was empty.
+That aborted attempt was not counted as acceptance evidence.
+
+Three new regression cases fail with the reviewed behavior restored: a 300 ms
+successful input probe must outlive the overlay budget, unknown fields must have
+the bounded stdin route, and menu ancestry must be evaluated before compaction.
+There is also explicit coverage for the 100/101 Unicode boundary, confirmed
+password rejection and the input-probe timeout. Native GTK/Qt focus-loss and
+renderer-disabled menu-only Electron were not separately exercised.
