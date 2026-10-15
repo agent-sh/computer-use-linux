@@ -144,6 +144,16 @@ Pi native tools skip this MCP `command` config; see [Pi setup](references/pi-set
 9. For text input, prefer `type_text` with a target selector (`window_id`, `pid`, `app_id`, `wm_class`, `title`, `tty`, `terminal_pid`, `terminal_command`, or `terminal_cwd`) rather than relying on current focus.
 10. After mutating actions, re-check state with `get_app_state`, `focused_window`, or an app-specific readback.
 
+On Hyprland/wlroots, `type_text` uses wtype with a prebuilt keymap rather than
+stdin keymap refreshes, which can corrupt Electron input. The wtype path rejects
+NUL and text over 131,071 UTF-8 bytes before input; use `set_value` on an editable
+field or smaller calls for larger text. Text is visible in the child process
+arguments while typing, as with `xdotool type`. `ok: true` means input was
+dispatched, not that the resulting field contents match. Verified window focus
+with no AT-SPI focused element is informational. A complete scoped tree with
+only application/window containers adds an Electron/Chromium accessibility hint;
+do not treat it as proof that the UI contains no controls.
+
 Plain left element/index/selector `click` prefers native AT-SPI `click`,
 `press`, or `toggle` over toolkit bounds, avoiding coordinate
 conversion when available. This preference does not replace a coordinate click

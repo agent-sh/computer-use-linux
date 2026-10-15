@@ -51,6 +51,9 @@ use xkeysym::key as xkey;
 use zbus::{Connection as ZbusConnection, Proxy as ZbusProxy};
 
 const INPUT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+// Linux limits each exec argument (including its NUL) to 32 pages, at least
+// 128 KiB on supported platforms. Reject oversized text before sending input.
+const WTYPE_MAX_TEXT_BYTES: usize = 128 * 1024 - 1;
 const MAX_SCROLL_PAGES: f64 = 100.0;
 const YDOTOOL_TYPE_CHARS_PER_SECOND: u64 = 20;
 const KDE_CLIPBOARD_DBUS_TIMEOUT: Duration = Duration::from_secs(3);
@@ -507,6 +510,16 @@ impl ComputerUseLinux {
         if let Some(note) = truncated_accessibility_tree_note(accessibility_tree_truncated) {
             message.push(' ');
             message.push_str(note);
+        }
+        if accessibility_error.is_none() {
+            if let Some(note) = shell_only_accessibility_tree_note(
+                &accessibility_tree,
+                tree_scoped,
+                accessibility_tree_truncated,
+            ) {
+                message.push(' ');
+                message.push_str(note);
+            }
         }
 
         // Full diagnostics are huge (portal/process dumps); emit them only on
@@ -1748,7 +1761,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "type_text",
-        description = "Type literal text using keyboard input, optionally after focusing a target window or terminal selector.",
+        description = "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Success confirms dispatch, not field-content verification; re-observe the target before retrying. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before input.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1930,7 +1943,7 @@ impl ComputerUseLinux {
             );
             if used_wtype {
                 output.message =
-                    "Action sent through wtype (Wayland virtual-keyboard protocol).".to_string();
+                    "Action sent through wtype (Wayland virtual-keyboard protocol). Field contents were not verified; re-observe the target before retrying.".to_string();
             }
             if output.ok && focus.is_some() {
                 let notes = self.input_landing_notes(focus.as_ref(), true).await;
@@ -3643,7 +3656,11 @@ impl ComputerUseLinux {
             .and_then(|window| window.pid)
             .or(focus.requested_window.pid);
         match timeout(Duration::from_millis(1500), probe_focused_element(pid)).await {
-            Ok(Ok(probe)) => Some(focus_probe_feedback(&probe, expects_editable)),
+            Ok(Ok(probe)) => Some(focus_probe_feedback(
+                &probe,
+                expects_editable,
+                focus.exact_window_focused,
+            )),
             Ok(Err(error)) => Some(format!(
                 "Focused-element feedback unavailable ({}).",
                 first_line(&format!("{error:#}"))
@@ -4301,6 +4318,26 @@ fn truncated_accessibility_tree_note(truncated: bool) -> Option<&'static str> {
     truncated.then_some(
         "The node, depth, or read budget stopped traversal with unread elements left. To recover missing elements, scope to a narrower app or window target and raise max_nodes or max_depth (hard caps 2000 and 64); lowering max_nodes would drop more.",
     )
+}
+
+fn shell_only_accessibility_tree_note(
+    nodes: &[AccessibilityNode],
+    scoped: bool,
+    truncated: bool,
+) -> Option<&'static str> {
+    if !scoped || truncated || nodes.is_empty() {
+        return None;
+    }
+    nodes
+        .iter()
+        .all(|node| {
+            matches!(node.role.as_str(), "application" | "frame" | "window")
+                && !is_actionable_accessibility_node(node)
+                && node.text.is_none()
+        })
+        .then_some(
+            "AT-SPI exposes only application/window containers; no content controls were observed. If this is an Electron/Chromium app, relaunch it with --force-renderer-accessibility to expose renderer content. Screenshots can still be used for observation; this tree does not establish that the UI is empty.",
+        )
 }
 
 fn compact_accessibility_tree(nodes: Vec<AccessibilityNode>) -> Vec<AccessibilityNode> {
@@ -4966,12 +5003,17 @@ fn with_focus_context(mut output: ActionOutput, focus: Option<WindowFocusResult>
     output
 }
 
-/// Post-input focus feedback. Only a complete search that finds nothing is a
-/// warning; a search that hit a limit, or an app without an AT-SPI tree, cannot
-/// tell whether the input landed, so it says that instead.
-fn focus_probe_feedback(probe: &FocusProbe, expects_editable: bool) -> String {
+/// Post-input focus feedback. A complete empty search warns unless exact
+/// window focus was verified before input. Neither window focus nor a missing
+/// AT-SPI element verifies field contents. Limited/missing trees say so.
+fn focus_probe_feedback(
+    probe: &FocusProbe,
+    expects_editable: bool,
+    exact_window_focused: bool,
+) -> String {
     match probe {
         FocusProbe::Found(element) => describe_focused_element(element, expects_editable),
+        FocusProbe::NoneFocused if exact_window_focused => "Focused-element feedback unavailable: window focus was verified before input, but AT-SPI reports no focused element in the target app. Field contents were not verified. Electron/Chromium apps may need --force-renderer-accessibility.".to_string(),
         FocusProbe::NoneFocused => "WARNING: AT-SPI reports no focused element in the target app; the input may have landed nowhere.".to_string(),
         FocusProbe::Incomplete => "Focused-element feedback unavailable: the focused element was not reached within the AT-SPI search limits, so the input could not be verified. Its absence here does not mean the input was lost.".to_string(),
         FocusProbe::NoAccessibleApp => "Focused-element feedback unavailable: the target app exposes no AT-SPI tree, so the input could not be verified. Electron apps need --force-renderer-accessibility.".to_string(),
@@ -5734,13 +5776,18 @@ where
         });
     }
 
+    validate_wtype_text(text)?;
     let mut command = TokioCommand::new(program);
-    command.arg("-");
-    let output = crate::command_runner::output_with_stdin(
+    // wtype's stdin mode uploads a new keymap every 100 characters. On
+    // Hyprland/Electron those changes can turn literal text into modifier
+    // keys and shortcuts while wtype still exits successfully. Passing one
+    // literal argument builds the complete keymap before the first key event.
+    // `--` prevents option-looking text from becoming wtype commands.
+    command.args(["--", text]);
+    let output = crate::command_runner::output_with_timeout(
         command,
         "run wtype",
         ydotool_type_timeout(text),
-        text.as_bytes().to_vec(),
     )
     .await
     .map_err(|error| format!("{error:#}"))?;
@@ -5751,6 +5798,20 @@ where
         output,
         backend: KeyboardCommandBackend::Wtype,
     })
+}
+
+fn validate_wtype_text(text: &str) -> std::result::Result<(), String> {
+    if text.contains('\0') {
+        return Err(
+            "Literal text was not sent: wtype cannot represent NUL characters.".to_string(),
+        );
+    }
+    if text.len() > WTYPE_MAX_TEXT_BYTES {
+        return Err(format!(
+            "Literal text was not sent: wtype accepts at most {WTYPE_MAX_TEXT_BYTES} UTF-8 bytes per call. Use set_value on an editable field or send smaller text segments."
+        ));
+    }
+    Ok(())
 }
 
 /// True when `xdotool` can drive this session: an X11 session with `DISPLAY`
@@ -6530,6 +6591,28 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
 
     fn node(index: u32, bounds: Option<Bounds>) -> AccessibilityNode {
         node_with_actions(index, bounds, Vec::new())
+    }
+
+    #[test]
+    fn shell_only_tree_explains_missing_renderer_content() {
+        let mut frame = node(0, None);
+        frame.role = "frame".to_string();
+        let nodes = [frame];
+        let note = shell_only_accessibility_tree_note(&nodes, true, false).unwrap();
+        assert!(note.contains("--force-renderer-accessibility"));
+        assert!(note.contains("If this is an Electron/Chromium app"));
+        assert!(shell_only_accessibility_tree_note(&nodes, false, false).is_none());
+        assert!(shell_only_accessibility_tree_note(&nodes, true, true).is_none());
+        assert!(shell_only_accessibility_tree_note(&[], true, false).is_none());
+    }
+
+    #[test]
+    fn content_and_editable_trees_do_not_get_renderer_hint() {
+        let mut content = node(0, None);
+        assert!(shell_only_accessibility_tree_note(&[content.clone()], true, false).is_none());
+        content.role = "frame".to_string();
+        content.supports_editable_text = true;
+        assert!(shell_only_accessibility_tree_note(&[content], true, false).is_none());
     }
 
     fn node_with_actions(
@@ -8376,7 +8459,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
     }
 
     #[tokio::test]
-    async fn wtype_receives_unicode_text_through_stdin() {
+    async fn wtype_prebuilds_the_keymap_for_long_unicode_text() {
         let dir = std::env::temp_dir().join(format!(
             "computer-use-linux-wtype-unicode-{}-{:?}",
             std::process::id(),
@@ -8387,14 +8470,18 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
         let captured = dir.join("captured");
         std::fs::write(
             &wtype,
-            format!("#!/bin/sh\ncat > '{}'\n", captured.display()),
+            format!(
+                "#!/bin/sh\n[ \"$#\" -eq 2 ] && [ \"$1\" = -- ] || exit 42\nprintf '%s' \"$2\" > '{}'\n",
+                captured.display()
+            ),
         )
         .expect("write fake wtype");
         std::fs::set_permissions(&wtype, std::fs::Permissions::from_mode(0o700))
             .expect("make fake wtype executable");
-        let text = "Zwölf Yaks aßen Öl über München";
+        let text =
+            "--Türkçe PostgreSQL (W, g, m, v, f, ş, ü) / 0123456789 - ; 'İstanbul'\n".repeat(50);
 
-        let result = run_wtype_type_text_or_fallback(&wtype, text, || async {
+        let result = run_wtype_type_text_or_fallback(&wtype, &text, || async {
             panic!("available wtype must not fall back")
         })
         .await
@@ -8422,6 +8509,20 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
         .expect("missing wtype should use fallback");
 
         assert_eq!(result.backend, KeyboardCommandBackend::Ydotool);
+    }
+
+    #[test]
+    fn wtype_preflights_the_complete_argument_before_input() {
+        assert!(validate_wtype_text(&"x".repeat(WTYPE_MAX_TEXT_BYTES)).is_ok());
+        assert!(validate_wtype_text(&"x".repeat(WTYPE_MAX_TEXT_BYTES + 1))
+            .unwrap_err()
+            .contains("not sent"));
+        // The argument limit counts UTF-8 bytes, not Unicode scalar values.
+        assert!(validate_wtype_text(&"ş".repeat(WTYPE_MAX_TEXT_BYTES / 2 + 1)).is_err());
+        assert!(validate_wtype_text("valid prefix\0suffix")
+            .unwrap_err()
+            .contains("not sent"));
+        assert!(validate_wtype_text("").is_ok());
     }
 
     #[tokio::test]
@@ -9102,20 +9203,35 @@ mod focus_probe_feedback_tests {
 
     #[test]
     fn only_a_complete_empty_search_warns() {
-        let none = focus_probe_feedback(&FocusProbe::NoneFocused, true);
+        let none = focus_probe_feedback(&FocusProbe::NoneFocused, true, false);
         assert!(none.starts_with("WARNING:"), "{none}");
 
         for probe in [FocusProbe::Incomplete, FocusProbe::NoAccessibleApp] {
-            let text = focus_probe_feedback(&probe, true);
+            let text = focus_probe_feedback(&probe, true, false);
             assert!(
                 !text.contains("WARNING"),
                 "{probe:?} must not claim lost input: {text}"
             );
             assert!(text.contains("could not be verified"), "{text}");
         }
-        assert!(focus_probe_feedback(&FocusProbe::Incomplete, true).contains("search limits"));
-        assert!(focus_probe_feedback(&FocusProbe::NoAccessibleApp, true)
-            .contains("--force-renderer-accessibility"));
+        assert!(
+            focus_probe_feedback(&FocusProbe::Incomplete, true, false).contains("search limits")
+        );
+        assert!(
+            focus_probe_feedback(&FocusProbe::NoAccessibleApp, true, false)
+                .contains("--force-renderer-accessibility")
+        );
+    }
+
+    #[test]
+    fn verified_window_focus_does_not_claim_input_was_lost() {
+        for expects_editable in [false, true] {
+            let text = focus_probe_feedback(&FocusProbe::NoneFocused, expects_editable, true);
+            assert!(!text.contains("WARNING"), "{text}");
+            assert!(!text.contains("landed nowhere"), "{text}");
+            assert!(text.contains("before input"), "{text}");
+            assert!(text.contains("Field contents were not verified"), "{text}");
+        }
     }
 
     #[test]
@@ -9127,7 +9243,7 @@ mod focus_probe_feedback_tests {
             states: vec!["focused".to_string()],
             is_terminal: false,
         };
-        let text = focus_probe_feedback(&FocusProbe::Found(element), true);
+        let text = focus_probe_feedback(&FocusProbe::Found(element), true, false);
         assert!(text.contains("text"), "{text}");
         assert!(!text.starts_with("WARNING"), "{text}");
     }
