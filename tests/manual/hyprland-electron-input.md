@@ -79,7 +79,7 @@ the failure to stdin/keymap-refresh handling in the tested stack; it does not
 establish which compositor or Chromium implementation is responsible. The
 event trace shows Control events; a permanently stuck Alt key was not proven.
 
-The patch uses one argument after `--`, preserving option-looking text literally.
+The original `1850c7a` patch used one argument after `--`, preserving option-looking text literally.
 It rejects NUL and more than 131,071 UTF-8 bytes before starting wtype. Missing
 wtype retains the existing ydotool fallback; an available wtype's validation,
 spawn, timeout, or execution error does not replay partially sent text.
@@ -95,14 +95,14 @@ cannot establish that.
 
 ## Other findings from the original report
 
-- Implemented: an AT-SPI empty-focus result becomes informational when exact
-  window focus was verified before input. It explicitly leaves field contents
-  unverified; concrete non-editable focus warnings remain.
-- Implemented: a complete, scoped tree containing only application/window
-  containers gets a conditional Electron/Chromium accessibility hint. This is
+- Hardened after review: an AT-SPI empty-focus result becomes informational only
+  when exact window focus was verified and a complete scoped search saw only
+  window/menu chrome. Trees with content retain missing-focus warnings.
+- Implemented: a complete, scoped tree containing only window/menu
+  chrome gets a conditional Electron/Chromium accessibility hint. This is
   not positive Electron detection, and does not alter application launch flags.
 - Still open: optional field-content verification. `ok: true` retains its
-  dispatch meaning; the wtype result now states that contents were not verified.
+  dispatch meaning; every successful text backend now states that contents were not verified.
 - Still open: clipboard paste mode with complete MIME/ownership restoration.
   A text/plain-only backup would not satisfy the reported requirement.
 - Still open: a pointer-motion/hover tool, including its backend dispatch,
@@ -134,3 +134,65 @@ The first full test run inside the restricted sandbox failed on local socket
 and private D-Bus creation. The unchanged tests passed outside that restriction;
 none were skipped or weakened. This is local validation, not upstream CI or
 validation of an installed replacement.
+
+## Review hardening after `1850c7a`
+
+- Wtype NUL/size validation runs at the tool entry, before window focus or the
+  text indicator, and remains at the command boundary as defense in depth.
+- Only Hyprland uses argument mode. Other compatible compositors retain stdin;
+  this experiment does not establish a need to change those compositors.
+- Argument mode rejects password fields and unknown focus/secrecy, rather than
+  publishing their text in argv or silently returning to the known corrupting
+  stdin path. The secrecy probe runs even when the indicator is disabled.
+  Users can expose renderer accessibility or use `set_value` on an editable field.
+  This is best-effort AT-SPI classification, not protection against a target
+  changing its focused field after the probe. Terminal password prompts may not
+  expose a password role through AT-SPI.
+- A complete scoped shell-only focus result is separate from a content tree
+  with no focused element. Exact compositor focus alone no longer softens the
+  latter's warning. Failed/incomplete reads cannot establish a shell-only tree.
+- Window chrome includes native menu roles, allowing the conditional renderer
+  hint when Electron exposes a menu bar but no renderer content. This is a tree
+  coverage heuristic, not positive Electron detection or a claim about GTK/Qt.
+- Every successful text route includes the same dispatch-only qualification.
+  MCP initialization instructions and both bundled skills describe the policy.
+- The fake-wtype test is named for argument delivery rather than keymap behavior;
+  exact `--`, `-`, and empty text are covered alongside long Unicode input.
+
+Regression fixtures exercise early rejection with a deliberately invalid window
+id, secret/unknown rejection before process/fallback launch, and content-tree
+warnings even with exact window focus. A dedicated subprocess controls backend
+environment variables without mutating the parent test environment.
+
+The native script also accepts `CUL_QA_MODES=mcp,mcp-password`. Its normal-field
+case expects all 3,000 characters; its synthetic password case expects explicit
+rejection, an empty field, and zero keyboard events. The server's indicator is
+intentionally disabled for both cases so a display setting cannot disable the
+secrecy guard. This mode still requires hands-off focus and a separate Electron
+profile; do not run it against an existing document or prompt.
+
+### Native hardening result (2026-10-15)
+
+With Electron 43.6.0 / Chromium 150.0.7871.250 and the indicator disabled:
+
+| MCP case | Result | Field contents | Keyboard events | Alt/Ctrl events |
+| --- | --- | --- | ---: | ---: |
+| Normal textarea | success | exact 3,000/3,000 characters | 6,000 | 0 |
+| Synthetic password input | explicit rejection | empty | 0 | 0 |
+
+The first hardening trial rejected the normal field too. Read-only inspection
+found a focused `entry` with AT-SPI's `editable` state but no EditableText
+interface. The secrecy policy now accepts the editable state as well as the
+interface, while checking password roles first. A regression fixture preserves
+that observed interface/state combination. Focus feedback uses the same editable
+classification so it does not mislabel this entry after successful dispatch.
+The failed native trial and its inspection were retained separately from the
+passing trial; they are not acceptance evidence.
+
+The three primary review regressions were also run with their old behavior
+restored temporarily: each failed. Restoring the fix passed the complete Rust
+suite (434 library tests, plus binary/integration targets); the subprocess-only
+preflight fixture is ignored in direct discovery and exercised by its parent.
+Formatting, all-target checking/Clippy, MCP safety and plugin packaging checks
+passed. The final feedback classification assertion was checked separately.
+These are local results, not upstream CI. No installed executable was replaced.

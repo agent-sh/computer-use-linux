@@ -100,11 +100,15 @@ X11 text input sends LF and CRLF line endings as Return. Focused terminals
 accept keyboard input even when AT-SPI does not expose EditableText. Focus
 feedback describes the target; re-observe its contents to confirm input.
 
-On Hyprland/wlroots, the wtype text backend builds its keymap before typing;
-it avoids stdin keymap refreshes that can corrupt Electron input. It accepts
-at most 131,071 UTF-8 bytes per call and rejects NUL before sending input.
-Use `set_value` or smaller calls for larger text. Like `xdotool type`, it puts
-the text in child process arguments while typing. `ok: true` confirms dispatch,
-not the resulting field contents. Missing AT-SPI focus feedback is informational
-when exact window focus was verified before input. A complete scoped tree with
-only application/window containers includes an Electron accessibility hint.
+On Hyprland, `type_text` passes one literal wtype argument after `--`, avoiding
+stdin keymap refreshes that can corrupt Electron input. This mode exposes text
+in process arguments, so password fields and fields whose secrecy cannot be
+determined are rejected; expose the target's accessibility support or use
+`set_value` on an editable field. This check runs even with the indicator disabled.
+Other compatible compositors retain wtype stdin. The wtype path rejects NUL and
+text over 131,071 UTF-8 bytes before focusing a window or displaying text.
+`ok: true` confirms dispatch only; every text backend leaves field contents
+unverified. Re-observe before retrying. Exact window focus alone does not suppress
+missing-focus warnings: only a complete scoped tree containing window/menu chrome
+without content makes the feedback informational. Such trees get a conditional
+Electron/Chromium accessibility hint; this is not positive Electron detection.

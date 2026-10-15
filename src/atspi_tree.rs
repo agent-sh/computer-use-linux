@@ -424,6 +424,8 @@ pub(crate) enum FocusProbe {
     Found(FocusedElementSummary),
     /// The search covered the target's whole tree and nothing holds focus.
     NoneFocused,
+    /// A complete scoped search saw only window/menu chrome, no content.
+    ShellOnly,
     /// A node, depth, or read limit stopped the search before it finished, so
     /// the focused element may exist past the limit.
     Incomplete,
@@ -468,21 +470,33 @@ async fn focused_element_probe(
     let mut traversal = BoundedTraversal::new(FOCUS_PROBE_MAX_NODES);
     let mut remaining_traversal_reads = FOCUS_PROBE_MAX_NODES;
     let mut incomplete = false;
+    let mut shell_only = true;
+    let mut observed_nodes = 0;
 
     traversal.enqueue(
         selected_roots
             .roots
             .into_iter()
-            .map(|object_ref| (object_ref, 0_u32)),
+            .map(|object_ref| (object_ref, 0_u32, false)),
     );
 
-    while let Some((object_ref, depth)) = traversal.pop() {
+    while let Some((object_ref, depth, in_menu)) = traversal.pop() {
         let Ok(proxy) = open_accessible(&conn, &object_ref).await else {
+            incomplete = true;
             continue;
         };
         let Ok(state) = proxy.get_state().await else {
+            incomplete = true;
             continue;
         };
+        observed_nodes += 1;
+        let mut child_menu = false;
+        if shell_only {
+            match accessibility_chrome_context(&role_name(&proxy).await, in_menu) {
+                Some(menu) => child_menu = menu,
+                None => shell_only = false,
+            }
+        }
         if state.contains(atspi::State::Focused) {
             let proxies = proxy.proxies().await.ok();
             let is_terminal = matches!(proxy.get_role().await, Ok(atspi::Role::Terminal));
@@ -505,21 +519,45 @@ async fn focused_element_probe(
                 // own child count has to say whether children went unread.
                 // With budget left, attempted 0 just means a leaf: no read.
                 if batch.attempted == 0 && remaining_traversal_reads == 0 && !incomplete {
-                    incomplete = proxy.child_count().await.is_ok_and(|count| count > 0);
+                    incomplete = proxy.child_count().await.map_or(true, |count| count > 0);
                 }
-                traversal.enqueue(batch.items.into_iter().map(|child| (child, depth + 1)));
+                traversal.enqueue(
+                    batch
+                        .items
+                        .into_iter()
+                        .map(|child| (child, depth + 1, child_menu)),
+                );
+            } else {
+                incomplete = true;
             }
         } else if !incomplete {
             // Depth or node cap: any child this node reports goes unread. One
             // child-count read settles it, and only until the first cut is seen.
-            incomplete = proxy.child_count().await.is_ok_and(|count| count > 0);
+            incomplete = proxy.child_count().await.map_or(true, |count| count > 0);
         }
     }
     if incomplete || traversal.truncated() {
         return Ok(FocusProbe::Incomplete);
     }
 
-    Ok(FocusProbe::NoneFocused)
+    Ok(if require_scoped && shell_only && observed_nodes > 0 {
+        FocusProbe::ShellOnly
+    } else {
+        FocusProbe::NoneFocused
+    })
+}
+
+/// Window and native menu chrome can exist without Electron renderer content.
+/// This is evidence about tree coverage, not positive Electron detection.
+pub(crate) fn accessibility_chrome_context(role: &str, in_menu: bool) -> Option<bool> {
+    match role {
+        "application" | "frame" | "window" | "panel" | "filler" | "separator" => Some(in_menu),
+        "menu bar" | "menu" | "menu item" | "check menu item" | "radio menu item"
+        | "tearoff menu item" => Some(true),
+        // Electron's native menu buttons are exposed as buttons, not menu items.
+        "button" | "push button" | "label" | "static" | "image" | "icon" if in_menu => Some(true),
+        _ => None,
+    }
 }
 
 pub async fn perform_action(

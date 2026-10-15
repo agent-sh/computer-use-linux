@@ -5,9 +5,9 @@ const { spawn, execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const output = process.env.CUL_QA_OUTPUT;
 const modes = (process.env.CUL_QA_MODES || 'argv,stdin').split(',');
-if (!output || modes.some(mode => !['argv', 'stdin', 'mcp'].includes(mode)) ||
-    (modes.includes('mcp') && !process.env.CUL_QA_BINARY)) {
-  console.error('Set CUL_QA_OUTPUT; modes: argv,stdin,mcp. MCP mode also needs CUL_QA_BINARY.');
+if (!output || modes.some(mode => !['argv', 'stdin', 'mcp', 'mcp-password'].includes(mode)) ||
+    (modes.some(mode => mode.startsWith('mcp')) && !process.env.CUL_QA_BINARY)) {
+  console.error('Set CUL_QA_OUTPUT; modes: argv,stdin,mcp,mcp-password. MCP mode also needs CUL_QA_BINARY.');
   app.exit(2);
 }
 const sentence = "Türkçe giriş: PostgreSQL (W, g, m, v, f, ş, ü) / 0123456789 - ; 'İstanbul'. ";
@@ -52,16 +52,19 @@ app.whenReady().then(async () => {
       const client = JSON.parse(execFileSync('hyprctl', ['clients', '-j'], { encoding: 'utf8' })).find(c => c.pid === process.pid);
       if (!client || !/^0x[0-9a-f]+$/i.test(client.address)) throw new Error('Cannot locate test window');
       execFileSync('hyprctl', ['dispatch', `hl.dsp.focus({ window = "address:${client.address}" })`]);
-      await win.webContents.executeJavaScript("input.value=''; events=[]; input.focus();");
+      const secret = mode === 'mcp-password';
+      await win.webContents.executeJavaScript(`document.getElementById('input').outerHTML = ${JSON.stringify(secret ? '<input id="input" type="password" style="width:95%">' : '<textarea id="input" style="width:95%;height:400px"></textarea>')}; input.value=''; events=[]; input.focus();`);
+      const requested = secret ? 'CUL-synthetic-password-şü-123!' : text;
+      const expected = secret ? '' : requested;
       await new Promise(r => setTimeout(r, 300));
       const focused = JSON.parse(execFileSync('hyprctl', ['activewindow', '-j'], { encoding: 'utf8' }));
       if (focused.pid !== process.pid) throw new Error('Test window is not focused; refusing to inject text');
       let stderr = '', code, response;
-      if (mode === 'mcp') {
+      if (mode.startsWith('mcp')) {
         if (!mcp) await startMcp();
-        response = await rpc('tools/call', {name:'type_text',arguments:{pid:process.pid,text}});
+        response = await rpc('tools/call', {name:'type_text',arguments:{pid:process.pid,text:requested}});
         const payload = response.structuredContent || JSON.parse(response.content.find(c => c.type === 'text').text);
-        code = !response.isError && payload.ok === true ? 0 : 1;
+        code = !response.isError && (secret ? payload.ok === false && payload.message.includes('password fields') : payload.ok === true) ? 0 : 1;
       } else {
         const args = mode === 'stdin' ? ['-'] : ['--', text];
         const child = spawn('wtype', args, { stdio: ['pipe', 'pipe', 'pipe'] });
@@ -77,12 +80,12 @@ app.whenReady().then(async () => {
       }
       await new Promise(r => setTimeout(r, 500));
       const actual = await win.webContents.executeJavaScript('({text:input.value, events})');
-      const expectedChars = [...text], actualChars = [...actual.text];
+      const expectedChars = [...expected], actualChars = [...actual.text];
       let firstDifference = 0;
       while (firstDifference < Math.min(expectedChars.length, actualChars.length) &&
              expectedChars[firstDifference] === actualChars[firstDifference]) firstDifference++;
-      if (actual.text === text) firstDifference = -1;
-      const result = { mode, exitCode: code, response, expectedLength: [...text].length, actualLength: [...actual.text].length, match: actual.text === text, firstDifference, stderr, modifierEvents: actual.events.filter(e => e.alt || e.ctrl), expected: text, actual: actual.text, events: actual.events };
+      if (actual.text === expected) firstDifference = -1;
+      const result = { mode, exitCode: code, response, expectedLength: [...expected].length, actualLength: [...actual.text].length, match: actual.text === expected && (!secret || actual.events.length === 0), firstDifference, stderr, modifierEvents: actual.events.filter(e => e.alt || e.ctrl), expected, actual: actual.text, events: actual.events };
       results.push(result);
       fs.writeFileSync(output, JSON.stringify({electron: process.versions.electron, chromium: process.versions.chrome, results}, null, 2));
       console.log(JSON.stringify({mode, code, expectedLength: result.expectedLength, actualLength: result.actualLength, match: result.match, firstDifference, modifierEventCount: result.modifierEvents.length}));
