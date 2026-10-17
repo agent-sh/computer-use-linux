@@ -22,18 +22,20 @@ Pick the setup that matches your agent or shell workflow:
 | **Claude Code** (plugin + skill) | `claude plugin marketplace add agent-sh/computer-use-linux && claude plugin install computer-use-linux@computer-use-linux` |
 | **Codex CLI** (plugin + skill) | `codex plugin marketplace add agent-sh/computer-use-linux && codex plugin add computer-use-linux@computer-use-linux` |
 | **Pi Coding Agent** (native lazy-loaded tools) | `pi install npm:@agent-sh/computer-use-linux` |
-| **Hermes Agent** (skill + MCP server) | `hermes skills tap add agent-sh/computer-use-linux && hermes skills install agent-sh/computer-use-linux/computer-use-linux && hermes mcp add computer-use-linux --command computer-use-linux --args mcp` |
+| **Hermes Agent** (CLI + skill + MCP server) | `npm install -g @agent-sh/computer-use-linux && hermes skills tap add agent-sh/computer-use-linux && hermes skills install agent-sh/computer-use-linux/computer-use-linux && hermes mcp add computer-use-linux --command computer-use-linux --args mcp` |
 | **CLI + any stdio MCP client** (npm) | `npm install -g @agent-sh/computer-use-linux` |
 | **CLI + system setup from source** | `git clone https://github.com/agent-sh/computer-use-linux && cd computer-use-linux && ./install.sh` |
 | **Rust crate (`crates.io`)** | `cargo install computer-use-linux` |
 
-Verify desktop readiness in one command:
+Verify desktop readiness from the shell (after installing the CLI on `PATH` via `npm install -g @agent-sh/computer-use-linux`, `./install.sh`, or `cargo install computer-use-linux`):
 
 ```bash
 computer-use-linux doctor | jq .readiness
 computer-use-linux setup                      # enable AT-SPI accessibility bridge if needed
 computer-use-linux setup-window-targeting     # install GNOME Wayland window-control extension if needed
 ```
+
+> **Plugin-only or Pi-only installs:** The Claude Code / Codex plugin launcher and `pi install` manage private cached binaries and do not add `computer-use-linux` to `PATH`. Either run the MCP `doctor` / `setup_accessibility` / `setup_window_targeting` tools (or `computer_use_linux_doctor` in Pi) directly from your agent, or also install the CLI above when you want shell subcommands on `PATH`.
 
 The Rust crate is published as [`computer-use-linux`](https://crates.io/crates/computer-use-linux) and the npm package as [`@agent-sh/computer-use-linux`](https://www.npmjs.com/package/@agent-sh/computer-use-linux). Prebuilt `x86_64` and `aarch64` Linux binaries ship with the [latest release](https://github.com/agent-sh/computer-use-linux/releases/latest).
 
@@ -57,11 +59,11 @@ The crate was extracted from [`codex-desktop-linux`](https://github.com/avifenes
 
 | Category | Tool | What it does |
 | --- | --- | --- |
-| **Diagnostics & setup** | `doctor` | Single-shot JSON readiness report (platform, portals, accessibility, windowing, input, monitor list with `index`, readiness summary, and capability map). |
+| **Diagnostics & setup** | `doctor` | Single-shot JSON readiness report (platform, portals, accessibility, windowing, input, readiness summary, and capability map). |
 | | `setup_accessibility` | Enables and verifies GNOME's `org.gnome.desktop.interface toolkit-accessibility` setting so toolkit apps expose AT-SPI trees. |
 | | `setup_window_targeting` | Installs and enables the bundled GNOME Shell extension when `org.gnome.Shell.Introspect` is locked down. |
 | **Discovery & observation** | `get_app_state` | Combined screenshot + compacted AT-SPI accessibility tree with stable `element_index` handles. Scope with `app_name_or_bundle_identifier` or a window target (`window_id`, `pid`, `app_id`, `wm_class`, `title`). |
-| | `screenshot` | Bounded PNG or JPEG capture of the full desktop, a specific monitor (`screen_index`), a `region`, or a raised and cropped target window. |
+| | `screenshot` | Bounded PNG or JPEG capture of the full desktop (`full_screen: true` or no target) or a raised and cropped target window (`window_id`, `pid`, `app_id`, `wm_class`, `title`, `raise_window`). |
 | | `list_windows` | Compositor windows with `window_id`, title, `app_id`, `wm_class`, PID, focus state, client type (`wayland`/`x11`), bounds, and terminal TTY/process metadata. |
 | | `focused_window` | The window currently holding keyboard focus. |
 | | `list_apps` | Running desktop applications visible to the AT-SPI registry. |
@@ -84,7 +86,6 @@ All mutating tools (`click`, `drag`, `scroll`, `press_key`, `type_text`, `perfor
 - `screenshot_after: true | "screen" | "window" | false` — capture after the action is dispatched and the indicator overlay is hidden (`true` or `"screen"` for full desktop, `"window"` cropped to the action's target window or the focused window when untargeted)
 - `format`, `quality`, `scale`, `max_width`, `max_height`, `max_bytes` — same screenshot payload controls as `screenshot` and `get_app_state`
 - `include_tree: true` — include a fresh compacted AT-SPI accessibility tree and update cached `element_index` values
-- Input tools also accept `capture: true`, `capture_delay_ms` (default `150` ms when `capture: true` without an explicit `screenshot_after`, max `5000` ms), `region`, and `window_id` for cropped post-action captures.
 
 When post-action screenshot capture succeeds, the image is returned as the first MCP `image` content block alongside the JSON action summary and `screenshot` metadata. If the action succeeds (`ok: true`) and only the post-action screenshot or tree capture fails, `ok` remains `true` and the error is reported in `screenshot_error` / `accessibility_error` and appended to `message`.
 

@@ -63,9 +63,14 @@ codex plugin marketplace add agent-sh/computer-use-linux
 codex plugin add computer-use-linux@computer-use-linux
 ```
 
+The plugin registers the MCP server and caches private release binaries on first
+start (it does not put `computer-use-linux` on `PATH`; also run step 1 if you
+want the shell CLI).
+
 ### 4. Hermes Agent
 
 ```bash
+npm install -g @agent-sh/computer-use-linux
 hermes skills tap add agent-sh/computer-use-linux
 hermes skills install agent-sh/computer-use-linux/computer-use-linux
 hermes mcp add computer-use-linux --command computer-use-linux --args mcp
