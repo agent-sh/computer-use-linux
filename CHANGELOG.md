@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.19] - 2026-10-17
+
+### Fixed
+
+- MCP hosts that probe with `server/discover` before `initialize` (MCP 2026-07-28) no longer fail with "expect initialized request". The server now uses rmcp 3.5.1, keeps the connection open after an empty probe so the host can initialize, and supports metadata-bearing discovery requests.
+
 ## [0.7.18] - 2026-10-17
 
 ### Added
@@ -824,7 +830,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.18...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.19...HEAD
+[0.7.19]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.18...v0.7.19
 [0.7.18]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.17...v0.7.18
 [0.7.17]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.16...v0.7.17
 [0.7.16]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.15...v0.7.16

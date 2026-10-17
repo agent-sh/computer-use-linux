@@ -304,8 +304,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "activate_window",
-        output_schema = rmcp::handler::server::tool::schema_for_output::<ActivateWindowToolOutput>()
-            .expect("activate_window output schema"),
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ActivateWindowToolOutput>(),
         description = "Focus a Linux desktop window by window_id, pid, app_id, wm_class, title, or terminal selectors when the compositor permits it. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
@@ -362,8 +361,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "get_app_state",
-        output_schema = rmcp::handler::server::tool::schema_for_output::<GetAppStateOutput>()
-            .expect("get_app_state output schema"),
+        output_schema = rmcp::handler::server::tool::schema_for_output::<GetAppStateOutput>(),
         description = "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
         annotations(
             read_only_hint = true,
@@ -727,8 +725,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "click",
-        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>()
-            .expect("click output schema"),
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
         description = "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. Plain left activation prefers a native AT-SPI click/press/toggle action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
@@ -1080,8 +1077,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "perform_action",
-        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>()
-            .expect("perform_action output schema"),
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
         description = "Invoke an accessibility action exposed by an element selected by index, identifier, or semantic selector. Defaults to the primary action unless action is provided. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
@@ -1104,8 +1100,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "set_value",
-        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>()
-            .expect("set_value output schema"),
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
         description = "Set the value of a settable accessibility element selected by index, identifier, or semantic selector. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
@@ -1172,8 +1167,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "scroll",
-        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>()
-            .expect("scroll output schema"),
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
         description = "Scroll an element in a direction by a number of pages. With a window target and no x/y/element_index, scrolls at the centre of the targeted window. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
@@ -1537,8 +1531,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "drag",
-        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>()
-            .expect("drag output schema"),
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
         description = "Drag from one point to another using pixel coordinates. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
@@ -1672,8 +1665,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "press_key",
-        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>()
-            .expect("press_key output schema"),
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
         description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
@@ -1838,8 +1830,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "type_text",
-        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>()
-            .expect("type_text output schema"),
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
         description = "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Success confirms dispatch, not field-content verification; re-observe the target before retrying. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators; Hyprland rejects confirmed password fields; ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
@@ -2096,8 +2087,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "move_window",
-        output_schema = rmcp::handler::server::tool::schema_for_output::<WindowGeometryToolOutput>()
-            .expect("move_window output schema"),
+        output_schema = rmcp::handler::server::tool::schema_for_output::<WindowGeometryToolOutput>(),
         description = "Move a window to a new desktop position (frame top-left in desktop coordinates). Useful to recover windows that are partially off-screen. Works through the computer-use-linux GNOME Shell extension or a generic X11/EWMH window manager (wmctrl). Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
@@ -2125,8 +2115,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "resize_window",
-        output_schema = rmcp::handler::server::tool::schema_for_output::<WindowGeometryToolOutput>()
-            .expect("resize_window output schema"),
+        output_schema = rmcp::handler::server::tool::schema_for_output::<WindowGeometryToolOutput>(),
         description = "Resize a window to a new frame width/height in desktop pixels, unmaximizing it first if needed. Useful to fit a window fully on-screen. Works through the computer-use-linux GNOME Shell extension or a generic X11/EWMH window manager (wmctrl). Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
@@ -2160,7 +2149,7 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.7.18",
+    version = "0.7.19",
     instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send literal type_text through KDE clipboard integration on Plasma Wayland, wtype on compatible Wayland compositors, or portal keysyms on other Wayland sessions. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Mutating tools (click, type_text, press_key, scroll, drag, perform_action, set_value, activate_window, move_window, resize_window) accept optional screenshot_after (true, \"screen\", or \"window\") with format/quality/scale/max_width/max_height/max_bytes and optional include_tree=true to return post-action observation in the same tool call. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype uses a single literal argument after -- to avoid stdin keymap-refresh corruption; text is visible in process arguments, so confirmed password fields are rejected (use set_value). Terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call; split larger input into smaller calls or expose accessibility. Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. A successful type_text result confirms dispatch only; every text backend leaves field contents unverified. Re-observe the target before retrying. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content."
 )]
 impl ServerHandler for ComputerUseLinux {}
@@ -7239,6 +7228,95 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
                 _ => assert_eq!(commands, "ydotool mousemove --wheel -- 0 -5\n"),
             }
         }
+    }
+
+    /// Send newline-delimited JSON-RPC frames to an in-process server and
+    /// collect every response frame until the server closes the stream.
+    async fn mcp_exchange(frames: &[serde_json::Value]) -> Vec<serde_json::Value> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let (server_transport, client_transport) = tokio::io::duplex(1 << 20);
+        let server = tokio::spawn(async move {
+            if let Ok(running) = ComputerUseLinux::default().serve(server_transport).await {
+                let _ = running.waiting().await;
+            }
+        });
+        let (read, mut write) = tokio::io::split(client_transport);
+        let mut input = String::new();
+        for frame in frames {
+            input.push_str(&frame.to_string());
+            input.push('\n');
+        }
+        write.write_all(input.as_bytes()).await.unwrap();
+        let mut reader = BufReader::new(read);
+        let mut responses = Vec::new();
+        let expected = frames
+            .iter()
+            .filter(|frame| frame.get("id").is_some())
+            .count();
+        while responses.len() < expected {
+            let mut line = String::new();
+            let read = tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+                .await
+                .expect("server should answer in time")
+                .unwrap();
+            if read == 0 {
+                break;
+            }
+            let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if frame.get("id").is_some() {
+                responses.push(frame);
+            }
+        }
+        drop(write);
+        drop(reader);
+        let _ = tokio::time::timeout(Duration::from_secs(10), server).await;
+        responses
+    }
+
+    #[tokio::test]
+    async fn bare_discover_probe_falls_back_to_initialize() {
+        // Hosts probe with `server/discover` before `initialize`. rmcp 2 treated
+        // any non-initialize first request as fatal and closed the stream.
+        let responses = mcp_exchange(&[
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}),
+            serde_json::json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{
+                "protocolVersion":"2025-06-18","capabilities":{},
+                "clientInfo":{"name":"test-client","version":"1"}}}),
+            serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}),
+        ])
+        .await;
+        assert_eq!(responses.len(), 3, "{responses:?}");
+        assert!(responses[0].get("error").is_some(), "{:?}", responses[0]);
+        assert_eq!(responses[1]["result"]["protocolVersion"], "2025-06-18");
+        assert!(!responses[2]["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn modern_discover_lifecycle_lists_tools() {
+        let meta = serde_json::json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {"name": "test-client", "version": "1"},
+            "io.modelcontextprotocol/clientCapabilities": {}
+        });
+        let responses = mcp_exchange(&[
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":meta}}),
+            serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":meta}}),
+        ])
+        .await;
+        assert_eq!(responses.len(), 2, "{responses:?}");
+        assert!(responses[0]["result"]["supportedVersions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|version| version == "2026-07-28"));
+        let listed = &responses[1]["result"];
+        assert_eq!(listed["resultType"], "complete");
+        assert!(listed.get("ttlMs").is_some() && listed.get("cacheScope").is_some());
+        assert!(!listed["tools"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
