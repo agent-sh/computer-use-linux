@@ -4,12 +4,12 @@ version = "0.7.18"
 edition = "2021"
 authors = ["Avi Fenesh <avifenesh@users.noreply.github.com>"]
 license = "MIT"
-description = "Linux desktop control over MCP — AT-SPI accessibility tree, multi-compositor window targeting (GNOME, KWin, Hyprland, i3, COSMIC), screencast portal screenshots, and ydotool input synthesis. Wayland-first, X11 best-effort."
+description = "Native Linux desktop control over MCP and CLI — semantic AT-SPI accessibility trees, multi-compositor window targeting (GNOME, KDE/KWin, Hyprland, niri, COSMIC, i3, X11), bounded screenshots, Wayland/X11 input, and an on-screen agent activity indicator."
 homepage = "https://github.com/agent-sh/computer-use-linux"
 repository = "https://github.com/agent-sh/computer-use-linux"
 documentation = "https://github.com/agent-sh/computer-use-linux#readme"
 readme = "README.md"
-keywords = ["mcp", "computer-use", "accessibility", "gnome", "wayland"]
+keywords = ["mcp", "computer-use", "accessibility", "linux", "wayland"]
 categories = ["accessibility", "command-line-utilities", "os::linux-apis"]
 
 [[bin]]

@@ -5,13 +5,13 @@
     "url": "https://github.com/agent-sh"
   },
   "metadata": {
-    "description": "Linux desktop control for Claude Code and Codex."
+    "description": "Native Linux desktop control for Claude Code and Codex."
   },
   "plugins": [
     {
       "name": "computer-use-linux",
       "source": "./plugins/computer-use-linux",
-      "description": "Linux desktop control: AT-SPI accessibility trees, screenshots, compositor window targeting, and Wayland/X11 input.",
+      "description": "Native Linux desktop control: semantic AT-SPI accessibility trees, screenshots, compositor window targeting (GNOME, KDE, Hyprland, niri, COSMIC, i3, X11), Wayland/X11 input, and an on-screen activity indicator.",
       "version": "0.7.18",
       "category": "productivity"
     }

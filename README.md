@@ -1,6 +1,6 @@
 <div align="center">
   <h1>computer-use-linux</h1>
-  <p><strong>Control a real Linux desktop from any MCP host.</strong></p>
+  <p><strong>Native Linux desktop control for AI agents — over MCP, Pi native tools, and CLI.</strong></p>
   <p>
     <a href="https://github.com/agent-sh/computer-use-linux/actions/workflows/ci.yml"><img src="https://github.com/agent-sh/computer-use-linux/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
     <a href="https://crates.io/crates/computer-use-linux"><img src="https://img.shields.io/crates/v/computer-use-linux.svg" alt="crates.io"></a>
@@ -11,55 +11,88 @@
 
 > Running open models for your company? [**Tiyuvta**](https://tiyuvta.ai/services/) helps with model choice, deployment and optimization, and fine-tuning on your hardware or cloud account.
 
-`computer-use-linux` reads accessibility trees, takes screenshots, and drives clicks, scrolls, and keystrokes across GNOME, KDE/KWin, Hyprland, niri, i3, and COSMIC — Wayland-first, X11 best-effort.
+`computer-use-linux` gives AI agents real, structured control of a local Linux desktop: semantic AT-SPI accessibility trees, bounded screenshots, compositor-aware window targeting, Wayland/X11 input synthesis, single-round-trip post-action verification, and a click-through on-screen activity indicator across **GNOME, KDE Plasma/KWin, Hyprland, niri, COSMIC, i3, and X11/EWMH**.
+
+## Quick start
+
+Pick the setup that matches your agent or shell workflow:
+
+| Host / workflow | Install command |
+| --- | --- |
+| **Claude Code** (plugin + skill) | `claude plugin marketplace add agent-sh/computer-use-linux && claude plugin install computer-use-linux@computer-use-linux` |
+| **Codex CLI** (plugin + skill) | `codex plugin marketplace add agent-sh/computer-use-linux && codex plugin add computer-use-linux@computer-use-linux` |
+| **Pi Coding Agent** (native lazy-loaded tools) | `pi install npm:@agent-sh/computer-use-linux` |
+| **Hermes Agent** (skill + MCP server) | `hermes skills tap add agent-sh/computer-use-linux && hermes skills install agent-sh/computer-use-linux/computer-use-linux && hermes mcp add computer-use-linux --command computer-use-linux --args mcp` |
+| **CLI + any stdio MCP client** (npm) | `npm install -g @agent-sh/computer-use-linux` |
+| **CLI + system setup from source** | `git clone https://github.com/agent-sh/computer-use-linux && cd computer-use-linux && ./install.sh` |
+| **Rust crate (`crates.io`)** | `cargo install computer-use-linux` |
+
+Verify desktop readiness in one command:
 
 ```bash
-npm install -g @agent-sh/computer-use-linux
 computer-use-linux doctor | jq .readiness
+computer-use-linux setup                      # enable AT-SPI accessibility bridge if needed
+computer-use-linux setup-window-targeting     # install GNOME Wayland window-control extension if needed
 ```
 
-The Rust crate is published as [`computer-use-linux`](https://crates.io/crates/computer-use-linux) and the npm wrapper as [`@agent-sh/computer-use-linux`](https://www.npmjs.com/package/@agent-sh/computer-use-linux). Prebuilt binaries ship with the [latest release](https://github.com/agent-sh/computer-use-linux/releases/latest).
+The Rust crate is published as [`computer-use-linux`](https://crates.io/crates/computer-use-linux) and the npm package as [`@agent-sh/computer-use-linux`](https://www.npmjs.com/package/@agent-sh/computer-use-linux). Prebuilt `x86_64` and `aarch64` Linux binaries ship with the [latest release](https://github.com/agent-sh/computer-use-linux/releases/latest).
+
+> Need an **isolated** desktop where the agent never touches your real mouse, keyboard, or focused window? Use the sibling project [**`agent-workspace-linux`**](https://github.com/agent-sh/agent-workspace-linux) alongside this one.
 
 ## What this is
 
-`computer-use-linux` is a Rust MCP server and CLI for Linux desktop control. The crate ships the main `computer-use-linux` binary plus a small `computer-use-linux-cosmic` helper used only for COSMIC Wayland window management. Any MCP host — Codex Desktop's Linux build, Claude Desktop, [Hermes Agent](https://github.com/NousResearch/hermes-agent), or your own client — can spawn it and gain full control of the local Linux desktop: read accessibility trees, list and focus windows, take screenshots, click, drag, scroll, type, and invoke semantic accessibility actions.
+`computer-use-linux` is a Rust MCP server and CLI for Linux desktop control. It ships three binaries — the main `computer-use-linux` server/CLI, the `computer-use-linux-cosmic` Wayland toplevel helper for COSMIC, and the `computer-use-linux-indicator` click-through activity overlay. Any MCP host — Claude Code, Codex CLI, Codex Desktop's Linux build, [Pi Coding Agent](#pi-coding-agent), [Hermes Agent](https://github.com/NousResearch/hermes-agent), Claude Desktop, or your own client — can spawn it to inspect accessibility trees, list and focus windows, take screenshots, click, drag, scroll, type, and invoke semantic accessibility actions.
 
-Most computer-use MCP servers are macOS-only (they lean on AppKit, AXUIElement, CGEvent). The few that target Linux either drive `xdotool` against an X11 root window or shell out to OCR over screenshots. Four things set this one apart:
+Most computer-use MCP servers are macOS-only (they lean on AppKit, AXUIElement, CGEvent). The few that target Linux either drive `xdotool` against an X11 root window or shell out to OCR over screenshots. Five things set this one apart:
 
-- **Wayland actually works.** Pointer actions can use the `org.freedesktop.portal.RemoteDesktop` interface on Wayland, with `ydotool` / `ydotoold` (uinput) as the deterministic fallback. Literal text prefers KDE clipboard integration on Plasma, `wtype` on compatible Wayland compositors, and portal keysyms on other Wayland sessions, including GNOME with ydotool installed. Portal text startup or conversion errors fail the call without replaying text through ydotool. Raw ydotool text accepts printable ASCII, tab and newline only, and its physical US key positions can produce different text under the active layout. Screenshots use the GNOME Shell DBus screenshot method when present, `org.freedesktop.portal.Screenshot` otherwise, then on a native X11 session a root-window `GetImage` (device pixels, no toolkit scaling), and finally spawn `gnome-screenshot` for background/systemd contexts where the DBus paths are denied.
-- **Window targeting is compositor-aware.** The window registry tries GNOME Shell extension, GNOME Shell Introspect, COSMIC Wayland helper, KWin DBus scripting, Hyprland `hyprctl`, the niri IPC socket, i3 IPC, and generic X11/EWMH in order, then reports exactly which backend won or why each backend failed.
-- **Semantic selectors, not pixel coordinates.** Tools like `click`, `perform_action`, and `set_value` accept `role` / `name` / `text` / `states` selectors backed by AT-SPI. Pixel coordinates remain available as a fallback for rendering-only surfaces (canvas, games, X clients without ATK).
+- **Wayland actually works.** Pointer actions use `/dev/uinput` or `org.freedesktop.portal.RemoteDesktop` on Wayland, with `ydotool` / `ydotoold` as the fallback. Literal text prefers KDE clipboard integration on Plasma, `wtype` on compatible Wayland compositors, and portal keysyms on other Wayland sessions, including GNOME with ydotool installed. Portal text startup or conversion errors fail the call without replaying text through ydotool. Raw ydotool text accepts printable ASCII, tab and newline only, and its physical US key positions can produce different text under the active layout. Screenshots use the GNOME Shell DBus screenshot method when present, `org.freedesktop.portal.Screenshot` otherwise, then on a native X11 session a root-window `GetImage` (device pixels, no toolkit scaling), and finally spawn `gnome-screenshot` for background/systemd contexts where the DBus paths are denied.
+- **Window targeting is compositor-aware.** The window registry tries GNOME Shell extension, GNOME Shell Introspect, COSMIC Wayland helper, KWin DBus scripting, Hyprland `hyprctl`, the niri IPC socket, i3 IPC, and generic X11/EWMH in order, then reports exactly which backend won or why each backend failed. Terminal windows are enriched with their controlling TTY and foreground process so agents can target "the terminal running `pytest`" directly.
+- **Semantic selectors first, pixel coordinates when needed.** Tools like `click`, `perform_action`, and `set_value` accept `role` / `name` / `text` / `states` selectors or `element_index` values backed by AT-SPI, and every mutating tool can return a post-action screenshot and updated accessibility tree in the same round trip. Pixel coordinates remain available for rendering-only surfaces (canvas, games, X clients without ATK).
+- **Visible to humans, invisible to screenshots.** While an agent acts, `computer-use-linux-indicator` renders a click-through overlay with a per-agent cursor glide, click ripple, keycaps/typing banner, screen-edge glow, and status pill — and hides automatically under a shared capture lock before any screenshot is read.
 - **One JSON readiness report.** `computer-use-linux doctor` returns a structured document covering platform, portals, AT-SPI, windowing, input, and a `readiness` summary with explicit blockers and a recommended next step. MCP hosts can render or surface that to the user without parsing prose.
 
-The crate was extracted from [`codex-desktop-linux`](https://github.com/avifenesh/codex-desktop-linux) (the Linux distribution of Codex Desktop), which still bundles this binary as a built-in plugin. This standalone repo is the upstream.
+The crate was extracted from [`codex-desktop-linux`](https://github.com/avifenesh/codex-desktop-linux) (the Linux distribution of Codex Desktop), which bundles this backend for its native Computer Use feature. This standalone repo is the upstream.
 
-## Features
+## MCP tools & features
 
-MCP tools exposed by the server:
+| Category | Tool | What it does |
+| --- | --- | --- |
+| **Diagnostics & setup** | `doctor` | Single-shot JSON readiness report (platform, portals, accessibility, windowing, input, monitor list with `index`, readiness summary, and capability map). |
+| | `setup_accessibility` | Enables and verifies GNOME's `org.gnome.desktop.interface toolkit-accessibility` setting so toolkit apps expose AT-SPI trees. |
+| | `setup_window_targeting` | Installs and enables the bundled GNOME Shell extension when `org.gnome.Shell.Introspect` is locked down. |
+| **Discovery & observation** | `get_app_state` | Combined screenshot + compacted AT-SPI accessibility tree with stable `element_index` handles. Scope with `app_name_or_bundle_identifier` or a window target (`window_id`, `pid`, `app_id`, `wm_class`, `title`). |
+| | `screenshot` | Bounded PNG or JPEG capture of the full desktop, a specific monitor (`screen_index`), a `region`, or a raised and cropped target window. |
+| | `list_windows` | Compositor windows with `window_id`, title, `app_id`, `wm_class`, PID, focus state, client type (`wayland`/`x11`), bounds, and terminal TTY/process metadata. |
+| | `focused_window` | The window currently holding keyboard focus. |
+| | `list_apps` | Running desktop applications visible to the AT-SPI registry. |
+| **Input** | `click` | Click by `element_index`, semantic selector (`role`/`name`/`text`/`states`), or desktop/window-relative coordinates (`left`/`right`/`middle`, `click_count`). |
+| | `drag` | Desktop coordinate drag from `(start_x, start_y)` to `(end_x, end_y)`. |
+| | `scroll` | Page-based vertical/horizontal scroll on an element, window, or pixel coordinate. |
+| | `press_key` | Single keys or chords (`Ctrl+L`, `Alt+F4`, `Return`), optionally focusing a target window or terminal first. |
+| | `type_text` | Literal text entry, optionally targeted at a window or terminal (`tty`, `terminal_pid`, `terminal_command`, `terminal_cwd`). |
+| **Semantic actions** | `perform_action` | Invoke any AT-SPI action exposed by an element (`Press`, `Activate`, `Toggle`, `Jump`, …); defaults to the primary action. |
+| | `set_value` | Write directly to a settable accessibility element (text fields, sliders, spinners). |
+| **Window management** | `activate_window` | Focus a window by `window_id`, `pid`, `app_id`, `wm_class`, `title`, or terminal selectors. |
+| | `move_window` / `resize_window` | Reposition or resize a window in desktop coordinates (GNOME Shell extension and X11/EWMH backends). |
+| **Opt-in host tools** | `complete_interaction` | Parameter-free desktop completion notification (`notify-send`); registered only when `COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE=1`. |
+| | `run_shell` | Bounded non-login `/bin/sh -c` execution; registered only when `COMPUTER_USE_LINUX_ENABLE_SHELL=1` (absent by default). |
 
-**Diagnostics**
+### Post-action observation in one round trip
 
-- `doctor` — single-shot JSON readiness report (platform, portals, accessibility, windowing, input, readiness summary, and a capability map of available backends)
-- `setup_accessibility` — enables GNOME's `org.gnome.desktop.interface toolkit-accessibility` setting so toolkit apps expose AT-SPI trees
-- `setup_window_targeting` — installs and enables the bundled GNOME Shell extension when `org.gnome.Shell.Introspect` is locked down
+All mutating tools (`click`, `drag`, `scroll`, `press_key`, `type_text`, `perform_action`, `set_value`, `activate_window`, `move_window`, and `resize_window`) accept optional post-action observation parameters so an action and its verification complete in a single MCP tool call:
 
-**Discovery**
+- `screenshot_after: true | "screen" | "window" | false` — capture after the action is dispatched and the indicator overlay is hidden (`true` or `"screen"` for full desktop, `"window"` cropped to the action's target window or the focused window when untargeted)
+- `format`, `quality`, `scale`, `max_width`, `max_height`, `max_bytes` — same screenshot payload controls as `screenshot` and `get_app_state`
+- `include_tree: true` — include a fresh compacted AT-SPI accessibility tree and update cached `element_index` values
+- Input tools also accept `capture: true`, `capture_delay_ms` (default `150` ms when `capture: true` without an explicit `screenshot_after`, max `5000` ms), `region`, and `window_id` for cropped post-action captures.
 
-- `list_apps` — running desktop apps visible to the AT-SPI registry
-- `list_windows` — compositor windows with title, app id, wm_class, focus state, client type (Wayland/X11), and bounds
-- `focused_window` — the window currently holding keyboard focus
-- `get_app_state` — combined screenshot + accessibility tree for a chosen app, with element indices that the input tools accept. Scope it with `app_name_or_bundle_identifier` or a window target; an unscoped call returns the whole desktop tree, reports `tree_scoped: false`, and warns
-- `screenshot` — capture the screen as a bounded PNG or JPEG image; can target a window, which is raised to the front and cropped to just that window
+When post-action screenshot capture succeeds, the image is returned as the first MCP `image` content block alongside the JSON action summary and `screenshot` metadata. If the action succeeds (`ok: true`) and only the post-action screenshot or tree capture fails, `ok` remains `true` and the error is reported in `screenshot_error` / `accessibility_error` and appended to `message`.
+
+### Screenshot sizing & coordinate scaling
 
 Screenshot payloads are size-bounded by default before they are returned to the MCP host: max 1920 px width/height and 2 MiB image bytes, with hard caps even when callers request more. Agents that need more detail can pass `max_width`, `max_height`, `max_bytes`, `scale`, `format: "jpeg"`, or `quality`, preferably with a window target or crop. PNG remains the default; JPEG lets callers trade lossless pixels for a smaller payload before the byte cap forces further resizing. Returned screenshot metadata includes `coordinate_width`, `coordinate_height`, `scale`, `format`, and `quality` so callers can convert from a downscaled preview to desktop coordinate pixels.
 
-**Input**
-
-- `click` — by element index, semantic selector, or desktop coordinate pixels
-- `drag` — desktop coordinate drag (start / end)
-- `scroll` — page-based scroll on an element or at a pixel location
-- `press_key` — keys / chords; can focus a window or terminal first
-- `type_text` — literal text input, optionally targeted at a window or terminal
+### Input & semantic targeting contracts
 
 For a plain left `click` by element index or selector, a recognized native
 AT-SPI `click`, `press`, or `toggle` action takes precedence
@@ -84,25 +117,7 @@ On X11, text input sends LF and CRLF line endings as Return, with one newline pe
 
 On GNOME, a read-only keymap preflight rejects the whole string before input if a character is absent or requires a modifier level Mutter cannot synthesize. The background reader cannot establish the active layout group, so every configured group must support the text. This can reject text that works in one of several groups; use `set_value` on an editable field instead. The check requires `libxkbcommon.so.0` at runtime and stops after a two-second keymap read deadline. It does not cover held modifiers or a keymap changed concurrently with typing.
 
-**Semantic actions**
-
-- `perform_action` — invoke any AT-SPI action exposed by an element (`Press`, `Activate`, `Toggle`, …); defaults to the primary action
-- `set_value` — write to a settable accessibility element (text fields, sliders, spinners)
-
-**Navigation**
-
-- `activate_window` — focus a window by `window_id`, `pid`, `app_id`, `wm_class`, `title`, or terminal selectors
-- `move_window` / `resize_window` — reposition or resize a window in desktop coordinates (GNOME Shell extension backend); useful to recover windows that are partially off-screen
-
-All mutating tools (`click`, `drag`, `scroll`, `press_key`, `type_text`, `perform_action`, `set_value`, `activate_window`, `move_window`, and `resize_window`) accept optional post-action observation parameters so an action and its verification can complete in one MCP round trip:
-
-- `screenshot_after: true | "screen" | "window" | false` — capture after the action is dispatched and the indicator overlay is hidden (`true` or `"screen"` for full desktop, `"window"` cropped to the action's target window or the focused window when untargeted)
-- `format`, `quality`, `scale`, `max_width`, `max_height`, `max_bytes` — same screenshot payload controls as `screenshot` and `get_app_state`
-- `include_tree: true` — include a fresh compacted AT-SPI accessibility tree and update cached `element_index` values
-
-When `screenshot_after` succeeds, the image is returned as the first MCP `image` content block alongside the JSON action summary and `screenshot` metadata. If the action succeeds (`ok: true`) and only the post-action screenshot or tree capture fails, `ok` remains `true` and the error is reported in `screenshot_error` / `accessibility_error` and appended to `message`.
-
-**On-screen indicator**
+### On-screen indicator
 
 While an agent acts, the server drives `computer-use-linux-indicator`, a click-through overlay that shows what it is doing: a software cursor tinted per agent that glides to each coordinate `click`, `drag`, or `scroll` target and ripples on click (AT-SPI actions such as `perform_action`, `set_value`, and element clicks show in the pill without moving it, since no pointer moves); keycaps for `press_key` and a typing line for `type_text`; a glow along every screen edge; and a status pill such as *Claude is using your computer · click*. Pointer actions wait 350 ms so the cursor lands before the real input. While `screenshot` or `get_app_state` captures the screen, the overlay draws nothing, so agents never see it: not their own, not one shown for another agent, and not one that another agent starts mid-capture. This holds with `COMPUTER_USE_LINUX_INDICATOR=0` too, which only stops a server from showing its own actions. The capture waits for the compositor only when something was on screen. The agent name comes from the MCP client's `clientInfo`.
 
@@ -111,12 +126,6 @@ The server starts the indicator on the first action and it exits after ten idle 
 Screenshot processing uses one blocking worker per server. Captures enter one pipeline before reading pixels, so concurrent requests do not queue decoded full-screen images. A source can contain up to 134,217,728 pixels; serial processing bounds decoded-image memory while letting MCP answer other requests during resizing and encoding. Session discovery is reused after a successful probe and refreshed when session variables change. Failed discovery is retried.
 
 Captures require the shared capture lock and, when an overlay is running, its acknowledgement that it has hidden. A missing or invalid acknowledgement, a stalled socket, or a failed lock returns a capture error. Concurrent captures keep separate holds; their acknowledgements are exchanged in order.
-
-**Conditional host execution**
-
-- `complete_interaction` - optional desktop completion notification, registered only with `COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE=1`. Repeated calls can create repeated notifications; it does not provide desktop exclusivity.
-
-- `run_shell` — same-user `/bin/sh -c` execution without login-profile loading, registered only when the server operator starts the MCP process with `COMPUTER_USE_LINUX_ENABLE_SHELL=1`. It is deliberately absent by default and is not a sandbox.
 
 ### MCP safety contract
 
@@ -168,11 +177,11 @@ If you run on a desktop not covered above, or a covered backend does not come up
 
 ## Install
 
-COSMIC users do not need a second package or a separate helper install when using `./install.sh`, `cargo install`, or the npm wrapper. Those paths install `computer-use-linux-cosmic` alongside the main binary automatically. Only manual prebuilt-binary installs need you to copy both release assets.
+`./install.sh`, `cargo install`, the npm wrapper, and the Claude/Codex plugin launcher all install `computer-use-linux`, `computer-use-linux-cosmic` (COSMIC Wayland helper), and `computer-use-linux-indicator` (on-screen activity overlay) together automatically. Only manual prebuilt-binary installs need you to download all three release assets.
 
 ### Option A — `./install.sh` from a clone
 
-Installs system packages on Debian/Ubuntu, Fedora/RHEL-like, Arch-like, or Artix systems; installs Rust if needed; builds both release binaries; installs them to `~/.local/bin`; configures `ydotoold` as a systemd user service when available; enables GNOME AT-SPI settings when running under GNOME; and installs the bundled GNOME Shell extension on GNOME Wayland.
+Installs system packages on Debian/Ubuntu, Fedora/RHEL-like, Arch-like, or Artix systems; installs Rust if needed; builds all three release binaries (`computer-use-linux`, `computer-use-linux-cosmic`, and `computer-use-linux-indicator`); installs them to `~/.local/bin`; configures `ydotoold` as a systemd user service when available; enables GNOME AT-SPI settings when running under GNOME; and installs the bundled GNOME Shell extension on GNOME Wayland.
 
 ```bash
 git clone https://github.com/agent-sh/computer-use-linux
@@ -186,7 +195,7 @@ computer-use-linux doctor | jq .readiness
 
 ### Option B — `cargo install` (Rust binaries, no system setup)
 
-Installs the Rust binaries from crates.io. You still handle the system-level pieces yourself: AT-SPI, desktop portals, the optional `ydotoold` fallback, and the GNOME extension if you need the GNOME Wayland exact-focus backend.
+Installs all three Rust binaries from crates.io. You still handle the system-level pieces yourself: AT-SPI, desktop portals, the optional `ydotoold` fallback, and the GNOME extension if you need the GNOME Wayland exact-focus backend.
 
 ```bash
 cargo install computer-use-linux
@@ -211,7 +220,7 @@ computer-use-linux setup-window-targeting     # GNOME Shell extension
 
 ### Option C — npm wrapper (binary download)
 
-Good for users who already have Node.js and want a no-Rust install. The npm package downloads and verifies the matching main and COSMIC helper binaries during install, then the wrapper sets `COMPUTER_USE_LINUX_COSMIC_HELPER` to the bundled helper automatically.
+Good for users who already have Node.js and want a no-Rust install. The npm package downloads and verifies the matching `computer-use-linux`, `computer-use-linux-cosmic`, and `computer-use-linux-indicator` binaries during install, then the wrapper wires `COMPUTER_USE_LINUX_COSMIC_HELPER` and `COMPUTER_USE_LINUX_INDICATOR_BIN` to the bundled helpers automatically.
 
 ```bash
 npm install -g @agent-sh/computer-use-linux
@@ -238,7 +247,7 @@ for binary in computer-use-linux computer-use-linux-cosmic computer-use-linux-in
 done
 ```
 
-You will still need `ydotoold` running and AT-SPI enabled (run `computer-use-linux setup` and the systemd commands above).
+You will still need AT-SPI enabled (`computer-use-linux setup`) and one input backend reported ready by `doctor` (start `ydotoold` only when using the ydotool fallback).
 
 ## Wire it into your MCP host
 
@@ -278,7 +287,7 @@ already bundles Computer Use; do not install both there.
 
 ### Codex Desktop (Linux build)
 
-The Linux build of Codex Desktop already bundles this binary as a plugin. You don't need to wire it up manually — the plugin definition lives in [`codex-desktop-linux`](https://github.com/avifenesh/codex-desktop-linux) under its `plugins/` directory and is enabled by default. To upgrade the plugin in place, replace the binary it ships with the one from this repo's release assets.
+[`codex-desktop-linux`](https://github.com/avifenesh/codex-desktop-linux) includes a native `computer-use-linux` feature that embeds and stages this backend inside the app's unified Computer Use plugin. Enable `computer-use-linux` via `make setup-native` (or in `linux-features/features.json` followed by `make install-native`), then toggle **Settings → Computer use → Any App** in the desktop app. Do not register a second standalone `computer-use-linux` MCP server inside Codex Desktop when the native feature is enabled.
 
 ### Claude Code (CLI)
 
