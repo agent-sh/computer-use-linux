@@ -20,6 +20,13 @@ screenshot crop origin and divide preview coordinates by screenshot `scale`.
 Do not use widget-local or raw GDK surface coordinates. A window target is
 required.
 
+Mutating tools (`click`, `drag`, `scroll`, `press_key`, `type_text`,
+`perform_action`, `set_value`, `activate_window`, `move_window`, and
+`resize_window`) accept `screenshot_after: true | "screen" | "window"`,
+`format`/`quality`/`scale`/`max_width`/`max_height`/`max_bytes`, and
+`include_tree: true` to return a post-action screenshot and/or compacted AT-SPI
+tree in the same tool result.
+
 ```bash
 npm install -g @agent-sh/computer-use-linux
 computer-use-linux doctor

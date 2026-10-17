@@ -1107,6 +1107,12 @@ fn is_cosmic_wayland_platform(platform: &PlatformReport) -> bool {
         && platform.xdg_session_type.as_deref() == Some("wayland")
 }
 
+pub(crate) fn can_build_accessibility_tree_now() -> bool {
+    hydrate_session_bus_env();
+    let accessibility = accessibility_report();
+    can_build_accessibility_tree(&accessibility)
+}
+
 fn can_build_accessibility_tree(accessibility: &AccessibilityReport) -> bool {
     accessibility.at_spi_bus.ok
         && (check_detail_contains_true(&accessibility.at_spi_enabled)

@@ -304,7 +304,9 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "activate_window",
-        description = "Focus a Linux desktop window by window_id, pid, app_id, wm_class, title, or terminal selectors when the compositor permits it.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ActivateWindowToolOutput>()
+            .expect("activate_window output schema"),
+        description = "Focus a Linux desktop window by window_id, pid, app_id, wm_class, title, or terminal selectors when the compositor permits it. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -315,9 +317,20 @@ impl ComputerUseLinux {
     async fn activate_window(
         &self,
         Parameters(params): Parameters<ActivateWindowParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let capture = params.capture.clone();
+        let target = params.clone().into_target();
+        let Json(output) = self.dispatch_activate_window(params).await;
+        self.finish_activate_window_output(output, &capture, &target)
+            .await
+    }
+
+    async fn dispatch_activate_window(
+        &self,
+        params: ActivateWindowParams,
     ) -> Json<ActivateWindowOutput> {
+        let received = Some(serde_json::json!(params.clone()));
         let target = params.into_target();
-        let received = Some(serde_json::json!(target.clone()));
         self.indicator.action("activate_window").await;
         match focus_window_target(&target).await {
             Ok(focus) => {
@@ -714,7 +727,9 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "click",
-        description = "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. Plain left activation prefers a native AT-SPI click/press/toggle action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>()
+            .expect("click output schema"),
+        description = "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. Plain left activation prefers a native AT-SPI click/press/toggle action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -722,7 +737,18 @@ impl ComputerUseLinux {
             open_world_hint = true
         )
     )]
-    async fn click(&self, Parameters(mut params): Parameters<ClickParams>) -> Json<ActionOutput> {
+    async fn click(
+        &self,
+        Parameters(params): Parameters<ClickParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let capture = params.capture.clone();
+        let target = params.window_target();
+        let Json(output) = self.dispatch_click(params).await;
+        self.finish_action_output(output, &capture, target.as_ref())
+            .await
+    }
+
+    async fn dispatch_click(&self, mut params: ClickParams) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let mut portal_target_point = None;
@@ -1054,7 +1080,9 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "perform_action",
-        description = "Invoke an accessibility action exposed by an element selected by index, identifier, or semantic selector. Defaults to the primary action unless action is provided.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>()
+            .expect("perform_action output schema"),
+        description = "Invoke an accessibility action exposed by an element selected by index, identifier, or semantic selector. Defaults to the primary action unless action is provided. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1065,15 +1093,20 @@ impl ComputerUseLinux {
     async fn perform_action(
         &self,
         Parameters(params): Parameters<ActionParams>,
-    ) -> Json<ActionOutput> {
+    ) -> Result<CallToolResult, ErrorData> {
+        let capture = params.capture.clone();
         let requested_action = requested_or_primary_action(params.action.as_deref());
-        self.perform_element_action(&params, Some(requested_action))
-            .await
+        let Json(output) = self
+            .perform_element_action(&params, Some(requested_action))
+            .await;
+        self.finish_action_output(output, &capture, None).await
     }
 
     #[tool(
         name = "set_value",
-        description = "Set the value of a settable accessibility element selected by index, identifier, or semantic selector.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>()
+            .expect("set_value output schema"),
+        description = "Set the value of a settable accessibility element selected by index, identifier, or semantic selector. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1084,7 +1117,13 @@ impl ComputerUseLinux {
     async fn set_value(
         &self,
         Parameters(params): Parameters<SetValueParams>,
-    ) -> Json<ActionOutput> {
+    ) -> Result<CallToolResult, ErrorData> {
+        let capture = params.capture.clone();
+        let Json(output) = self.dispatch_set_value(params).await;
+        self.finish_action_output(output, &capture, None).await
+    }
+
+    async fn dispatch_set_value(&self, params: SetValueParams) -> Json<ActionOutput> {
         let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let received = Some(serde_json::json!(params.clone()));
         let object_ref = match self.resolve_object_ref(
@@ -1133,7 +1172,9 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "scroll",
-        description = "Scroll an element in a direction by a number of pages. With a window target and no x/y/element_index, scrolls at the centre of the targeted window.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>()
+            .expect("scroll output schema"),
+        description = "Scroll an element in a direction by a number of pages. With a window target and no x/y/element_index, scrolls at the centre of the targeted window. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1141,7 +1182,18 @@ impl ComputerUseLinux {
             open_world_hint = true
         )
     )]
-    async fn scroll(&self, Parameters(mut params): Parameters<ScrollParams>) -> Json<ActionOutput> {
+    async fn scroll(
+        &self,
+        Parameters(params): Parameters<ScrollParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let capture = params.capture.clone();
+        let target = params.window_target();
+        let Json(output) = self.dispatch_scroll(params).await;
+        self.finish_action_output(output, &capture, target.as_ref())
+            .await
+    }
+
+    async fn dispatch_scroll(&self, mut params: ScrollParams) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
         let units = match scroll_units(params.pages) {
             Ok(units) => units,
@@ -1485,7 +1537,9 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "drag",
-        description = "Drag from one point to another using pixel coordinates.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>()
+            .expect("drag output schema"),
+        description = "Drag from one point to another using pixel coordinates. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1493,7 +1547,16 @@ impl ComputerUseLinux {
             open_world_hint = true
         )
     )]
-    async fn drag(&self, Parameters(params): Parameters<DragParams>) -> Json<ActionOutput> {
+    async fn drag(
+        &self,
+        Parameters(params): Parameters<DragParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let capture = params.capture.clone();
+        let Json(output) = self.dispatch_drag(params).await;
+        self.finish_action_output(output, &capture, None).await
+    }
+
+    async fn dispatch_drag(&self, params: DragParams) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params));
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let space = self.indicator_space();
@@ -1609,7 +1672,9 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "press_key",
-        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>()
+            .expect("press_key output schema"),
+        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1620,7 +1685,15 @@ impl ComputerUseLinux {
     async fn press_key(
         &self,
         Parameters(params): Parameters<PressKeyParams>,
-    ) -> Json<ActionOutput> {
+    ) -> Result<CallToolResult, ErrorData> {
+        let capture = params.capture.clone();
+        let target = params.window_target();
+        let Json(output) = self.dispatch_press_key(params).await;
+        self.finish_action_output(output, &capture, Some(&target))
+            .await
+    }
+
+    async fn dispatch_press_key(&self, params: PressKeyParams) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let focus = match self.focus_target_for_input(&params.window_target()).await {
@@ -1765,7 +1838,9 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "type_text",
-        description = "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Success confirms dispatch, not field-content verification; re-observe the target before retrying. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators; Hyprland rejects confirmed password fields; ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>()
+            .expect("type_text output schema"),
+        description = "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Success confirms dispatch, not field-content verification; re-observe the target before retrying. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators; Hyprland rejects confirmed password fields; ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1776,14 +1851,17 @@ impl ComputerUseLinux {
     async fn type_text(
         &self,
         Parameters(params): Parameters<TypeTextParams>,
-    ) -> Json<ActionOutput> {
+    ) -> Result<CallToolResult, ErrorData> {
+        let capture = params.capture.clone();
+        let target = params.window_target();
         let Json(mut output) = self.dispatch_type_text(params).await;
         if output.ok {
             output.message.push_str(
                 " Field contents were not verified; re-observe the target before retrying.",
             );
         }
-        Json(output)
+        self.finish_action_output(output, &capture, Some(&target))
+            .await
     }
 
     async fn dispatch_type_text(&self, params: TypeTextParams) -> Json<ActionOutput> {
@@ -2018,7 +2096,9 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "move_window",
-        description = "Move a window to a new desktop position (frame top-left in desktop coordinates). Useful to recover windows that are partially off-screen. Works through the computer-use-linux GNOME Shell extension or a generic X11/EWMH window manager (wmctrl).",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<WindowGeometryToolOutput>()
+            .expect("move_window output schema"),
+        description = "Move a window to a new desktop position (frame top-left in desktop coordinates). Useful to recover windows that are partially off-screen. Works through the computer-use-linux GNOME Shell extension or a generic X11/EWMH window manager (wmctrl). Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2029,19 +2109,25 @@ impl ComputerUseLinux {
     async fn move_window(
         &self,
         Parameters(params): Parameters<MoveWindowParams>,
-    ) -> Json<WindowGeometryOutput> {
+    ) -> Result<CallToolResult, ErrorData> {
+        let capture = params.target.capture.clone();
         let received = Some(serde_json::json!(params.clone()));
-        let target = params.target.clone().into_target();
+        let target = params.target.into_target();
         self.indicator.action("move_window").await;
-        self.window_geometry_op(received, &target, |window| async move {
-            registry::move_window(&window, params.x, params.y).await
-        })
-        .await
+        let Json(output) = self
+            .window_geometry_op(received, &target, |window| async move {
+                registry::move_window(&window, params.x, params.y).await
+            })
+            .await;
+        self.finish_window_geometry_output(output, &capture, &target)
+            .await
     }
 
     #[tool(
         name = "resize_window",
-        description = "Resize a window to a new frame width/height in desktop pixels, unmaximizing it first if needed. Useful to fit a window fully on-screen. Works through the computer-use-linux GNOME Shell extension or a generic X11/EWMH window manager (wmctrl).",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<WindowGeometryToolOutput>()
+            .expect("resize_window output schema"),
+        description = "Resize a window to a new frame width/height in desktop pixels, unmaximizing it first if needed. Useful to fit a window fully on-screen. Works through the computer-use-linux GNOME Shell extension or a generic X11/EWMH window manager (wmctrl). Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2052,14 +2138,18 @@ impl ComputerUseLinux {
     async fn resize_window(
         &self,
         Parameters(params): Parameters<ResizeWindowParams>,
-    ) -> Json<WindowGeometryOutput> {
+    ) -> Result<CallToolResult, ErrorData> {
+        let capture = params.target.capture.clone();
         let received = Some(serde_json::json!(params.clone()));
-        let target = params.target.clone().into_target();
+        let target = params.target.into_target();
         self.indicator.action("resize_window").await;
-        self.window_geometry_op(received, &target, |window| async move {
-            registry::resize_window(&window, params.width, params.height).await
-        })
-        .await
+        let Json(output) = self
+            .window_geometry_op(received, &target, |window| async move {
+                registry::resize_window(&window, params.width, params.height).await
+            })
+            .await;
+        self.finish_window_geometry_output(output, &capture, &target)
+            .await
     }
 }
 
@@ -2070,8 +2160,8 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.7.17",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send literal type_text through KDE clipboard integration on Plasma Wayland, wtype on compatible Wayland compositors, or portal keysyms on other Wayland sessions. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype uses a single literal argument after -- to avoid stdin keymap-refresh corruption; text is visible in process arguments, so confirmed password fields are rejected (use set_value). Terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call; split larger input into smaller calls or expose accessibility. Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. A successful type_text result confirms dispatch only; every text backend leaves field contents unverified. Re-observe the target before retrying. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content."
+    version = "0.7.18",
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send literal type_text through KDE clipboard integration on Plasma Wayland, wtype on compatible Wayland compositors, or portal keysyms on other Wayland sessions. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Mutating tools (click, type_text, press_key, scroll, drag, perform_action, set_value, activate_window, move_window, resize_window) accept optional screenshot_after (true, \"screen\", or \"window\") with format/quality/scale/max_width/max_height/max_bytes and optional include_tree=true to return post-action observation in the same tool call. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype uses a single literal argument after -- to avoid stdin keymap-refresh corruption; text is visible in process arguments, so confirmed password fields are rejected (use set_value). Terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call; split larger input into smaller calls or expose accessibility. Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. A successful type_text result confirms dispatch only; every text backend leaves field contents unverified. Re-observe the target before retrying. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content."
 )]
 impl ServerHandler for ComputerUseLinux {}
 
@@ -2385,7 +2475,116 @@ struct FocusedWindowOutput {
     message: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum ScreenshotAfterScope {
+    Window,
+    Screen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+enum ScreenshotAfter {
+    Enabled(bool),
+    Scope(ScreenshotAfterScope),
+}
+
+impl ScreenshotAfter {
+    fn resolve(self) -> Option<ScreenshotAfterScope> {
+        match self {
+            Self::Enabled(false) => None,
+            Self::Enabled(true) => Some(ScreenshotAfterScope::Screen),
+            Self::Scope(scope) => Some(scope),
+        }
+    }
+}
+
+fn optional_screenshot_after_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "description": "Capture and return a post-action screenshot in the same result: true or \"screen\" captures the full desktop; \"window\" crops to the action's target window (or the focused window when untargeted); false or null disables capture.",
+        "anyOf": [
+            { "type": "boolean" },
+            { "type": "string", "enum": ["window", "screen"] },
+            { "type": "null" }
+        ]
+    })
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+struct PostActionCaptureParams {
+    /// Capture and return a post-action screenshot in the same result: `true` or
+    /// `"screen"` captures the full desktop; `"window"` crops to the action's
+    /// target window (or the focused window when untargeted); `false` disables capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_screenshot_after_schema")]
+    screenshot_after: Option<ScreenshotAfter>,
+    /// Maximum returned post-action screenshot width in pixels (default 1920, hard-capped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_width: Option<u32>,
+    /// Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_height: Option<u32>,
+    /// Maximum returned post-action screenshot image bytes before base64 (default 2 MiB, hard-capped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_bytes: Option<usize>,
+    /// Additional downscale factor from 0.0 to 1.0, applied before max dimensions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scale: Option<f32>,
+    /// Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    format: Option<ScreenshotOutputFormat>,
+    /// JPEG quality from 1 to 95 (default 80) for post-action screenshots. Ignored for png.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 95))]
+    quality: Option<u8>,
+    /// Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    include_tree: Option<bool>,
+}
+
+impl PostActionCaptureParams {
+    fn screenshot_scope(&self) -> Option<ScreenshotAfterScope> {
+        self.screenshot_after.and_then(ScreenshotAfter::resolve)
+    }
+
+    fn screenshot_options(&self) -> ScreenshotPayloadOptions {
+        ScreenshotPayloadOptions {
+            max_width: self.max_width,
+            max_height: self.max_height,
+            max_bytes: self.max_bytes,
+            scale: self.scale,
+            format: self.format,
+            quality: self.quality,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+struct PostActionObservation {
+    /// Post-action screenshot metadata when `screenshot_after` was requested; the image itself is the first `image` content block.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screenshot: Option<ScreenshotSummary>,
+    /// Post-action screenshot capture error when the action succeeded but `screenshot_after` failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screenshot_error: Option<String>,
+    /// Post-action compacted AT-SPI accessibility tree when `include_tree=true` was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    accessibility_tree: Option<Vec<AccessibilityNode>>,
+    /// Raw AT-SPI node count before compaction when `include_tree=true` was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    accessibility_tree_raw_count: Option<usize>,
+    /// True when the post-action accessibility tree was scoped to the target app/window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tree_scoped: Option<bool>,
+    /// True when the post-action accessibility tree hit traversal limits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    accessibility_tree_truncated: Option<bool>,
+    /// Post-action AT-SPI error when the action succeeded but `include_tree=true` failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    accessibility_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct ActivateWindowParams {
     #[serde(default)]
     window_id: Option<u64>,
@@ -2405,6 +2604,8 @@ struct ActivateWindowParams {
     wm_class: Option<String>,
     #[serde(default)]
     title: Option<String>,
+    #[serde(flatten)]
+    capture: PostActionCaptureParams,
 }
 
 impl ActivateWindowParams {
@@ -2439,6 +2640,14 @@ struct ActivateWindowOutput {
     received: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct ActivateWindowToolOutput {
+    #[serde(flatten)]
+    output: ActivateWindowOutput,
+    #[serde(flatten)]
+    observation: PostActionObservation,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 struct MoveWindowParams {
     #[serde(flatten)]
@@ -2470,6 +2679,14 @@ struct WindowGeometryOutput {
     permissions_hint: Option<String>,
     #[schemars(skip)]
     received: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct WindowGeometryToolOutput {
+    #[serde(flatten)]
+    output: WindowGeometryOutput,
+    #[serde(flatten)]
+    observation: PostActionObservation,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -2687,8 +2904,9 @@ impl ScreenshotParams {
     }
 }
 
-/// Screenshot metadata for `get_app_state`. The image bytes travel as a
-/// separate `image` content block (issue #145), not inside this JSON.
+/// Screenshot metadata for `get_app_state` and post-action captures. The image
+/// bytes travel as a separate `image` content block (issue #145), not inside
+/// this JSON.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 struct ScreenshotSummary {
     mime_type: String,
@@ -2709,6 +2927,12 @@ struct ScreenshotSummary {
     max_bytes: usize,
     format: ScreenshotOutputFormat,
     quality: Option<u8>,
+    /// True when a post-action screenshot was cropped to a target or focused window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cropped_to_window: Option<bool>,
+    /// Title of the window when cropped to a window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    window_title: Option<String>,
 }
 
 impl From<&ScreenshotCapture> for ScreenshotSummary {
@@ -2727,23 +2951,22 @@ impl From<&ScreenshotCapture> for ScreenshotSummary {
             max_bytes: capture.max_bytes,
             format: capture.format,
             quality: capture.quality,
+            cropped_to_window: None,
+            window_title: None,
         }
     }
 }
 
-/// Assemble the `get_app_state` result: the screenshot (when present) as a
+/// Assemble a structured tool result: the screenshot (when present) as a
 /// structured image block first, then the JSON report as text and as
 /// `structured_content`. Inlining the base64 in the JSON made hosts treat a
 /// 100KB+ image as plain text tokens (issue #145).
-fn app_state_result(
-    output: GetAppStateOutput,
+fn structured_tool_result<T: Serialize>(
+    output: T,
     screenshot: Option<ScreenshotCapture>,
 ) -> Result<CallToolResult, ErrorData> {
     let value = serde_json::to_value(&output).map_err(|error| {
-        ErrorData::internal_error(
-            format!("failed to serialize get_app_state output: {error}"),
-            None,
-        )
+        ErrorData::internal_error(format!("failed to serialize tool output: {error}"), None)
     })?;
     let mut result = CallToolResult::structured(value);
     if let Some(capture) = screenshot {
@@ -2753,6 +2976,13 @@ fn app_state_result(
         );
     }
     Ok(result)
+}
+
+fn app_state_result(
+    output: GetAppStateOutput,
+    screenshot: Option<ScreenshotCapture>,
+) -> Result<CallToolResult, ErrorData> {
+    structured_tool_result(output, screenshot)
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -2823,6 +3053,8 @@ struct ClickParams {
     /// Requires a window target; missing targets are rejected.
     #[serde(default)]
     relative: Option<bool>,
+    #[serde(flatten)]
+    capture: PostActionCaptureParams,
 }
 
 impl ClickParams {
@@ -2875,6 +3107,8 @@ struct ActionParams {
     states: Vec<String>,
     #[serde(default)]
     action: Option<String>,
+    #[serde(flatten)]
+    capture: PostActionCaptureParams,
 }
 
 impl ActionParams {
@@ -2903,6 +3137,8 @@ struct SetValueParams {
     #[serde(default)]
     states: Vec<String>,
     value: String,
+    #[serde(flatten)]
+    capture: PostActionCaptureParams,
 }
 
 impl SetValueParams {
@@ -2916,7 +3152,7 @@ impl SetValueParams {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct ScrollParams {
     #[serde(default)]
     element_index: Option<u32>,
@@ -2946,6 +3182,8 @@ struct ScrollParams {
     /// Requires a window target; missing targets are rejected.
     #[serde(default)]
     relative: Option<bool>,
+    #[serde(flatten)]
+    capture: PostActionCaptureParams,
 }
 
 fn scroll_units(pages: Option<f64>) -> std::result::Result<i32, String> {
@@ -2983,15 +3221,17 @@ impl ScrollParams {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct DragParams {
     start_x: i32,
     start_y: i32,
     end_x: i32,
     end_y: i32,
+    #[serde(flatten)]
+    capture: PostActionCaptureParams,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct PressKeyParams {
     key: String,
     #[serde(default)]
@@ -3012,9 +3252,11 @@ struct PressKeyParams {
     wm_class: Option<String>,
     #[serde(default)]
     title: Option<String>,
+    #[serde(flatten)]
+    capture: PostActionCaptureParams,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct TypeTextParams {
     text: String,
     #[serde(default)]
@@ -3035,6 +3277,8 @@ struct TypeTextParams {
     wm_class: Option<String>,
     #[serde(default)]
     title: Option<String>,
+    #[serde(flatten)]
+    capture: PostActionCaptureParams,
 }
 
 impl PressKeyParams {
@@ -3080,6 +3324,14 @@ struct ActionOutput {
     // clients reject.
     #[schemars(skip)]
     received: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct ActionToolOutput {
+    #[serde(flatten)]
+    action: ActionOutput,
+    #[serde(flatten)]
+    observation: PostActionObservation,
 }
 
 impl ComputerUseLinux {
@@ -3362,6 +3614,353 @@ impl ComputerUseLinux {
             anyhow::bail!("the requested window is hidden or minimized");
         }
         Ok(window)
+    }
+
+    async fn resolve_post_action_window(
+        &self,
+        target: Option<&WindowTarget>,
+        fallback_window: Option<&WindowInfo>,
+    ) -> Result<WindowInfo> {
+        let window = if let Some(target) = target.filter(|target| target.has_target()) {
+            match list_windows().await {
+                Ok(windows) => resolve_window_target(&windows, target)?.clone(),
+                Err(error) => {
+                    if let Some(window) = fallback_window {
+                        window.clone()
+                    } else {
+                        return Err(error);
+                    }
+                }
+            }
+        } else if let Some(window) = fallback_window {
+            window.clone()
+        } else {
+            focused_window().await?.ok_or_else(|| {
+                anyhow::anyhow!("no focused window is available for screenshot_after=\"window\"")
+            })?
+        };
+        if window.hidden {
+            anyhow::bail!("the target window is hidden or minimized");
+        }
+        Ok(window)
+    }
+
+    async fn capture_post_action_observation(
+        &self,
+        capture: &PostActionCaptureParams,
+        target: Option<&WindowTarget>,
+        fallback_window: Option<&WindowInfo>,
+    ) -> (
+        PostActionObservation,
+        Option<ScreenshotCapture>,
+        Vec<String>,
+    ) {
+        let screenshot_scope = capture.screenshot_scope();
+        let include_tree = capture.include_tree.unwrap_or(false);
+        if screenshot_scope.is_none() && !include_tree {
+            return (PostActionObservation::default(), None, Vec::new());
+        }
+
+        let mut observation = PostActionObservation::default();
+        let mut screenshot_capture = None;
+        let mut notes = Vec::new();
+        let mut resolved_window: Option<WindowInfo> = None;
+
+        if let Some(scope) = screenshot_scope {
+            let options = capture.screenshot_options();
+            let result: Result<(ScreenshotCapture, bool, Option<String>, Option<String>)> = async {
+                let _pipeline = crate::screenshot_impl::screenshot_pipeline_permit().await?;
+                let crop_window = match scope {
+                    ScreenshotAfterScope::Screen => None,
+                    ScreenshotAfterScope::Window => {
+                        let window = self
+                            .resolve_post_action_window(target, fallback_window)
+                            .await
+                            .context("targeted post-action screenshot failed")?;
+                        resolved_window = Some(window.clone());
+                        Some(window)
+                    }
+                };
+                let window_label = crop_window.as_ref().and_then(|window| window.title.clone());
+                let raw_capture = {
+                    let hold_started = std::time::Instant::now();
+                    let _hold = self.indicator.hold_for_capture().await?;
+                    if !cfg!(test) {
+                        let remaining =
+                            Duration::from_millis(120).saturating_sub(hold_started.elapsed());
+                        if !remaining.is_zero() {
+                            sleep(remaining).await;
+                        }
+                    }
+                    capture_screenshot_raw()
+                        .await
+                        .context("post-action screenshot failed")?
+                };
+                self.cache_desktop_size(raw_capture.width, raw_capture.height);
+                let off_screen_note = match crop_window
+                    .as_ref()
+                    .and_then(|window| window.bounds.as_ref())
+                {
+                    Some(bounds) => self.off_screen_note_for_bounds(bounds).await,
+                    None => None,
+                };
+                let (raw_for_payload, cropped) = match crop_window.as_ref() {
+                    Some(window) => {
+                        let (x, y, width, height) = self
+                            .window_crop_rect_for_capture(window, &raw_capture)
+                            .await
+                            .context("targeted post-action screenshot crop failed")?;
+                        let (raw_capture, bytes, width, height) =
+                            crate::screenshot_impl::run_image_task(move || {
+                                let (bytes, width, height) =
+                                    crop_png(&raw_capture.bytes, x, y, width, height)
+                                        .map_err(anyhow::Error::msg)
+                                        .context("targeted post-action screenshot crop failed")?;
+                                Ok((raw_capture, bytes, width, height))
+                            })
+                            .await?;
+                        (
+                            RawScreenshotCapture {
+                                mime_type: raw_capture.mime_type,
+                                bytes,
+                                source: raw_capture.source,
+                                width,
+                                height,
+                            },
+                            true,
+                        )
+                    }
+                    None => (raw_capture, false),
+                };
+                let prepared = crate::screenshot_impl::run_image_task(move || {
+                    prepare_screenshot_payload(raw_for_payload, options)
+                })
+                .await
+                .context("post-action screenshot resize failed")?;
+                Ok((prepared, cropped, window_label, off_screen_note))
+            }
+            .await;
+
+            match result {
+                Ok((prepared, cropped, window_title, off_screen_note)) => {
+                    let mut summary = ScreenshotSummary::from(&prepared);
+                    summary.cropped_to_window = Some(cropped);
+                    summary.window_title = window_title;
+                    observation.screenshot = Some(summary);
+                    screenshot_capture = Some(prepared);
+                    if let Some(note) = off_screen_note {
+                        notes.push(note);
+                    }
+                }
+                Err(error) => {
+                    let error = format!("{error:#}");
+                    notes.push(format!("Post-action screenshot failed: {error}"));
+                    observation.screenshot_error = Some(error);
+                }
+            }
+        } else if !cfg!(test) {
+            sleep(Duration::from_millis(120)).await;
+        }
+
+        if include_tree {
+            if resolved_window.is_none() {
+                resolved_window = if let Some(target) = target.filter(|target| target.has_target())
+                {
+                    list_windows()
+                        .await
+                        .ok()
+                        .and_then(|windows| resolve_window_target(&windows, target).ok().cloned())
+                        .or_else(|| fallback_window.cloned())
+                } else if let Some(window) = fallback_window {
+                    Some(window.clone())
+                } else {
+                    focused_window().await.ok().flatten()
+                };
+            }
+            let target_pid = resolved_window
+                .as_ref()
+                .and_then(|window| window.pid)
+                .or_else(|| target.and_then(|target| target.pid))
+                .or_else(|| {
+                    self.last_snapshot
+                        .lock()
+                        .ok()
+                        .and_then(|snapshot| snapshot.pid)
+                });
+            let candidates = accessibility_filter_candidates(resolved_window.as_ref());
+            let mut app_filter = None;
+            if let Some(pid) = target_pid {
+                if let Ok(apps) = list_accessible_apps(200).await {
+                    app_filter = select_accessibility_object_ref(&apps, pid, &candidates);
+                }
+            }
+            if app_filter.is_none() {
+                app_filter = candidates.into_iter().next();
+            }
+            let accessibility_target_requested = target.is_some_and(WindowTarget::has_target)
+                || target_pid.is_some()
+                || app_filter.is_some();
+            let (max_nodes, max_depth) = crate::atspi_tree::snapshot_limits(None, None);
+            match snapshot_accessibility_tree(
+                app_filter.as_deref(),
+                target_pid,
+                max_nodes,
+                max_depth,
+            )
+            .await
+            {
+                Ok(snapshot)
+                    if snapshot.nodes.is_empty()
+                        && !tokio::task::spawn_blocking(
+                            crate::diagnostics_impl::can_build_accessibility_tree_now,
+                        )
+                        .await
+                        .unwrap_or(false) =>
+                {
+                    self.commit_snapshot(&[], None).await;
+                    let error = "GNOME accessibility is disabled; call setup_accessibility first."
+                        .to_string();
+                    notes.push(format!("Post-action accessibility tree failed: {error}"));
+                    observation.accessibility_tree = Some(Vec::new());
+                    observation.accessibility_tree_raw_count = Some(0);
+                    observation.tree_scoped = Some(false);
+                    observation.accessibility_tree_truncated = Some(false);
+                    observation.accessibility_error = Some(error);
+                }
+                Ok(snapshot) => {
+                    let raw_count = snapshot.nodes.len();
+                    let (nodes, shell_only_note) = compact_accessibility_tree_with_note(
+                        snapshot.nodes,
+                        snapshot.scoped,
+                        snapshot.truncated,
+                    );
+                    self.commit_snapshot(&nodes, snapshot.root_pid).await;
+                    if let Some(warning) = unscoped_accessibility_tree_warning(
+                        snapshot.scoped,
+                        true,
+                        accessibility_target_requested,
+                    ) {
+                        notes.push(warning.to_string());
+                    }
+                    if let Some(note) = truncated_accessibility_tree_note(snapshot.truncated) {
+                        notes.push(note.to_string());
+                    }
+                    if let Some(note) = shell_only_note {
+                        notes.push(note.to_string());
+                    }
+                    observation.accessibility_tree = Some(nodes);
+                    observation.accessibility_tree_raw_count = Some(raw_count);
+                    observation.tree_scoped = Some(snapshot.scoped);
+                    observation.accessibility_tree_truncated = Some(snapshot.truncated);
+                }
+                Err(error) => {
+                    self.commit_snapshot(&[], None).await;
+                    let error = format!("{error:#}");
+                    notes.push(format!("Post-action accessibility tree failed: {error}"));
+                    observation.accessibility_tree = Some(Vec::new());
+                    observation.accessibility_tree_raw_count = Some(0);
+                    observation.tree_scoped = Some(false);
+                    observation.accessibility_tree_truncated = Some(false);
+                    observation.accessibility_error = Some(error);
+                }
+            }
+        }
+
+        (observation, screenshot_capture, notes)
+    }
+
+    async fn finish_action_output(
+        &self,
+        mut output: ActionOutput,
+        capture: &PostActionCaptureParams,
+        target: Option<&WindowTarget>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if !output.ok {
+            return structured_tool_result(
+                ActionToolOutput {
+                    action: output,
+                    observation: PostActionObservation::default(),
+                },
+                None,
+            );
+        }
+        let (observation, screenshot, notes) = self
+            .capture_post_action_observation(capture, target, None)
+            .await;
+        output = with_notes(output, notes);
+        structured_tool_result(
+            ActionToolOutput {
+                action: output,
+                observation,
+            },
+            screenshot,
+        )
+    }
+
+    async fn finish_activate_window_output(
+        &self,
+        output: ActivateWindowOutput,
+        capture: &PostActionCaptureParams,
+        target: &WindowTarget,
+    ) -> Result<CallToolResult, ErrorData> {
+        if !output.ok {
+            return structured_tool_result(
+                ActivateWindowToolOutput {
+                    output,
+                    observation: PostActionObservation::default(),
+                },
+                None,
+            );
+        }
+        let fallback_window = output
+            .focus
+            .as_ref()
+            .and_then(|focus| focus.focused_window.as_ref())
+            .or_else(|| output.focus.as_ref().map(|focus| &focus.requested_window));
+        let (observation, screenshot, _notes) = self
+            .capture_post_action_observation(capture, Some(target), fallback_window)
+            .await;
+        structured_tool_result(
+            ActivateWindowToolOutput {
+                output,
+                observation,
+            },
+            screenshot,
+        )
+    }
+
+    async fn finish_window_geometry_output(
+        &self,
+        mut output: WindowGeometryOutput,
+        capture: &PostActionCaptureParams,
+        target: &WindowTarget,
+    ) -> Result<CallToolResult, ErrorData> {
+        if !output.ok {
+            return structured_tool_result(
+                WindowGeometryToolOutput {
+                    output,
+                    observation: PostActionObservation::default(),
+                },
+                None,
+            );
+        }
+        let fallback_window = output.window.as_ref();
+        let (observation, screenshot, notes) = self
+            .capture_post_action_observation(capture, Some(target), fallback_window)
+            .await;
+        for note in notes {
+            if !output.message.is_empty() {
+                output.message.push(' ');
+            }
+            output.message.push_str(&note);
+        }
+        structured_tool_result(
+            WindowGeometryToolOutput {
+                output,
+                observation,
+            },
+            screenshot,
+        )
     }
 
     async fn window_crop_rect_for_capture(
@@ -6657,11 +7256,12 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             start_y: 100,
             end_x: 200,
             end_y: 200,
+            ..Default::default()
         };
         let results = [
-            backend.click(Parameters(click)).await.0,
-            backend.scroll(Parameters(scroll)).await.0,
-            backend.drag(Parameters(drag)).await.0,
+            backend.dispatch_click(click).await.0,
+            backend.dispatch_scroll(scroll).await.0,
+            backend.dispatch_drag(drag).await.0,
         ];
         for result in results {
             if mode == "x11" {
@@ -6678,7 +7278,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
         }
         let scroll: ScrollParams =
             serde_json::from_value(serde_json::json!({"direction":"down"})).unwrap();
-        let result = backend.scroll(Parameters(scroll)).await.0;
+        let result = backend.dispatch_scroll(scroll).await.0;
         assert_eq!(result.ok, mode != "wayland-portal", "{}", result.message);
     }
 
@@ -9098,12 +9698,15 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             let params: TypeTextParams =
                 serde_json::from_value(serde_json::json!({"text": text, "window_id": u64::MAX}))
                     .unwrap();
-            let Json(result) = server.type_text(Parameters(params)).await;
-            assert!(!result.ok);
+            let result = server.type_text(Parameters(params)).await.unwrap();
+            let structured = result
+                .structured_content
+                .expect("structured type_text output");
+            assert_eq!(structured["ok"], serde_json::json!(false));
+            let message = structured["message"].as_str().unwrap();
             assert!(
-                result.message.contains("Literal text was not sent: wtype"),
-                "{}",
-                result.message
+                message.contains("Literal text was not sent: wtype"),
+                "{message}"
             );
         }
     }
@@ -9581,6 +10184,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             wm_class: None,
             window_title: None,
             relative: Some(true),
+            ..Default::default()
         };
         apply_window_relative_scroll_coordinates(&mut params, (100, 200, 800, 600)).unwrap();
         assert_eq!(params.x, Some(110));
@@ -9601,6 +10205,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             wm_class: None,
             window_title: None,
             relative: None,
+            ..Default::default()
         };
         apply_window_center_scroll_point(&mut params, (100, 200, 800, 600)).unwrap();
         assert_eq!(params.x, Some(500));
@@ -9621,6 +10226,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             wm_class: None,
             window_title: None,
             relative: None,
+            ..Default::default()
         };
         let error = apply_window_center_scroll_point(&mut params, (0, 0, 0, 0)).unwrap_err();
         assert!(error.contains("pass x/y explicitly"));
@@ -9642,6 +10248,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             wm_class: None,
             window_title: None,
             relative: Some(true),
+            ..Default::default()
         };
         assert!(
             apply_window_relative_scroll_coordinates(&mut params, (100, 200, 800, 600)).is_err()
@@ -10035,5 +10642,318 @@ mod node_target_scope_tests {
         backend.cache_snapshot(&[], Some(11));
         backend.clear_cached_nodes();
         assert_eq!(backend.last_snapshot.lock().unwrap().pid, None);
+    }
+}
+
+#[cfg(test)]
+mod post_action_capture_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn solid_png(width: u32, height: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(width, height, image::Rgba([32, 128, 192, 255]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn screenshot_after_deserializes_bool_and_scope_strings() {
+        let empty: PostActionCaptureParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(empty.screenshot_scope(), None);
+        assert_eq!(empty.include_tree, None);
+
+        let disabled: PostActionCaptureParams =
+            serde_json::from_value(serde_json::json!({"screenshot_after": false})).unwrap();
+        assert_eq!(disabled.screenshot_scope(), None);
+
+        let enabled: PostActionCaptureParams =
+            serde_json::from_value(serde_json::json!({"screenshot_after": true})).unwrap();
+        assert_eq!(
+            enabled.screenshot_scope(),
+            Some(ScreenshotAfterScope::Screen)
+        );
+
+        let screen: PostActionCaptureParams =
+            serde_json::from_value(serde_json::json!({"screenshot_after": "screen"})).unwrap();
+        assert_eq!(
+            screen.screenshot_scope(),
+            Some(ScreenshotAfterScope::Screen)
+        );
+
+        let window: PostActionCaptureParams =
+            serde_json::from_value(serde_json::json!({"screenshot_after": "window"})).unwrap();
+        assert_eq!(
+            window.screenshot_scope(),
+            Some(ScreenshotAfterScope::Window)
+        );
+
+        let tree_only: PostActionCaptureParams =
+            serde_json::from_value(serde_json::json!({"include_tree": true})).unwrap();
+        assert_eq!(tree_only.screenshot_scope(), None);
+        assert_eq!(tree_only.include_tree, Some(true));
+
+        assert!(serde_json::from_value::<PostActionCaptureParams>(
+            serde_json::json!({"screenshot_after": "invalid"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn action_tool_output_omits_observation_fields_when_not_requested() {
+        let output = ActionToolOutput {
+            action: action_result("click", Ok(Vec::new()), None),
+            observation: PostActionObservation::default(),
+        };
+        let value = serde_json::to_value(output).unwrap();
+        let object = value.as_object().unwrap();
+        for key in [
+            "screenshot",
+            "screenshot_error",
+            "accessibility_tree",
+            "accessibility_tree_raw_count",
+            "tree_scoped",
+            "accessibility_tree_truncated",
+            "accessibility_error",
+        ] {
+            assert!(!object.contains_key(key), "unexpected key {key} in {value}");
+        }
+    }
+
+    #[test]
+    fn mutating_tool_schemas_expose_post_action_capture_parameters() {
+        let router = ComputerUseLinux::default().mcp_tool_router();
+        let tools = router.list_all();
+        for name in [
+            "activate_window",
+            "move_window",
+            "resize_window",
+            "click",
+            "drag",
+            "scroll",
+            "press_key",
+            "type_text",
+            "perform_action",
+            "set_value",
+        ] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("missing tool {name}"));
+            let value = serde_json::to_value(tool).unwrap();
+            let properties = value["inputSchema"]["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{name} inputSchema.properties is not an object"));
+            for prop in [
+                "screenshot_after",
+                "include_tree",
+                "format",
+                "quality",
+                "scale",
+                "max_width",
+                "max_height",
+                "max_bytes",
+            ] {
+                assert!(
+                    properties.contains_key(prop),
+                    "{name} is missing post-action capture property {prop}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn post_action_capture_executes_after_action_and_preserves_action_ok_on_capture_failure() {
+        let dir = std::env::temp_dir().join(format!(
+            "cul-post-action-capture-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+
+        let sample_png = dir.join("sample.png");
+        std::fs::write(&sample_png, solid_png(64, 48)).unwrap();
+        let log_path = dir.join("events.log");
+
+        let xdotool = dir.join("xdotool");
+        std::fs::write(
+            &xdotool,
+            "#!/bin/sh\nprintf 'xdotool\\n' >> \"$CUL_POST_ACTION_LOG\"\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&xdotool, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let gnome_screenshot = dir.join("gnome-screenshot");
+        std::fs::write(
+            &gnome_screenshot,
+            r#"#!/bin/sh
+printf 'gnome-screenshot\n' >> "$CUL_POST_ACTION_LOG"
+if [ "${CUL_POST_ACTION_FAIL_SCREENSHOT:-0}" = "1" ]; then
+  echo "simulated capture failure" >&2
+  exit 1
+fi
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-f" ] && [ "$#" -ge 2 ]; then
+    /bin/cp "$CUL_POST_ACTION_PNG" "$2"
+    exit 0
+  fi
+  shift
+done
+exit 1
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&gnome_screenshot, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "post_action_capture_tests::post_action_capture_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PATH", &dir)
+            .env("HOME", &dir)
+            .env("XDG_RUNTIME_DIR", &dir)
+            .env("DISPLAY", ":9876")
+            .env("WAYLAND_DISPLAY", "")
+            .env("XDG_SESSION_TYPE", "x11")
+            .env("CU_DISABLE_ABS_POINTER", "1")
+            .env("COMPUTER_USE_LINUX_SCREENSHOT_BACKEND", "gnome-screenshot")
+            .env("CUL_POST_ACTION_CHILD", "1")
+            .env("CUL_POST_ACTION_LOG", &log_path)
+            .env("CUL_POST_ACTION_PNG", &sample_png)
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}/no-bus", dir.display()),
+            );
+        for key in [
+            "DESKTOP_SESSION",
+            "HYPRLAND_INSTANCE_SIGNATURE",
+            "XAUTHORITY",
+            "XDG_SESSION_DESKTOP",
+            "XDG_CURRENT_DESKTOP",
+        ] {
+            command.env(key, "post-action-test");
+        }
+
+        let output = crate::command_runner::output_blocking_with_timeout(
+            &mut command,
+            "post-action capture child",
+            Duration::from_secs(15),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated environment subprocess; invoked by post_action_capture_executes_after_action_and_preserves_action_ok_on_capture_failure"]
+    async fn post_action_capture_child() {
+        assert_eq!(std::env::var("CUL_POST_ACTION_CHILD").as_deref(), Ok("1"));
+        let log_path = std::path::PathBuf::from(std::env::var("CUL_POST_ACTION_LOG").unwrap());
+        let server = ComputerUseLinux::default();
+
+        // 1. Successful click + post-action JPEG screenshot.
+        let click_params: ClickParams = serde_json::from_value(serde_json::json!({
+            "x": 120,
+            "y": 240,
+            "screenshot_after": true,
+            "format": "jpeg",
+            "quality": 75
+        }))
+        .unwrap();
+        let result = server.click(Parameters(click_params)).await.unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(result.content.len(), 2);
+        let image = result.content[0]
+            .as_image()
+            .expect("first content block must be the post-action image");
+        assert_eq!(image.mime_type, "image/jpeg");
+        assert!(!image.data.is_empty());
+
+        let structured = result.structured_content.expect("structured content");
+        assert_eq!(structured["ok"], serde_json::json!(true));
+        assert_eq!(
+            structured["screenshot"]["mime_type"],
+            serde_json::json!("image/jpeg")
+        );
+        assert_eq!(
+            structured["screenshot"]["cropped_to_window"],
+            serde_json::json!(false)
+        );
+        assert_eq!(structured["screenshot"]["width"], serde_json::json!(64));
+        assert_eq!(structured["screenshot"]["height"], serde_json::json!(48));
+
+        let events = std::fs::read_to_string(&log_path).unwrap();
+        assert_eq!(
+            events, "xdotool\ngnome-screenshot\n",
+            "action must execute strictly before post-action screenshot capture"
+        );
+
+        // 2. Screenshot failure after a successful action must keep ok=true.
+        std::fs::write(&log_path, "").unwrap();
+        std::env::set_var("CUL_POST_ACTION_FAIL_SCREENSHOT", "1");
+        let click_params: ClickParams = serde_json::from_value(serde_json::json!({
+            "x": 120,
+            "y": 240,
+            "screenshot_after": "screen"
+        }))
+        .unwrap();
+        let result = server.click(Parameters(click_params)).await.unwrap();
+        std::env::remove_var("CUL_POST_ACTION_FAIL_SCREENSHOT");
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(result.content.len(), 1);
+        let structured = result.structured_content.expect("structured content");
+        assert_eq!(structured["ok"], serde_json::json!(true));
+        assert!(structured.get("screenshot").is_none());
+        assert!(structured["screenshot_error"]
+            .as_str()
+            .unwrap()
+            .contains("gnome-screenshot"));
+        assert!(structured["message"]
+            .as_str()
+            .unwrap()
+            .contains("Post-action screenshot failed:"));
+
+        // 3. Failed action (click_count: 0) must not trigger post-action screenshot.
+        std::fs::write(&log_path, "").unwrap();
+        let bad_click: ClickParams = serde_json::from_value(serde_json::json!({
+            "x": 120,
+            "y": 240,
+            "click_count": 0,
+            "screenshot_after": true
+        }))
+        .unwrap();
+        let result = server.click(Parameters(bad_click)).await.unwrap();
+        let structured = result.structured_content.expect("structured content");
+        assert_eq!(structured["ok"], serde_json::json!(false));
+        assert!(structured.get("screenshot").is_none());
+        assert!(structured.get("screenshot_error").is_none());
+        let events = std::fs::read_to_string(&log_path).unwrap();
+        assert!(
+            events.is_empty(),
+            "failed action must not run xdotool or gnome-screenshot: {events}"
+        );
     }
 }

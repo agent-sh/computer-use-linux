@@ -94,6 +94,14 @@ On GNOME, a read-only keymap preflight rejects the whole string before input if 
 - `activate_window` — focus a window by `window_id`, `pid`, `app_id`, `wm_class`, `title`, or terminal selectors
 - `move_window` / `resize_window` — reposition or resize a window in desktop coordinates (GNOME Shell extension backend); useful to recover windows that are partially off-screen
 
+All mutating tools (`click`, `drag`, `scroll`, `press_key`, `type_text`, `perform_action`, `set_value`, `activate_window`, `move_window`, and `resize_window`) accept optional post-action observation parameters so an action and its verification can complete in one MCP round trip:
+
+- `screenshot_after: true | "screen" | "window" | false` — capture after the action is dispatched and the indicator overlay is hidden (`true` or `"screen"` for full desktop, `"window"` cropped to the action's target window or the focused window when untargeted)
+- `format`, `quality`, `scale`, `max_width`, `max_height`, `max_bytes` — same screenshot payload controls as `screenshot` and `get_app_state`
+- `include_tree: true` — include a fresh compacted AT-SPI accessibility tree and update cached `element_index` values
+
+When `screenshot_after` succeeds, the image is returned as the first MCP `image` content block alongside the JSON action summary and `screenshot` metadata. If the action succeeds (`ok: true`) and only the post-action screenshot or tree capture fails, `ok` remains `true` and the error is reported in `screenshot_error` / `accessibility_error` and appended to `message`.
+
 **On-screen indicator**
 
 While an agent acts, the server drives `computer-use-linux-indicator`, a click-through overlay that shows what it is doing: a software cursor tinted per agent that glides to each coordinate `click`, `drag`, or `scroll` target and ripples on click (AT-SPI actions such as `perform_action`, `set_value`, and element clicks show in the pill without moving it, since no pointer moves); keycaps for `press_key` and a typing line for `type_text`; a glow along every screen edge; and a status pill such as *Claude is using your computer · click*. Pointer actions wait 350 ms so the cursor lands before the real input. While `screenshot` or `get_app_state` captures the screen, the overlay draws nothing, so agents never see it: not their own, not one shown for another agent, and not one that another agent starts mid-capture. This holds with `COMPUTER_USE_LINUX_INDICATOR=0` too, which only stops a server from showing its own actions. The capture waits for the compositor only when something was on screen. The agent name comes from the MCP client's `clientInfo`.

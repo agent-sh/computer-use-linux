@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.18] - 2026-10-17
+
+### Added
+- Support opt-in post-action observation (`screenshot_after: true | "screen" | "window"`, `format`, `quality`, `scale`, `max_width`, `max_height`, `max_bytes`, and `include_tree: true`) on mutating tools (`click`, `drag`, `scroll`, `press_key`, `type_text`, `perform_action`, `set_value`, `activate_window`, `move_window`, and `resize_window`) so an action and its verification can complete in one MCP round trip. (#259)
+
 ## [0.7.17] - 2026-10-16
 
 ### Fixed
@@ -819,7 +824,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.17...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.18...HEAD
+[0.7.18]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.17...v0.7.18
 [0.7.17]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.16...v0.7.17
 [0.7.16]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.15...v0.7.16
 [0.7.15]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.14...v0.7.15

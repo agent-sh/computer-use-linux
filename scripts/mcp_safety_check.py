@@ -89,6 +89,30 @@ SEMANTIC_SELECTORS = {
 
 OBJECT_REF_SELECTORS = SEMANTIC_SELECTORS | {"element_identifier"}
 
+POST_ACTION_CAPTURE_TOOLS = {
+    "activate_window",
+    "move_window",
+    "resize_window",
+    "click",
+    "drag",
+    "scroll",
+    "press_key",
+    "type_text",
+    "perform_action",
+    "set_value",
+}
+
+POST_ACTION_CAPTURE_PROPS = {
+    "screenshot_after",
+    "include_tree",
+    "format",
+    "quality",
+    "scale",
+    "max_width",
+    "max_height",
+    "max_bytes",
+}
+
 READ_ONLY_TOOLS = {
     "doctor",
     "list_apps",
@@ -434,6 +458,8 @@ def main() -> int:
                 raise AssertionError(f"{name} is missing semantic element selectors: {sorted(SEMANTIC_SELECTORS - props)}")
             if name in {"perform_action", "set_value"} and not OBJECT_REF_SELECTORS <= props:
                 raise AssertionError(f"{name} is missing object/semantic element selectors: {sorted(OBJECT_REF_SELECTORS - props)}")
+            if name in POST_ACTION_CAPTURE_TOOLS and not POST_ACTION_CAPTURE_PROPS <= props:
+                raise AssertionError(f"{name} is missing post-action capture parameters: {sorted(POST_ACTION_CAPTURE_PROPS - props)}")
 
         doctor = client.request("tools/call", {"name": "doctor", "arguments": {}})["result"]
         content = doctor.get("content") or []

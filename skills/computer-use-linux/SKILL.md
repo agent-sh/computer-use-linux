@@ -142,7 +142,7 @@ Pi native tools skip this MCP `command` config; see [Pi setup](references/pi-set
 7. Prefer semantic targeting from `get_app_state`: use element indices or role/name/text/states selectors.
 8. Use coordinates only when the UI surface has no useful accessibility tree.
 9. For text input, prefer `type_text` with a target selector (`window_id`, `pid`, `app_id`, `wm_class`, `title`, `tty`, `terminal_pid`, `terminal_command`, or `terminal_cwd`) rather than relying on current focus.
-10. After mutating actions, re-check state with `get_app_state`, `focused_window`, or an app-specific readback.
+10. After mutating actions (`click`, `drag`, `scroll`, `press_key`, `type_text`, `perform_action`, `set_value`, `activate_window`, `move_window`, `resize_window`), either pass `screenshot_after: true | "screen" | "window"` (with optional `format`, `quality`, `scale`, `max_width`, `max_height`, `max_bytes`) and/or `include_tree: true` on the action call itself to observe the result in the same tool call, or re-check state with `get_app_state`, `focused_window`, or an app-specific readback.
 
 On Hyprland, `type_text` passes one literal wtype argument after `--` for a
 classified nonsecret field, avoiding stdin keymap-refresh corruption in Electron.

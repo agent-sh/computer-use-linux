@@ -7,9 +7,9 @@ export interface GeneratedMcpToolDefinition {
 	annotations: Record<string, unknown>;
 }
 
-export const GENERATED_SERVER_VERSION = "0.7.17";
-export const GENERATED_TOOL_CATALOG_HASH = "17febb6d652f7b89b2dacdd002d09fb0f5d97ce801943cdf9f4e661c47eb535b";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "eba50023d71fdded440f0cf6ed15abda711c640c8d5708735624a0ae22f2bb0a";
+export const GENERATED_SERVER_VERSION = "0.7.18";
+export const GENERATED_TOOL_CATALOG_HASH = "5650b8c330cece41b259f0830ce8106b5dd4041ed712a64148a41756a390fb68";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "ac5ffb305c0ae241845e2f01b0068254dad4e910a5ab420d1029e6c1031fa138";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -19,14 +19,65 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Focus a Linux desktop window by window_id, pid, app_id, wm_class, title, or terminal selectors when the compositor permits it.",
+    "description": "Focus a Linux desktop window by window_id, pid, app_id, wm_class, title, or terminal selectors when the compositor permits it. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
+      "$defs": {
+        "ScreenshotOutputFormat": {
+          "enum": [
+            "png",
+            "jpeg"
+          ],
+          "type": "string"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "app_id": {
           "default": null,
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScreenshotOutputFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
+        },
+        "include_tree": {
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "max_bytes": {
+          "description": "Maximum returned post-action screenshot image bytes before base64 (default 2 MiB, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_height": {
+          "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_width": {
+          "description": "Maximum returned post-action screenshot width in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
             "null"
           ]
         },
@@ -37,6 +88,41 @@ export const GENERATED_MCP_TOOLS =
             "integer",
             "null"
           ]
+        },
+        "quality": {
+          "description": "JPEG quality from 1 to 95 (default 80) for post-action screenshots. Ignored for png.",
+          "maximum": 95,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scale": {
+          "description": "Additional downscale factor from 0.0 to 1.0, applied before max dimensions.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "screenshot_after": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "window",
+                "screen"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
         },
         "terminal_command": {
           "default": null,
@@ -101,8 +187,17 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. Plain left activation prefers a native AT-SPI click/press/toggle action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics.",
+    "description": "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. Plain left activation prefers a native AT-SPI click/press/toggle action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
+      "$defs": {
+        "ScreenshotOutputFormat": {
+          "enum": [
+            "png",
+            "jpeg"
+          ],
+          "type": "string"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "app_id": {
@@ -135,6 +230,48 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScreenshotOutputFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
+        },
+        "include_tree": {
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "max_bytes": {
+          "description": "Maximum returned post-action screenshot image bytes before base64 (default 2 MiB, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_height": {
+          "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_width": {
+          "description": "Maximum returned post-action screenshot width in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "name": {
           "default": null,
           "type": [
@@ -145,6 +282,15 @@ export const GENERATED_MCP_TOOLS =
         "pid": {
           "default": null,
           "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "quality": {
+          "description": "JPEG quality from 1 to 95 (default 80) for post-action screenshots. Ignored for png.",
+          "maximum": 95,
+          "minimum": 1,
           "type": [
             "integer",
             "null"
@@ -164,6 +310,32 @@ export const GENERATED_MCP_TOOLS =
             "string",
             "null"
           ]
+        },
+        "scale": {
+          "description": "Additional downscale factor from 0.0 to 1.0, applied before max dimensions.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "screenshot_after": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "window",
+                "screen"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
         },
         "states": {
           "default": [],
@@ -243,8 +415,17 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Drag from one point to another using pixel coordinates.",
+    "description": "Drag from one point to another using pixel coordinates. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
+      "$defs": {
+        "ScreenshotOutputFormat": {
+          "enum": [
+            "png",
+            "jpeg"
+          ],
+          "type": "string"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "end_x": {
@@ -254,6 +435,83 @@ export const GENERATED_MCP_TOOLS =
         "end_y": {
           "format": "int32",
           "type": "integer"
+        },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScreenshotOutputFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
+        },
+        "include_tree": {
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "max_bytes": {
+          "description": "Maximum returned post-action screenshot image bytes before base64 (default 2 MiB, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_height": {
+          "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_width": {
+          "description": "Maximum returned post-action screenshot width in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "quality": {
+          "description": "JPEG quality from 1 to 95 (default 80) for post-action screenshots. Ignored for png.",
+          "maximum": 95,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scale": {
+          "description": "Additional downscale factor from 0.0 to 1.0, applied before max dimensions.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "screenshot_after": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "window",
+                "screen"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
         },
         "start_x": {
           "format": "int32",
@@ -523,14 +781,65 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Move a window to a new desktop position (frame top-left in desktop coordinates). Useful to recover windows that are partially off-screen. Works through the computer-use-linux GNOME Shell extension or a generic X11/EWMH window manager (wmctrl).",
+    "description": "Move a window to a new desktop position (frame top-left in desktop coordinates). Useful to recover windows that are partially off-screen. Works through the computer-use-linux GNOME Shell extension or a generic X11/EWMH window manager (wmctrl). Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
+      "$defs": {
+        "ScreenshotOutputFormat": {
+          "enum": [
+            "png",
+            "jpeg"
+          ],
+          "type": "string"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "app_id": {
           "default": null,
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScreenshotOutputFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
+        },
+        "include_tree": {
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "max_bytes": {
+          "description": "Maximum returned post-action screenshot image bytes before base64 (default 2 MiB, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_height": {
+          "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_width": {
+          "description": "Maximum returned post-action screenshot width in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
             "null"
           ]
         },
@@ -541,6 +850,41 @@ export const GENERATED_MCP_TOOLS =
             "integer",
             "null"
           ]
+        },
+        "quality": {
+          "description": "JPEG quality from 1 to 95 (default 80) for post-action screenshots. Ignored for png.",
+          "maximum": 95,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scale": {
+          "description": "Additional downscale factor from 0.0 to 1.0, applied before max dimensions.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "screenshot_after": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "window",
+                "screen"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
         },
         "terminal_command": {
           "default": null,
@@ -619,8 +963,17 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Invoke an accessibility action exposed by an element selected by index, identifier, or semantic selector. Defaults to the primary action unless action is provided.",
+    "description": "Invoke an accessibility action exposed by an element selected by index, identifier, or semantic selector. Defaults to the primary action unless action is provided. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
+      "$defs": {
+        "ScreenshotOutputFormat": {
+          "enum": [
+            "png",
+            "jpeg"
+          ],
+          "type": "string"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "action": {
@@ -645,10 +998,61 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScreenshotOutputFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
+        },
+        "include_tree": {
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "max_bytes": {
+          "description": "Maximum returned post-action screenshot image bytes before base64 (default 2 MiB, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_height": {
+          "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_width": {
+          "description": "Maximum returned post-action screenshot width in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "name": {
           "default": null,
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "quality": {
+          "description": "JPEG quality from 1 to 95 (default 80) for post-action screenshots. Ignored for png.",
+          "maximum": 95,
+          "minimum": 1,
+          "type": [
+            "integer",
             "null"
           ]
         },
@@ -658,6 +1062,32 @@ export const GENERATED_MCP_TOOLS =
             "string",
             "null"
           ]
+        },
+        "scale": {
+          "description": "Additional downscale factor from 0.0 to 1.0, applied before max dimensions.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "screenshot_after": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "window",
+                "screen"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
         },
         "states": {
           "default": [],
@@ -685,8 +1115,17 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app.",
+    "description": "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
+      "$defs": {
+        "ScreenshotOutputFormat": {
+          "enum": [
+            "png",
+            "jpeg"
+          ],
+          "type": "string"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "app_id": {
@@ -696,8 +1135,50 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScreenshotOutputFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
+        },
+        "include_tree": {
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "key": {
           "type": "string"
+        },
+        "max_bytes": {
+          "description": "Maximum returned post-action screenshot image bytes before base64 (default 2 MiB, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_height": {
+          "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_width": {
+          "description": "Maximum returned post-action screenshot width in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "pid": {
           "default": null,
@@ -706,6 +1187,41 @@ export const GENERATED_MCP_TOOLS =
             "integer",
             "null"
           ]
+        },
+        "quality": {
+          "description": "JPEG quality from 1 to 95 (default 80) for post-action screenshots. Ignored for png.",
+          "maximum": 95,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scale": {
+          "description": "Additional downscale factor from 0.0 to 1.0, applied before max dimensions.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "screenshot_after": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "window",
+                "screen"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
         },
         "terminal_command": {
           "default": null,
@@ -773,8 +1289,17 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Resize a window to a new frame width/height in desktop pixels, unmaximizing it first if needed. Useful to fit a window fully on-screen. Works through the computer-use-linux GNOME Shell extension or a generic X11/EWMH window manager (wmctrl).",
+    "description": "Resize a window to a new frame width/height in desktop pixels, unmaximizing it first if needed. Useful to fit a window fully on-screen. Works through the computer-use-linux GNOME Shell extension or a generic X11/EWMH window manager (wmctrl). Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
+      "$defs": {
+        "ScreenshotOutputFormat": {
+          "enum": [
+            "png",
+            "jpeg"
+          ],
+          "type": "string"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "app_id": {
@@ -784,10 +1309,52 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScreenshotOutputFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
+        },
         "height": {
           "description": "New frame height in desktop pixels.",
           "format": "int32",
           "type": "integer"
+        },
+        "include_tree": {
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "max_bytes": {
+          "description": "Maximum returned post-action screenshot image bytes before base64 (default 2 MiB, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_height": {
+          "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_width": {
+          "description": "Maximum returned post-action screenshot width in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "pid": {
           "default": null,
@@ -796,6 +1363,41 @@ export const GENERATED_MCP_TOOLS =
             "integer",
             "null"
           ]
+        },
+        "quality": {
+          "description": "JPEG quality from 1 to 95 (default 80) for post-action screenshots. Ignored for png.",
+          "maximum": 95,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scale": {
+          "description": "Additional downscale factor from 0.0 to 1.0, applied before max dimensions.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "screenshot_after": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "window",
+                "screen"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
         },
         "terminal_command": {
           "default": null,
@@ -1005,8 +1607,17 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Scroll an element in a direction by a number of pages. With a window target and no x/y/element_index, scrolls at the centre of the targeted window.",
+    "description": "Scroll an element in a direction by a number of pages. With a window target and no x/y/element_index, scrolls at the centre of the targeted window. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
+      "$defs": {
+        "ScreenshotOutputFormat": {
+          "enum": [
+            "png",
+            "jpeg"
+          ],
+          "type": "string"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "app_id": {
@@ -1021,6 +1632,48 @@ export const GENERATED_MCP_TOOLS =
         },
         "element_index": {
           "default": null,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScreenshotOutputFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
+        },
+        "include_tree": {
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "max_bytes": {
+          "description": "Maximum returned post-action screenshot image bytes before base64 (default 2 MiB, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_height": {
+          "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_width": {
+          "description": "Maximum returned post-action screenshot width in pixels (default 1920, hard-capped).",
           "minimum": 0,
           "type": [
             "integer",
@@ -1045,6 +1698,15 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "quality": {
+          "description": "JPEG quality from 1 to 95 (default 80) for post-action screenshots. Ignored for png.",
+          "maximum": 95,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "relative": {
           "default": null,
           "description": "Interpret `x`/`y` from the clipped window screenshot crop origin, in\ncoordinate pixels before preview resizing. Divide preview pixels by its\nscale first. This is not a toolkit widget or raw GDK surface origin.\nRequires a window target; missing targets are rejected.",
@@ -1052,6 +1714,32 @@ export const GENERATED_MCP_TOOLS =
             "boolean",
             "null"
           ]
+        },
+        "scale": {
+          "description": "Additional downscale factor from 0.0 to 1.0, applied before max dimensions.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "screenshot_after": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "window",
+                "screen"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
         },
         "window_id": {
           "default": null,
@@ -1106,8 +1794,17 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Set the value of a settable accessibility element selected by index, identifier, or semantic selector.",
+    "description": "Set the value of a settable accessibility element selected by index, identifier, or semantic selector. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
+      "$defs": {
+        "ScreenshotOutputFormat": {
+          "enum": [
+            "png",
+            "jpeg"
+          ],
+          "type": "string"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "element_identifier": {
@@ -1125,10 +1822,61 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScreenshotOutputFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
+        },
+        "include_tree": {
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "max_bytes": {
+          "description": "Maximum returned post-action screenshot image bytes before base64 (default 2 MiB, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_height": {
+          "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_width": {
+          "description": "Maximum returned post-action screenshot width in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "name": {
           "default": null,
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "quality": {
+          "description": "JPEG quality from 1 to 95 (default 80) for post-action screenshots. Ignored for png.",
+          "maximum": 95,
+          "minimum": 1,
+          "type": [
+            "integer",
             "null"
           ]
         },
@@ -1138,6 +1886,32 @@ export const GENERATED_MCP_TOOLS =
             "string",
             "null"
           ]
+        },
+        "scale": {
+          "description": "Additional downscale factor from 0.0 to 1.0, applied before max dimensions.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "screenshot_after": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "window",
+                "screen"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
         },
         "states": {
           "default": [],
@@ -1199,14 +1973,65 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Success confirms dispatch, not field-content verification; re-observe the target before retrying. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators; Hyprland rejects confirmed password fields; ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call.",
+    "description": "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Success confirms dispatch, not field-content verification; re-observe the target before retrying. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators; Hyprland rejects confirmed password fields; ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
+      "$defs": {
+        "ScreenshotOutputFormat": {
+          "enum": [
+            "png",
+            "jpeg"
+          ],
+          "type": "string"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "app_id": {
           "default": null,
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScreenshotOutputFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
+        },
+        "include_tree": {
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "max_bytes": {
+          "description": "Maximum returned post-action screenshot image bytes before base64 (default 2 MiB, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_height": {
+          "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_width": {
+          "description": "Maximum returned post-action screenshot width in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
             "null"
           ]
         },
@@ -1217,6 +2042,41 @@ export const GENERATED_MCP_TOOLS =
             "integer",
             "null"
           ]
+        },
+        "quality": {
+          "description": "JPEG quality from 1 to 95 (default 80) for post-action screenshots. Ignored for png.",
+          "maximum": 95,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scale": {
+          "description": "Additional downscale factor from 0.0 to 1.0, applied before max dimensions.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "screenshot_after": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "enum": [
+                "window",
+                "screen"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
         },
         "terminal_command": {
           "default": null,
