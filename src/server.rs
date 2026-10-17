@@ -2432,7 +2432,8 @@ pub async fn serve_mcp() -> Result<()> {
     let server = ComputerUseLinux::default();
     let indicator = Arc::clone(&server.indicator);
     let running = server.serve(rmcp::transport::stdio()).await?;
-    // The handshake is done, so the peer knows the client's name.
+    // Legacy initialization supplies the client name through the peer.
+    // Discovery-only hosts use the indicator's configured name or Agent fallback.
     indicator.attach(running.peer().clone());
     running.waiting().await?;
     Ok(())
