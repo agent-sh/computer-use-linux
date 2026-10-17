@@ -2644,6 +2644,9 @@ struct ActivateWindowOutput {
 struct ActivateWindowToolOutput {
     #[serde(flatten)]
     output: ActivateWindowOutput,
+    /// Post-action observation notes (off-screen warnings, tree warnings, or capture errors) when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
     #[serde(flatten)]
     observation: PostActionObservation,
 }
@@ -3907,6 +3910,7 @@ impl ComputerUseLinux {
             return structured_tool_result(
                 ActivateWindowToolOutput {
                     output,
+                    message: None,
                     observation: PostActionObservation::default(),
                 },
                 None,
@@ -3917,12 +3921,14 @@ impl ComputerUseLinux {
             .as_ref()
             .and_then(|focus| focus.focused_window.as_ref())
             .or_else(|| output.focus.as_ref().map(|focus| &focus.requested_window));
-        let (observation, screenshot, _notes) = self
+        let (observation, screenshot, notes) = self
             .capture_post_action_observation(capture, Some(target), fallback_window)
             .await;
+        let message = (!notes.is_empty()).then(|| notes.join(" "));
         structured_tool_result(
             ActivateWindowToolOutput {
                 output,
+                message,
                 observation,
             },
             screenshot,
@@ -10955,5 +10961,35 @@ exit 1
             events.is_empty(),
             "failed action must not run xdotool or gnome-screenshot: {events}"
         );
+
+        // 4. activate_window preserves post-action observation notes in message.
+        std::env::set_var("CUL_POST_ACTION_FAIL_SCREENSHOT", "1");
+        let activate_capture: PostActionCaptureParams =
+            serde_json::from_value(serde_json::json!({"screenshot_after": "screen"})).unwrap();
+        let activate_result = server
+            .finish_activate_window_output(
+                ActivateWindowOutput {
+                    ok: true,
+                    implemented: true,
+                    backend: "test".to_string(),
+                    focus: None,
+                    error: None,
+                    permissions_hint: None,
+                    received: None,
+                },
+                &activate_capture,
+                &WindowTarget::default(),
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("CUL_POST_ACTION_FAIL_SCREENSHOT");
+        let activate_structured = activate_result
+            .structured_content
+            .expect("structured activate_window content");
+        assert_eq!(activate_structured["ok"], serde_json::json!(true));
+        assert!(activate_structured["message"]
+            .as_str()
+            .unwrap()
+            .contains("Post-action screenshot failed:"));
     }
 }

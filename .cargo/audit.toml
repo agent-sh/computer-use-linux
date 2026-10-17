@@ -13,4 +13,13 @@ ignore = [
     # wayland-scanner && cargo tree -i quick-xml`).
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+    # RUSTSEC-2026-0370 / RUSTSEC-2026-0371 / RUSTSEC-2026-0372: zvariant,
+    # zbus_names, and zvariant_derive 5.x/4.x unmaintained notices after those
+    # crates were folded into zbus 6.0.0. atspi (including 0.30.0) still
+    # depends on zbus 5.x and re-exports zbus 5 types across our AT-SPI boundary.
+    # Unignore when atspi releases a version targeting zbus >= 6.0
+    # (https://github.com/odilia-app/atspi — check `cargo info atspi`).
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
