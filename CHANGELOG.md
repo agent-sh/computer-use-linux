@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.20] - 2026-10-18
+
 ### Fixed
 
 - Warn after X11 xdotool text dispatch that non-US or changing XKB layouts can silently substitute symbols. Require inspecting the text before submitting it. Correct the post-action test subprocess selector so its assertions execute. (#267)
@@ -834,7 +836,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.19...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.20...HEAD
+[0.7.20]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.19...v0.7.20
 [0.7.19]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.18...v0.7.19
 [0.7.18]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.17...v0.7.18
 [0.7.17]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.16...v0.7.17

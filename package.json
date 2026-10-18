@@ -1,6 +1,6 @@
 {
   "name": "@agent-sh/computer-use-linux",
-  "version": "0.7.19",
+  "version": "0.7.20",
   "description": "Native Linux desktop control for AI agents (MCP server, Pi tools, and CLI): semantic AT-SPI accessibility trees, screenshots, compositor window targeting, Wayland/X11 input, and an on-screen activity indicator.",
   "license": "MIT",
   "type": "commonjs",
