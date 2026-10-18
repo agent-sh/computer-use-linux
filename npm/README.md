@@ -156,6 +156,7 @@ does not yet forward the flag or include the tool in its catalog.
   screenshot crop origin and divide preview coordinates by screenshot `scale`.
   Do not use widget-local or raw GDK surface coordinates. A window target is
   required.
+- **X11 layout risk**: xdotool/XTEST can silently substitute symbols under non-US XKB layouts (reported with Brazilian `br`/ABNT2) or changing keymap state, even with `ok: true`. Successful xdotool text dispatches include a layout warning. Inspect the actual text before pressing Enter, submitting it, or treating it as delivered. Use `include_tree: true` when AT-SPI exposes the text, or `screenshot_after: true`; neither automatically compares the field with the request. Do not retry blindly.
 - **X11 text input**: X11 text input sends LF and CRLF line endings as Return. Focused terminals
   accept keyboard input even when AT-SPI does not expose EditableText. Focus
   feedback describes the target; re-observe its contents to confirm input.

@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.19";
-export const GENERATED_TOOL_CATALOG_HASH = "c9d694bf603f206e8be787bc94349655364144950524b79b1eb39f92156b1967";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "098bc2d2ba813699c82980971519bff75bd5cac71156b61488ed94fcbc180fce";
+export const GENERATED_TOOL_CATALOG_HASH = "b9a6ef2736cd165b97982ec6ccf1e6cfb47712f0d4a8ae778ecac47e211b15ec";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "113fc01364844db492475ec7ad00f1d03fe8e2d7acedc8a0aa3b48d245f99105";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -1973,7 +1973,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Success confirms dispatch, not field-content verification; re-observe the target before retrying. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators; Hyprland rejects confirmed password fields; ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Success confirms dispatch, not field-content verification; re-observe the target before retrying. X11 xdotool can silently substitute symbols under non-US or changing XKB layouts; inspect the text before pressing Enter or submitting it. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators; Hyprland rejects confirmed password fields; ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {

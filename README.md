@@ -112,6 +112,8 @@ and measure from its clipped screenshot crop origin. Divide preview `x` and
 GDK surface or widget-local coordinates; decorations and clipping can change
 the origin. A missing window target is rejected.
 
+**X11 text fidelity:** `xdotool`/XTEST can silently substitute symbols under non-US XKB layouts (reported with Brazilian `br`/ABNT2) or changing keymap state, even when `type_text` returns `ok: true`. Every successful xdotool text dispatch includes a layout warning. Re-observe the actual text before pressing Enter, submitting it, or treating it as delivered. Use `include_tree: true` for AT-SPI readback when the application exposes the text, or `screenshot_after: true` to inspect it. These observations do not automatically compare the field to the requested text. Do not retry blindly.
+
 Targeted `press_key`/`type_text` results append focused-element feedback from AT-SPI (role, name, editable) and warn when a concrete non-terminal focus is not editable. Terminals accept keyboard input without an EditableText interface; re-observe the contents to confirm input. Click/screenshot/input results warn when the target window or coordinate is partially or fully off-screen. `get_app_state` returns a compact readiness block by default; pass `verbose: true` for the full diagnostics report. It also reports `tree_scoped` (false when no app target narrowed the AT-SPI tree, with a warning in `message`) and `accessibility_tree_truncated` (true when the node, depth, or read budget stopped traversal with unread elements left).
 
 On X11, text input sends LF and CRLF line endings as Return, with one newline per CRLF pair.

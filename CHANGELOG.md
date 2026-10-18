@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Warn after X11 xdotool text dispatch that non-US or changing XKB layouts can silently substitute symbols. Require inspecting the text before submitting it. Correct the post-action test subprocess selector so its assertions execute. (#267)
+
 ## [0.7.19] - 2026-10-17
 
 ### Fixed
