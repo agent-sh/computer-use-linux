@@ -25,7 +25,8 @@ use std::{
 use x11rb::connection::Connection;
 use x11rb::protocol::xkb::ConnectionExt as _;
 use x11rb::protocol::xproto::{
-    AtomEnum, ConnectionExt as _, ImageFormat, ImageOrder, VisualClass, Window,
+    AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, EventMask, ImageFormat, ImageOrder,
+    VisualClass, Window,
 };
 use x11rb::protocol::{xkb, Event};
 use x11rb::{
@@ -222,7 +223,7 @@ pub(crate) struct X11Display {
     screen: usize,
 }
 
-/// Observe layout replacement events for the complete xdotool dispatch. Unlike
+/// Observe layout and focus events for the complete xdotool dispatch. Unlike
 /// comparing only before/after hashes, this catches a layout changed and then
 /// restored during one call. It deliberately ignores core MappingNotify:
 /// xdotool temporarily maps spare keycodes for otherwise unavailable symbols.
@@ -230,12 +231,23 @@ pub(crate) struct X11TypingGuard {
     display: X11Display,
     mapping: (u8, Vec<u32>),
     group: xkb::Group,
+    focus: Window,
 }
 
 impl X11TypingGuard {
     pub(crate) fn start() -> Result<Self> {
         let display = X11Display::connect()?;
         let conn = &display.conn;
+        let focus = conn.get_input_focus()?.reply()?.focus;
+        // GetInputFocus stays unchanged during an active keyboard grab. Core
+        // focus events still report NotifyGrab/NotifyUngrab, including when
+        // the application itself reads keyboard input through XInput2.
+        let monitor_window = if focus > 1 { focus } else { display.root };
+        conn.change_window_attributes(
+            monitor_window,
+            &ChangeWindowAttributesAux::new().event_mask(EventMask::FOCUS_CHANGE),
+        )?
+        .check()?;
         if !conn.xkb_use_extension(1, 0)?.reply()?.supported {
             bail!("X11 keyboard layout monitoring requires XKB");
         }
@@ -262,6 +274,7 @@ impl X11TypingGuard {
             display,
             mapping,
             group,
+            focus,
         })
     }
 
@@ -275,10 +288,15 @@ impl X11TypingGuard {
             .xkb_get_state(xkb::ID::USE_CORE_KBD.into())?
             .reply()?
             .group;
-        conn.get_input_focus()?.reply()?;
+        let focus = conn.get_input_focus()?.reply()?.focus;
         let mut changed = self.mapping != mapping || self.group != group;
+        let mut diverted = self.focus != focus;
         while let Some(event) = conn.poll_for_event()? {
             remaining(*conn.stream().deadline.lock().unwrap())?;
+            // FocusIn also catches a grab ending after the monitor started.
+            if matches!(event, Event::FocusOut(_) | Event::FocusIn(_)) {
+                diverted = true;
+            }
             // Xorg also emits NewKeyboardNotify for xdotool's temporary
             // scratch-keycode SetMap requests. Those are not layout loads.
             // Persistent mapping differences are checked above; names and
@@ -292,6 +310,9 @@ impl X11TypingGuard {
         }
         if changed {
             bail!("X11 keyboard layout changed during type_text; dispatched text may be substituted or missing. Inspect the target before submitting or retrying; do not retry blindly.");
+        }
+        if diverted {
+            bail!("X11 keyboard focus changed or was grabbed during type_text; some dispatched text may have been diverted or lost. Inspect the target before submitting or retrying; do not retry blindly.");
         }
         Ok(())
     }

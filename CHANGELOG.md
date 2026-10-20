@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.22] - 2026-10-20
+
+### Fixed
+
+- Detect keyboard grabs and focus transitions during X11 text dispatch, including a brief grab that drops a contiguous block of characters while the keymap and polled focused-window ID stay unchanged. Return an error without replaying the text. The regression exercises real byte loss, restored focus, stable ASCII/Unicode, and restored layout changes. This addresses a reproduced loss mechanism from the investigation of #272; the trigger of the reporter's original spontaneous capture is not confirmed.
+
 ## [0.7.21] - 2026-10-20
 
 ### Fixed
@@ -843,7 +849,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.21...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.22...HEAD
+[0.7.22]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.21...v0.7.22
 [0.7.21]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.20...v0.7.21
 [0.7.20]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.19...v0.7.20
 [0.7.19]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.18...v0.7.19

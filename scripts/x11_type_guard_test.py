@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Opt-in Xvfb/MCP regression for issue #272, isolated from the real desktop.
 
-Requires Xvfb, xterm, xdotool, setxkbmap and dbus-run-session. Checks byte-exact
-stable input and detection of a layout replaced and restored within one call.
+Requires Xvfb, xterm, xdotool, xkbcomp, setxkbmap and dbus-run-session. Checks byte-exact
+stable input, restored layout changes, keyboard grabs and restored focus changes.
 """
 import json
 import os
@@ -62,7 +62,7 @@ def main():
                 env.pop(key, None)
             subprocess.run(["dbus-run-session", "--config-file", str(bus_config),
                             "--", sys.executable, __file__, binary],
-                           env=env, check=True, timeout=120)
+                           env=env, check=True, timeout=180)
             return
         env = os.environ.copy()
         env.update(XDG_SESSION_TYPE="x11", XDG_CURRENT_DESKTOP="Xvfb",
@@ -79,6 +79,39 @@ def main():
                         f"os.execv({shutil.which('xdotool')!r}, sys.argv)\n")
         shim.chmod(0o755)
         env["PATH"] = str(shim_dir) + os.pathsep + env["PATH"]
+        interrupt = Path(scratch) / "interrupt.py"
+        interrupt.write_text('''import ctypes, json, os, sys, time
+assert os.environ.get("CUL_X11_PRIVATE_BUS") == "1"
+x=ctypes.CDLL("libX11.so.6")
+P=ctypes.c_void_p; W=ctypes.c_ulong; I=ctypes.c_int; U=ctypes.c_uint
+def bind(name, result, args):
+    f=getattr(x,name); f.restype=result; f.argtypes=args; return f
+open_display=bind("XOpenDisplay",P,[ctypes.c_char_p])
+root=bind("XDefaultRootWindow",W,[P])
+create=bind("XCreateSimpleWindow",W,[P,W,I,I,U,U,U,W,W])
+map_window=bind("XMapWindow",I,[P,W])
+sync=bind("XSync",I,[P,I])
+get_focus=bind("XGetInputFocus",I,[P,ctypes.POINTER(W),ctypes.POINTER(I)])
+set_focus=bind("XSetInputFocus",I,[P,W,I,W])
+grab=bind("XGrabKeyboard",I,[P,W,I,I,I,W])
+ungrab=bind("XUngrabKeyboard",I,[P,W])
+close=bind("XCloseDisplay",I,[P])
+d=open_display(None); assert d
+def focus():
+    value=W(); revert=I();get_focus(d,ctypes.byref(value),ctypes.byref(revert));return value.value
+before=focus()
+w=create(d,root(d),0,0,10,10,0,0,0); map_window(d,w);sync(d,0)
+if sys.argv[1] == "grab": assert grab(d,w,0,1,1,0) == 0
+else: set_focus(d,w,1,0);sync(d,0)
+during=focus()
+time.sleep(0.1)
+if sys.argv[1] == "grab": ungrab(d,0)
+else: set_focus(d,before,1,0)
+sync(d,0)
+after=focus()
+print(json.dumps({"before":before,"during":during,"after":after}))
+close(d)
+''')
         read_fd, write_fd = os.pipe()
         xvfb = subprocess.Popen(["Xvfb", "-displayfd", str(write_fd), "-screen", "0",
                                  "800x600x24", "-nolisten", "tcp"],
@@ -89,12 +122,14 @@ def main():
             assert select.select([read_fd], [], [], 10)[0], "Xvfb did not start"
             env["DISPLAY"] = ":" + os.read(read_fd, 64).decode().strip()
             os.close(read_fd)
-            for index, (label, text, flip) in enumerate([
-                ("stable-ascii", "br:;'\"[]{}<>~^\\|!@#%&*()_+=?/abcXYZ0198\n", False),
-                ("stable-unmapped-symbol", "hello Ω Ж 😀\n", False),
-                ("layout-restored-1", "TESTE:;'\"[]{}<>~^\\|!@#%&*()_+=?/abcXYZ0198" * 3, True),
-                ("layout-restored-2", "TESTE:;'\"[]{}<>~^\\|!@#%&*()_+=?/abcXYZ0198" * 3, True),
-                ("layout-restored-3", "TESTE:;'\"[]{}<>~^\\|!@#%&*()_+=?/abcXYZ0198" * 3, True),
+            for index, (label, text, disturbance) in enumerate([
+                ("stable-ascii", "br:;'\"[]{}<>~^\\|!@#%&*()_+=?/abcXYZ0198\n", None),
+                ("stable-unmapped-symbol", "hello Ω Ж 😀\n", None),
+                ("layout-restored-1", "TESTE:;'\"[]{}<>~^\\|!@#%&*()_+=?/abcXYZ0198" * 3, "layout"),
+                ("layout-restored-2", "TESTE:;'\"[]{}<>~^\\|!@#%&*()_+=?/abcXYZ0198" * 3, "layout"),
+                ("layout-restored-3", "TESTE:;'\"[]{}<>~^\\|!@#%&*()_+=?/abcXYZ0198" * 3, "layout"),
+                ("keyboard-grab-stable-layout-and-focus", "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" * 2, "grab"),
+                ("focus-restored", "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" * 2, "focus"),
             ]):
                 capture = Path(scratch) / f"{index}.txt"
                 marker = Path(scratch) / f"{index}.dispatch"
@@ -122,32 +157,53 @@ def main():
                         "protocolVersion": "2025-11-25", "capabilities": {},
                         "clientInfo": {"name": "x11-type-guard-test", "version": "1"}}})
                     rpc(mcp, {"jsonrpc": "2.0", "method": "notifications/initialized"})
-                    if flip:
+                    before_map = subprocess.check_output(["xkbcomp", "-xkb", env["DISPLAY"], "-"], env=env, stderr=subprocess.DEVNULL, timeout=5)
+                    if disturbance:
                         def replace_layout():
                             try:
                                 if not select.select([notify], [], [], 15)[0]:
                                     raise TimeoutError("xdotool dispatch did not start")
                                 assert notify.recv(64) == b"type"
                                 time.sleep(0.5)
-                                subprocess.run(["setxkbmap", "us"], env=env, check=True, timeout=5)
-                                time.sleep(0.3)
-                                subprocess.run(["setxkbmap", "br"], env=env, check=True, timeout=5)
+                                if disturbance == "layout":
+                                    subprocess.run(["setxkbmap", "us"], env=env, check=True, timeout=5)
+                                    time.sleep(0.3)
+                                    subprocess.run(["setxkbmap", "br"], env=env, check=True, timeout=5)
+                                else:
+                                    state = json.loads(subprocess.check_output(
+                                        [sys.executable, str(interrupt), disturbance], env=env, timeout=5))
+                                    assert state["before"] == state["after"] == int(window), state
+                                    if disturbance == "grab":
+                                        assert state["during"] == state["before"], state
                             except Exception as error:
                                 errors.append(error)
                         flipper = threading.Thread(target=replace_layout)
                         flipper.start()
                     result = rpc(mcp, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                                        "params": {"name": "type_text", "arguments": {
-                                           "text": text, "screenshot_after": not flip}}})
+                                           "text": text, "screenshot_after": not disturbance}}})
                     if flipper:
                         flipper.join(timeout=20)
                         assert not flipper.is_alive() and not errors, errors
                     output = result.get("structuredContent") or json.loads(
                         next(item["text"] for item in result["content"] if item["type"] == "text"))
                     assert marker.read_text().splitlines() == ["type"], "text was replayed"
-                    if flip:
+                    if disturbance:
                         assert not output["ok"], output
-                        assert "layout changed during type_text" in json.dumps(output), output
+                        if disturbance == "layout":
+                            assert "layout changed during type_text" in json.dumps(output), output
+                        else:
+                            assert "keyboard focus changed or was grabbed" in json.dumps(output), output
+                            after_map = subprocess.check_output(["xkbcomp", "-xkb", env["DISPLAY"], "-"], env=env, stderr=subprocess.DEVNULL, timeout=5)
+                            assert before_map == after_map, "keymap must stay stable"
+                            received = capture.read_bytes()
+                            expected = text.encode()
+                            assert received != expected, (label, received)
+                            if disturbance == "grab":
+                                lost = len(expected) - len(received)
+                                assert lost > 0, (label, received)
+                                position = next(i for i, (a, b) in enumerate(zip(expected, received)) if a != b)
+                                assert received == expected[:position] + expected[position+lost:], "loss must be contiguous"
                     else:
                         assert output["ok"], output
                         assert "WARNING: X11 keyboard layout" in output["message"], output
