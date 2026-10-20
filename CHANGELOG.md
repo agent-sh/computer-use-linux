@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.21] - 2026-10-20
+
+### Fixed
+
+- Read WebKitGTK accessibility content through well-known AT-SPI child references and indexed localized action methods. Bound action discovery and revalidation so unresponsive peers do not block later input. Thanks @OnlyHa1bara. (#273)
+- Return an error after X11 typing if an XKB layout replacement or a persistent mapping/group change is detected. Detect the reported br-to-us-to-br replacement even when the original layout is restored. Do not replay dispatched input. This detects the layout-change case in #272; it does not repair dispatched text, prove field contents, detect every transient remap/group change, or fix the separately reported loss with a stable keymap. Thanks @JADRT22 for the reproduction.
+
 ## [0.7.20] - 2026-10-18
 
 ### Fixed
@@ -836,7 +843,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.20...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.21...HEAD
+[0.7.21]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.20...v0.7.21
 [0.7.20]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.19...v0.7.20
 [0.7.19]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.18...v0.7.19
 [0.7.18]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.17...v0.7.18

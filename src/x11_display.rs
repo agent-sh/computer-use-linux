@@ -19,12 +19,15 @@ use std::{
     net::{IpAddr, SocketAddr, TcpStream},
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     os::unix::net::UnixStream,
+    sync::Mutex,
     time::{Duration, Instant},
 };
 use x11rb::connection::Connection;
+use x11rb::protocol::xkb::ConnectionExt as _;
 use x11rb::protocol::xproto::{
     AtomEnum, ConnectionExt as _, ImageFormat, ImageOrder, VisualClass, Window,
 };
+use x11rb::protocol::{xkb, Event};
 use x11rb::{
     reexports::x11rb_protocol::{
         parse_display::{parse_display, ConnectAddress},
@@ -81,7 +84,7 @@ where
 /// every reply. Timing out a JoinHandle would leave its blocking task alive.
 struct DeadlineStream {
     inner: DefaultStream,
-    deadline: Instant,
+    deadline: Mutex<Instant>,
 }
 
 fn remaining(deadline: Instant) -> io::Result<Duration> {
@@ -121,14 +124,14 @@ fn poll_until(fd: RawFd, mode: PollMode, deadline: Instant) -> io::Result<()> {
 
 impl Stream for DeadlineStream {
     fn poll(&self, mode: PollMode) -> io::Result<()> {
-        poll_until(self.inner.as_raw_fd(), mode, self.deadline)
+        poll_until(self.inner.as_raw_fd(), mode, *self.deadline.lock().unwrap())
     }
     fn read(&self, buf: &mut [u8], fds: &mut Vec<RawFdContainer>) -> io::Result<usize> {
-        remaining(self.deadline)?;
+        remaining(*self.deadline.lock().unwrap())?;
         self.inner.read(buf, fds)
     }
     fn write(&self, buf: &[u8], fds: &mut Vec<RawFdContainer>) -> io::Result<usize> {
-        remaining(self.deadline)?;
+        remaining(*self.deadline.lock().unwrap())?;
         self.inner.write(buf, fds)
     }
 }
@@ -219,6 +222,81 @@ pub(crate) struct X11Display {
     screen: usize,
 }
 
+/// Observe layout replacement events for the complete xdotool dispatch. Unlike
+/// comparing only before/after hashes, this catches a layout changed and then
+/// restored during one call. It deliberately ignores core MappingNotify:
+/// xdotool temporarily maps spare keycodes for otherwise unavailable symbols.
+pub(crate) struct X11TypingGuard {
+    display: X11Display,
+    mapping: (u8, Vec<u32>),
+    group: xkb::Group,
+}
+
+impl X11TypingGuard {
+    pub(crate) fn start() -> Result<Self> {
+        let display = X11Display::connect()?;
+        let conn = &display.conn;
+        if !conn.xkb_use_extension(1, 0)?.reply()?.supported {
+            bail!("X11 keyboard layout monitoring requires XKB");
+        }
+        conn.xkb_select_events(
+            xkb::ID::USE_CORE_KBD.into(),
+            xkb::EventType::default(),
+            xkb::EventType::NEW_KEYBOARD_NOTIFY | xkb::EventType::NAMES_NOTIFY,
+            xkb::MapPart::default(),
+            xkb::MapPart::default(),
+            &xkb::SelectEventsAux::default(),
+        )?
+        .check()?;
+        let mapping = display.keyboard_mapping()?;
+        let group = conn
+            .xkb_get_state(xkb::ID::USE_CORE_KBD.into())?
+            .reply()?
+            .group;
+        // Finish registration and discard events preceding the dispatch boundary.
+        conn.get_input_focus()?.reply()?;
+        while conn.poll_for_event()?.is_some() {
+            remaining(*conn.stream().deadline.lock().unwrap())?;
+        }
+        Ok(Self {
+            display,
+            mapping,
+            group,
+        })
+    }
+
+    pub(crate) fn verify(self) -> Result<()> {
+        let conn = &self.display.conn;
+        // Dispatch can take longer than a query. Renew the transport deadline
+        // only after xdotool exits, keeping setup and verification bounded.
+        *conn.stream().deadline.lock().unwrap() = Instant::now() + X11_QUERY_TIMEOUT;
+        let mapping = self.display.keyboard_mapping()?;
+        let group = conn
+            .xkb_get_state(xkb::ID::USE_CORE_KBD.into())?
+            .reply()?
+            .group;
+        conn.get_input_focus()?.reply()?;
+        let mut changed = self.mapping != mapping || self.group != group;
+        while let Some(event) = conn.poll_for_event()? {
+            remaining(*conn.stream().deadline.lock().unwrap())?;
+            // Xorg also emits NewKeyboardNotify for xdotool's temporary
+            // scratch-keycode SetMap requests. Those are not layout loads.
+            // Persistent mapping differences are checked above; names and
+            // GetKeyboardByName loads still catch br -> us -> br replacements.
+            if matches!(event, Event::XkbNamesNotify(_))
+                || matches!(event, Event::XkbNewKeyboardNotify(ref event)
+                    if event.request_minor != xkb::SET_MAP_REQUEST)
+            {
+                changed = true;
+            }
+        }
+        if changed {
+            bail!("X11 keyboard layout changed during type_text; dispatched text may be substituted or missing. Inspect the target before submitting or retrying; do not retry blindly.");
+        }
+        Ok(())
+    }
+}
+
 /// Root-window pixels as tightly packed RGB8.
 pub(crate) struct RootImage {
     pub width: u32,
@@ -236,6 +314,16 @@ pub(crate) struct FrameExtents {
 }
 
 impl X11Display {
+    fn keyboard_mapping(&self) -> Result<(u8, Vec<u32>)> {
+        let setup = self.conn.setup();
+        let count = setup.max_keycode - setup.min_keycode + 1;
+        let reply = self
+            .conn
+            .get_keyboard_mapping(setup.min_keycode, count)?
+            .reply()?;
+        Ok((reply.keysyms_per_keycode, reply.keysyms))
+    }
+
     /// Connect to the display named by `DISPLAY`, authenticating with
     /// `XAUTHORITY` or `~/.Xauthority` the same way Xlib clients do.
     pub(crate) fn connect() -> Result<Self> {
@@ -286,7 +374,10 @@ impl X11Display {
             .unwrap_or(None)
             .unwrap_or_default();
         let conn = RustConnection::connect_to_stream_with_auth_info(
-            DeadlineStream { inner, deadline },
+            DeadlineStream {
+                inner,
+                deadline: Mutex::new(deadline),
+            },
             screen,
             auth_name,
             auth_data,
