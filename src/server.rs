@@ -2021,15 +2021,22 @@ impl ComputerUseLinux {
             let _input_guard = input_guard;
             let used_xdotool = result
                 .as_ref()
-                .is_ok_and(|result| result.backend == KeyboardCommandBackend::Xdotool);
+                .is_ok_and(|(result, _)| result.backend == KeyboardCommandBackend::Xdotool);
+            let layout_warning = result
+                .as_ref()
+                .ok()
+                .and_then(|(_, warning)| warning.clone());
             let mut output = action_result_with_focus(
                 "type_text",
-                result.map(|result| vec![result.output]),
+                result.map(|(result, _)| vec![result.output]),
                 received,
                 focus.clone(),
             );
             if used_xdotool {
                 output.message = "Action sent through xdotool (X11 XTEST). WARNING: X11 keyboard layout fidelity is unverified. xdotool can silently substitute symbols under non-US XKB layouts (reported with br/ABNT2) or changing keymap state. Re-observe the text before pressing Enter, submitting it, or treating it as delivered; do not retry blindly.".to_string();
+            }
+            if let Some(warning) = layout_warning {
+                output = with_notes(output, vec![warning]);
             }
             if output.ok && focus.is_some() {
                 let notes = self.input_landing_notes(focus.as_ref(), true).await;
@@ -6428,25 +6435,31 @@ async fn run_xdotool_type_with_layout_check<F, Fut>(
     args: &[String],
     command_timeout: Duration,
     fallback: F,
-) -> std::result::Result<KeyboardCommandResult, String>
+) -> std::result::Result<(KeyboardCommandResult, Option<String>), String>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = std::result::Result<Output, String>>,
 {
     let guard = tokio::task::spawn_blocking(crate::x11_display::X11TypingGuard::start)
         .await
-        .map_err(|error| format!("X11 layout monitor failed before typing: {error}"))?
-        .map_err(|error| format!("X11 layout monitor failed before typing: {error:#}"))?;
+        .map_err(|error| format!("{error}"))
+        .and_then(|result| result.map_err(|error| format!("{error:#}")));
     let result =
         run_xdotool_or_fallback_with_timeout(program, args, command_timeout, fallback).await?;
     if result.backend == KeyboardCommandBackend::Xdotool {
+        let guard = match guard {
+            Ok(guard) => guard,
+            Err(error) => return Ok((result, Some(format!(
+                "WARNING: X11 layout-change detection was unavailable: {error}. Field contents remain unverified; inspect the target before submitting or retrying."
+            )))),
+        };
         // Never replay a dispatched command, even if verification fails.
         tokio::task::spawn_blocking(move || guard.verify())
             .await
             .map_err(|error| format!("X11 layout monitor failed after typing; inspect the target before retrying: {error}"))?
             .map_err(|error| format!("X11 layout verification failed after typing; text may have been sent. Inspect the target before submitting or retrying: {error:#}"))?;
     }
-    Ok(result)
+    Ok((result, None))
 }
 
 async fn run_wtype_type_text_or_fallback<F, Fut>(
@@ -11101,8 +11114,8 @@ exit 1
             .unwrap()
             .contains("Post-action screenshot failed:"));
 
-        // The fake display cannot monitor XKB. Text must fail before dispatch
-        // and must not capture or retry through another input backend.
+        // The fake display cannot monitor XKB. Preserve xdotool compatibility
+        // and make the unavailable detection explicit, including after capture.
         std::fs::write(&log_path, "").unwrap();
         let params = serde_json::from_value(serde_json::json!({
             "text": "quotes '\"; : / date +%H:%M:%S",
@@ -11111,14 +11124,17 @@ exit 1
         .unwrap();
         let result = server.type_text(Parameters(params)).await.unwrap();
         let structured = result.structured_content.unwrap();
-        assert_eq!(structured["ok"], false);
-        assert!(structured.get("screenshot").is_none());
+        assert_eq!(structured["ok"], true);
+        assert!(structured.get("screenshot").is_some());
         let message = structured["message"].as_str().unwrap();
         assert!(
-            message.contains("layout monitor failed before typing"),
+            message.contains("layout-change detection was unavailable"),
             "{message}"
         );
-        assert!(std::fs::read_to_string(&log_path).unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&log_path).unwrap(),
+            "xdotool\ngnome-screenshot\n"
+        );
 
         // The text-specific risk does not apply to named key dispatch.
         let params = serde_json::from_value(serde_json::json!({"key": "Escape"})).unwrap();

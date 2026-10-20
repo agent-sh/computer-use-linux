@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Read WebKitGTK accessibility content through well-known AT-SPI child references and indexed localized action methods. Bound action discovery and revalidation so unresponsive peers do not block later input. Thanks @OnlyHa1bara. (#273)
-- Return an error after X11 typing if an XKB layout replacement or a persistent mapping/group change is detected. Detect the reported br-to-us-to-br replacement even when the original layout is restored. Do not replay dispatched input. This detects the layout-change case in #272; it does not repair dispatched text, prove field contents, detect every transient remap/group change, or fix the separately reported loss with a stable keymap. Thanks @JADRT22 for the reproduction.
+- Return an error after X11 typing if an XKB layout replacement or a persistent mapping/group change is detected. Detect the reported br-to-us-to-br replacement even when the original layout is restored. Do not replay dispatched input. Preserve xdotool dispatch with an explicit warning when monitoring cannot start. This detects the layout-change case in #272; it does not repair dispatched text, prove field contents, detect every transient remap/group change, or fix the separately reported loss with a stable keymap. Thanks @JADRT22 for the reproduction.
 
 ## [0.7.20] - 2026-10-18
 
