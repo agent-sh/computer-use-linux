@@ -43,11 +43,25 @@ def main():
     with tempfile.TemporaryDirectory(prefix="cul-x11-type-", dir=cache) as scratch:
         if not os.environ.get("CUL_X11_PRIVATE_BUS"):
             env = os.environ.copy()
+            runtime = Path(scratch) / "runtime"
+            runtime.mkdir(mode=0o700)
+            bus_config = Path(scratch) / "bus.conf"
+            # No service directories: this test must not activate desktop
+            # portals, mount a document FUSE filesystem, or start host apps.
+            bus_config.write_text(
+                '<busconfig><type>session</type>'
+                f'<listen>unix:tmpdir={runtime}</listen>'
+                '<policy context="default"><allow own="*"/>'
+                '<allow send_destination="*"/><allow receive_sender="*"/>'
+                '</policy></busconfig>')
             env.update(CUL_X11_PRIVATE_BUS="1", XDG_CACHE_HOME=scratch,
-                       XDG_CONFIG_HOME=scratch, COMPUTER_USE_LINUX_INDICATOR="0")
+                       XDG_CONFIG_HOME=scratch, XDG_RUNTIME_DIR=str(runtime),
+                       COMPUTER_USE_LINUX_INDICATOR="0",
+                       COMPUTER_USE_LINUX_SCREENSHOT_BACKEND="x11")
             for key in ("AT_SPI_BUS_ADDRESS", "WAYLAND_DISPLAY", "DISPLAY"):
                 env.pop(key, None)
-            subprocess.run(["dbus-run-session", "--", sys.executable, __file__, binary],
+            subprocess.run(["dbus-run-session", "--config-file", str(bus_config),
+                            "--", sys.executable, __file__, binary],
                            env=env, check=True, timeout=120)
             return
         env = os.environ.copy()
