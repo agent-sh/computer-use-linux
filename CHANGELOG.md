@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.25] - 2026-10-24
+
+### Fixed
+
+- Accept global AT-SPI logical pointer coordinates with `coordinate_space: "atspi"`, map them through verified KWin window and output geometry, and preserve raw screenshot pixels as the default. (#281)
+- Reject ambiguous same-process window ownership before checking a caller-supplied point, including when an explicit window ID is supplied.
+- Capture through an already-running desktop portal without requiring a D-Bus activation file, supporting supervised isolated desktops.
+
 ## [0.7.24] - 2026-10-24
 
 ### Fixed

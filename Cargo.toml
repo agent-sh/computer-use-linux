@@ -1,6 +1,6 @@
 [package]
 name = "computer-use-linux"
-version = "0.7.24"
+version = "0.7.25"
 edition = "2021"
 authors = ["Avi Fenesh <avifenesh@users.noreply.github.com>"]
 license = "MIT"

@@ -1259,7 +1259,7 @@ impl KwinElementClickSnapshot {
                 KwinRect::from_raw(window.frame_geometry.as_ref(), "candidate frameGeometry")?;
             let client =
                 KwinRect::from_raw(window.client_geometry.as_ref(), "candidate clientGeometry")?;
-            if !element_coordinate_matches(target, frame, client)?.is_empty() {
+            if element_frame_matches(target, frame, client)? {
                 matching.push(*window);
             }
         }
@@ -1414,6 +1414,30 @@ fn global_element_point(
         ),
         _ => anyhow::bail!("AT-SPI frame has an ambiguous KWin coordinate signature"),
     }
+}
+
+// Window ownership is a property of the cached frame, never of a point the
+// caller supplied. Containment is checked only after finding one unique owner.
+fn element_frame_matches(
+    target: &KwinElementClickTarget,
+    frame: KwinRect,
+    client: KwinRect,
+) -> Result<bool> {
+    let atspi = KwinRect::new(
+        f64::from(target.frame.x),
+        f64::from(target.frame.y),
+        f64::from(target.frame.width),
+        f64::from(target.frame.height),
+    )
+    .context("AT-SPI frame bounds are unusable")?;
+    let client_size = near(atspi.width, client.width) && near(atspi.height, client.height);
+    let local = near(atspi.x, 0.0) && near(atspi.y, 0.0) && client_size;
+    let global_client = near(atspi.x, client.x) && near(atspi.y, client.y) && client_size;
+    let global_frame = near(atspi.x, frame.x)
+        && near(atspi.y, frame.y)
+        && near(atspi.width, frame.width)
+        && near(atspi.height, frame.height);
+    Ok(local || global_client || global_frame)
 }
 
 fn element_coordinate_matches(
@@ -1974,9 +1998,15 @@ mod element_click_tests {
             vec![output("DP-1", rect(0, 0, 2560, 1440), json!(1.5))],
         );
         for window_id in [None, Some(kwin_window_id_from_uuid(UUID))] {
-            let mut target = target([0, 0, 800, 600], (32, 16));
-            target.window_id = window_id;
-            assert!(snapshot.map_element_click(&target, 3840, 2160).is_err());
+            for global_point in [false, true] {
+                let mut target = target(
+                    [0, 0, 800, 600],
+                    if global_point { (278, 352) } else { (32, 16) },
+                );
+                target.window_id = window_id;
+                target.global_point = global_point;
+                assert!(snapshot.map_element_click(&target, 3840, 2160).is_err());
+            }
         }
     }
 
