@@ -116,6 +116,10 @@ the origin. A missing window target is rejected.
 
 Targeted `press_key`/`type_text` results append focused-element feedback from AT-SPI (role, name, editable) and warn when a concrete non-terminal focus is not editable. Terminals accept keyboard input without an EditableText interface; re-observe the contents to confirm input. Click/screenshot/input results warn when the target window or coordinate is partially or fully off-screen. `get_app_state` returns a compact readiness block by default; pass `verbose: true` for the full diagnostics report. It also reports `tree_scoped` (false when no app target narrowed the AT-SPI tree, with a warning in `message`) and `accessibility_tree_truncated` (true when the node, depth, or read budget stopped traversal with unread elements left).
 
+An `app_id` may be a full desktop ID or its final dot-separated segment; matching is case-insensitive, ambiguous aliases are rejected, and an unresolved explicit `app_id` returns an empty scoped tree rather than the desktop.
+
+`set_value` on editable text reads the full contents back after dispatch. `verified: true` means an exact match; mismatches and readback failures return `ok: false` without replaying the mutation. Password fields return `verified: false` because masked content cannot prove the write. Re-observe after any mismatch; the contents may have changed.
+
 On X11, text input sends LF and CRLF line endings as Return, with one newline per CRLF pair.
 
 On GNOME, a read-only keymap preflight rejects the whole string before input if a character is absent or requires a modifier level Mutter cannot synthesize. The background reader cannot establish the active layout group, so every configured group must support the text. This can reject text that works in one of several groups; use `set_value` on an editable field instead. The check requires `libxkbcommon.so.0` at runtime and stops after a two-second keymap read deadline. It does not cover held modifiers or a keymap changed concurrently with typing.

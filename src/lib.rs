@@ -26,7 +26,8 @@ pub mod atspi_tree {
         accessibility_chrome_context, focused_element_summary_in_app, list_accessible_apps,
         object_ref_owner_pid, perform_action, perform_named_action, probe_focused_element,
         set_element_value, snapshot_accessibility_tree, snapshot_limits, AccessibleAppSummary,
-        FocusProbe, FocusedElementSummary, ValueSetInvocation, UNKNOWN_ROLE,
+        EditableTextSetOutcome, FocusProbe, FocusedElementSummary, ValueSetInvocation,
+        UNKNOWN_ROLE,
     };
     pub use crate::atspi_tree_impl::{
         snapshot_tree, AccessibilityAction, AccessibilityNode, AccessibilityText,

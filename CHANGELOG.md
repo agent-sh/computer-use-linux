@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Report failed desktop actions and intentional refusals as MCP tool errors with `isError: true`, while preserving successful results when only post-action observation fails. Thanks @OnlyHa1bara. (#280)
+- Read stable machine-readable AT-SPI action names so Qt buttons use native click/press/toggle activation instead of pointer fallback. (#281)
+- Refresh stale semantic AT-SPI targets once before action dispatch, preserving the original app scope and never replaying numeric-index or already-dispatched actions. (#282)
+- Scope `get_app_state` by short or reverse-DNS `app_id` values, reject ambiguous aliases, and avoid whole-desktop fallback for unresolved explicit app IDs. (#283)
+- Verify editable-text `set_value` results with exact full-content readback, report mismatches or verification failures instead of false success, and mark password fields unverifiable. (#284)
 
 ### Security
 
