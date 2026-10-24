@@ -7,9 +7,9 @@ export interface GeneratedMcpToolDefinition {
 	annotations: Record<string, unknown>;
 }
 
-export const GENERATED_SERVER_VERSION = "0.7.22";
-export const GENERATED_TOOL_CATALOG_HASH = "b9a6ef2736cd165b97982ec6ccf1e6cfb47712f0d4a8ae778ecac47e211b15ec";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "113fc01364844db492475ec7ad00f1d03fe8e2d7acedc8a0aa3b48d245f99105";
+export const GENERATED_SERVER_VERSION = "0.7.23";
+export const GENERATED_TOOL_CATALOG_HASH = "3e2d6cbbf31957fcdc8d05e66f959ad1c3b277685dfa30ed3c3b2f4df451eec6";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "052c430ada325bd74fd764fc3f9d1139f4e6e401b6a5dbc6ef8a3de538214241";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -1794,7 +1794,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Set the value of a settable accessibility element selected by index, identifier, or semantic selector. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Set the value of a settable accessibility element selected by index, identifier, or semantic selector. Editable-text writes are verified by exact readback; password fields are explicitly unverifiable. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {

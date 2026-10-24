@@ -2,7 +2,8 @@
 """Opt-in Xvfb/MCP regression for issue #272, isolated from the real desktop.
 
 Requires Xvfb, xterm, xdotool, xkbcomp, setxkbmap and dbus-run-session. Checks byte-exact
-stable input, restored layout changes, keyboard grabs and restored focus changes.
+stable input, restored layout changes, keyboard grabs, restored focus changes, and
+PointerRoot/no-fixed-focus dispatch behavior.
 """
 import json
 import os
@@ -100,6 +101,12 @@ d=open_display(None); assert d
 def focus():
     value=W(); revert=I();get_focus(d,ctypes.byref(value),ctypes.byref(revert));return value.value
 before=focus()
+if sys.argv[1] in ("pointer-root", "focus-none"):
+    focus_id = 1 if sys.argv[1] == "pointer-root" else 0
+    set_focus(d,focus_id,1,0);sync(d,0)
+    assert focus() == focus_id
+    close(d)
+    sys.exit(0)
 w=create(d,root(d),0,0,10,10,0,0,0); map_window(d,w);sync(d,0)
 if sys.argv[1] == "grab": assert grab(d,w,0,1,1,0) == 0
 else: set_focus(d,w,1,0);sync(d,0)
@@ -130,6 +137,8 @@ close(d)
                 ("layout-restored-3", "TESTE:;'\"[]{}<>~^\\|!@#%&*()_+=?/abcXYZ0198" * 3, "layout"),
                 ("keyboard-grab-stable-layout-and-focus", "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" * 2, "grab"),
                 ("focus-restored", "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" * 2, "focus"),
+                ("focus-none", "No fixed focus still dispatches\n", "focus-none"),
+                ("pointer-root", "Pointer root still dispatches\n", "pointer-root"),
             ]):
                 capture = Path(scratch) / f"{index}.txt"
                 marker = Path(scratch) / f"{index}.dispatch"
@@ -157,8 +166,12 @@ close(d)
                         "protocolVersion": "2025-11-25", "capabilities": {},
                         "clientInfo": {"name": "x11-type-guard-test", "version": "1"}}})
                     rpc(mcp, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+                    focus_mode = disturbance in ("pointer-root", "focus-none")
+                    if focus_mode:
+                        subprocess.run([sys.executable, str(interrupt), disturbance],
+                                       env=env, check=True, timeout=5)
                     before_map = subprocess.check_output(["xkbcomp", "-xkb", env["DISPLAY"], "-"], env=env, stderr=subprocess.DEVNULL, timeout=5)
-                    if disturbance:
+                    if disturbance and not focus_mode:
                         def replace_layout():
                             try:
                                 if not select.select([notify], [], [], 15)[0]:
@@ -188,7 +201,15 @@ close(d)
                     output = result.get("structuredContent") or json.loads(
                         next(item["text"] for item in result["content"] if item["type"] == "text"))
                     assert marker.read_text().splitlines() == ["type"], "text was replayed"
-                    if disturbance:
+                    if focus_mode:
+                        assert output["ok"], output
+                        assert not result.get("isError", False), result
+                        assert "Action sent through xdotool (X11 XTEST)." in output["message"], output
+                        if disturbance == "pointer-root":
+                            assert "X11 keyboard monitoring does not support PointerRoot" in output["message"], output
+                        else:
+                            assert "layout-change detection was unavailable" not in output["message"], output
+                    elif disturbance:
                         assert not output["ok"], output
                         if disturbance == "layout":
                             assert "layout changed during type_text" in json.dumps(output), output

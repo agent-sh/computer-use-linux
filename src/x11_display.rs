@@ -239,6 +239,11 @@ impl X11TypingGuard {
         let display = X11Display::connect()?;
         let conn = &display.conn;
         let focus = conn.get_input_focus()?.reply()?.focus;
+        // PointerRoot (1) is not a window: focus can follow pointer motion
+        // without an observable focus event on the current target.
+        if focus == 1 {
+            bail!("X11 keyboard monitoring does not support PointerRoot; input follows the window under the pointer");
+        }
         // GetInputFocus stays unchanged during an active keyboard grab. Core
         // focus events still report NotifyGrab/NotifyUngrab, including when
         // the application itself reads keyboard input through XInput2.

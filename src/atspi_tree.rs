@@ -115,7 +115,7 @@ pub enum EditableTextSetOutcome {
 }
 
 const MAX_TEXT_READBACK_CHARS: i32 = 4096;
-const EDITABLE_TEXT_READ_CHUNK_CHARS: i32 = 4096;
+const EDITABLE_TEXT_READ_CHUNK_UNITS: usize = 4096;
 const EDITABLE_TEXT_VERIFY_TIMEOUT: Duration = Duration::from_secs(1);
 const EDITABLE_TEXT_VERIFY_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_TEXT_SELECTIONS: i32 = 8;
@@ -316,6 +316,10 @@ pub(crate) struct AccessibilitySnapshot {
     /// when they were matched by app name alone or not filtered at all: those
     /// roots can belong to any app, so no single pid describes the tree.
     pub root_pid: Option<u32>,
+    /// True when selected roots satisfy the supplied app/name filter, or no
+    /// filter was supplied. Normal snapshots retain their PID-only fallback;
+    /// action recovery requires this evidence before invoking a fresh node.
+    pub app_filter_matched: bool,
     /// True when max_nodes, max_depth, or the child read budget stopped
     /// traversal with unread elements left. Failed element reads do not count.
     pub truncated: bool,
@@ -380,6 +384,7 @@ async fn snapshot_tree_inner(
     .await;
     let scoped = selected_roots.scoped;
     let root_pid = selected_roots.pid;
+    let app_filter_matched = selected_roots.app_filter_matched;
     let mut nodes = Vec::new();
     let mut truncated = false;
     let mut traversal = BoundedTraversal::new(max_nodes);
@@ -429,6 +434,7 @@ async fn snapshot_tree_inner(
         nodes,
         scoped,
         root_pid,
+        app_filter_matched,
         truncated,
     })
 }
@@ -741,19 +747,59 @@ async fn text_readback_matches(
     if character_count < 0 {
         return Err(EditableTextReadbackError::Failed);
     }
-    if character_count as usize != requested.chars().count() {
-        return Ok(false);
+    if character_count as usize == requested.chars().count() {
+        return unicode_scalar_text_readback_matches(text, requested, deadline).await;
     }
 
-    let mut requested_chars = requested.chars();
+    let requested_utf16 = requested.encode_utf16().collect::<Vec<_>>();
+    if character_count as usize != requested_utf16.len() {
+        return Ok(false);
+    }
+    utf16_text_readback_matches(text, &requested_utf16, deadline).await
+}
+
+async fn unicode_scalar_text_readback_matches(
+    text: &TextProxy<'_>,
+    requested: &str,
+    deadline: Instant,
+) -> std::result::Result<bool, EditableTextReadbackError> {
+    let requested_chars = requested.chars().collect::<Vec<_>>();
     let mut offset = 0;
-    while offset < character_count {
+    while offset < requested_chars.len() {
         let end = offset
-            .saturating_add(EDITABLE_TEXT_READ_CHUNK_CHARS)
-            .min(character_count);
-        let chunk = readback_within(deadline, text.get_text(offset, end)).await?;
-        let chunk_len = (end - offset) as usize;
-        if !chunk.chars().eq(requested_chars.by_ref().take(chunk_len)) {
+            .saturating_add(EDITABLE_TEXT_READ_CHUNK_UNITS)
+            .min(requested_chars.len());
+        let chunk = readback_within(deadline, text.get_text(offset as i32, end as i32)).await?;
+        if !chunk
+            .chars()
+            .eq(requested_chars[offset..end].iter().copied())
+        {
+            return Ok(false);
+        }
+        offset = end;
+    }
+
+    Ok(true)
+}
+
+async fn utf16_text_readback_matches(
+    text: &TextProxy<'_>,
+    requested: &[u16],
+    deadline: Instant,
+) -> std::result::Result<bool, EditableTextReadbackError> {
+    let mut offset = 0;
+    while offset < requested.len() {
+        let mut end = offset
+            .saturating_add(EDITABLE_TEXT_READ_CHUNK_UNITS)
+            .min(requested.len());
+        if end < requested.len() && (0xD800..=0xDBFF).contains(&requested[end - 1]) {
+            end -= 1;
+        }
+        let chunk = readback_within(deadline, text.get_text(offset as i32, end as i32)).await?;
+        if !chunk
+            .encode_utf16()
+            .eq(requested[offset..end].iter().copied())
+        {
             return Ok(false);
         }
         offset = end;
@@ -862,6 +908,7 @@ struct SelectedRoots {
     scoped: bool,
     /// Set only when the roots were chosen because they belong to this pid.
     pid: Option<u32>,
+    app_filter_matched: bool,
 }
 
 /// Normalized app-name filter, or `None` when the caller passed nothing usable.
@@ -910,6 +957,7 @@ async fn select_roots(
                 roots: pid_and_filter_matches,
                 scoped: true,
                 pid: Some(target_pid),
+                app_filter_matched: true,
             };
         }
         if !pid_matches.is_empty() {
@@ -917,6 +965,7 @@ async fn select_roots(
                 roots: pid_matches,
                 scoped: true,
                 pid: Some(target_pid),
+                app_filter_matched: needle.is_none(),
             };
         }
 
@@ -928,6 +977,7 @@ async fn select_roots(
             roots: remaining,
             scoped: false,
             pid: None,
+            app_filter_matched: true,
         };
     };
 
@@ -938,10 +988,12 @@ async fn select_roots(
         }
     }
 
+    let app_filter_matched = !selected.is_empty();
     SelectedRoots {
         roots: selected,
         scoped: true,
         pid: None,
+        app_filter_matched,
     }
 }
 
@@ -1373,6 +1425,12 @@ mod tests {
         Fail,
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum FakeTextOffsetModel {
+        UnicodeScalars,
+        Utf16CodeUnits,
+    }
+
     #[derive(Clone, Copy)]
     enum FakeTextBehavior {
         Normal,
@@ -1386,6 +1444,7 @@ mod tests {
     struct FakeEditableConfig {
         mutation: FakeMutation,
         text: FakeTextBehavior,
+        text_offset_model: FakeTextOffsetModel,
         role: atspi::Role,
         has_text: bool,
         has_value: bool,
@@ -1396,6 +1455,7 @@ mod tests {
             Self {
                 mutation: FakeMutation::Apply,
                 text: FakeTextBehavior::Normal,
+                text_offset_model: FakeTextOffsetModel::Utf16CodeUnits,
                 role: atspi::Role::Text,
                 has_text: true,
                 has_value: false,
@@ -1467,9 +1527,29 @@ mod tests {
         }
     }
 
+    fn unicode_scalar_offset_to_byte_index(contents: &str, offset: usize) -> Option<usize> {
+        contents
+            .char_indices()
+            .map(|(byte_index, _)| byte_index)
+            .chain(std::iter::once(contents.len()))
+            .nth(offset)
+    }
+
+    fn utf16_offset_to_byte_index(contents: &str, offset: usize) -> Option<usize> {
+        let mut utf16_offset = 0;
+        for (byte_index, character) in contents.char_indices() {
+            if utf16_offset == offset {
+                return Some(byte_index);
+            }
+            utf16_offset += character.len_utf16();
+        }
+        (utf16_offset == offset).then_some(contents.len())
+    }
+
     struct FakeText {
         state: Arc<Mutex<FakeEditableState>>,
         behavior: FakeTextBehavior,
+        text_offset_model: FakeTextOffsetModel,
     }
 
     #[zbus::interface(name = "org.a11y.atspi.Text")]
@@ -1483,27 +1563,37 @@ mod tests {
                 )),
                 FakeTextBehavior::NegativeCount => Ok(-1),
                 FakeTextBehavior::StallCharacterCount => std::future::pending().await,
-                _ => Ok(self.state.lock().unwrap().contents.chars().count() as i32),
+                _ => {
+                    let state = self.state.lock().unwrap();
+                    let count = match self.text_offset_model {
+                        FakeTextOffsetModel::UnicodeScalars => state.contents.chars().count(),
+                        FakeTextOffsetModel::Utf16CodeUnits => {
+                            state.contents.encode_utf16().count()
+                        }
+                    };
+                    Ok(count as i32)
+                }
             }
         }
 
         fn get_text(&self, start_offset: i32, end_offset: i32) -> zbus::fdo::Result<String> {
-            self.state.lock().unwrap().get_text_reads += 1;
+            let mut state = self.state.lock().unwrap();
+            state.get_text_reads += 1;
             if matches!(self.behavior, FakeTextBehavior::GetTextError) {
                 return Err(zbus::fdo::Error::Failed("injected GetText failure".into()));
             }
             if start_offset < 0 || end_offset < start_offset {
                 return Err(zbus::fdo::Error::InvalidArgs("invalid text offsets".into()));
             }
-            Ok(self
-                .state
-                .lock()
-                .unwrap()
-                .contents
-                .chars()
-                .skip(start_offset as usize)
-                .take((end_offset - start_offset) as usize)
-                .collect())
+            let offset_to_byte_index = match self.text_offset_model {
+                FakeTextOffsetModel::UnicodeScalars => unicode_scalar_offset_to_byte_index,
+                FakeTextOffsetModel::Utf16CodeUnits => utf16_offset_to_byte_index,
+            };
+            let start = offset_to_byte_index(&state.contents, start_offset as usize)
+                .ok_or_else(|| zbus::fdo::Error::InvalidArgs("invalid text offsets".into()))?;
+            let end = offset_to_byte_index(&state.contents, end_offset as usize)
+                .ok_or_else(|| zbus::fdo::Error::InvalidArgs("invalid text offsets".into()))?;
+            Ok(state.contents[start..end].to_string())
         }
     }
 
@@ -1557,6 +1647,7 @@ mod tests {
                     FakeText {
                         state: Arc::clone(&state),
                         behavior: config.text,
+                        text_offset_model: config.text_offset_model,
                     },
                 )
                 .unwrap();
@@ -1758,7 +1849,7 @@ mod tests {
             " \t\n",
             "  leading and trailing\t \n",
             "trailing newline\n",
-            "Case and unicode € 内容",
+            "Case and unicode € 内容 😀🦀𐐷",
         ];
 
         for value in values {
@@ -1774,13 +1865,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn editable_text_readback_chunks_multibyte_content_beyond_snapshot_cap() {
-        let (_bus, peer, client, state) =
-            start_editable_fixture("", FakeEditableConfig::default()).await;
-        let mut expected = "a".repeat(EDITABLE_TEXT_READ_CHUNK_CHARS as usize - 1);
-        expected.push_str("é🦀");
+    async fn editable_text_non_bmp_readback_supports_scalar_and_utf16_peers() {
+        let requested = "🦀 GTK verified ";
+        for text_offset_model in [
+            FakeTextOffsetModel::UnicodeScalars,
+            FakeTextOffsetModel::Utf16CodeUnits,
+        ] {
+            let (_bus, peer, client, state) = start_editable_fixture(
+                "",
+                FakeEditableConfig {
+                    text_offset_model,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            let outcome = editable_outcome(
+                dispatch_editable_fixture(&client, &peer, requested)
+                    .await
+                    .unwrap(),
+            );
+
+            assert_eq!(
+                outcome,
+                EditableTextSetOutcome::Verified,
+                "{text_offset_model:?}"
+            );
+            let state = state.lock().unwrap();
+            assert_eq!(state.mutations, 1);
+            assert_eq!(state.contents, requested);
+        }
+    }
+
+    #[tokio::test]
+    async fn editable_text_non_bmp_matching_count_does_not_accept_different_content() {
+        let requested = "🦀 GTK verified ";
+        let published = "🦀 GTK verified!";
+        assert_eq!(requested.chars().count(), published.chars().count());
+        assert_eq!(
+            requested.encode_utf16().count(),
+            published.encode_utf16().count()
+        );
+        for text_offset_model in [
+            FakeTextOffsetModel::UnicodeScalars,
+            FakeTextOffsetModel::Utf16CodeUnits,
+        ] {
+            let (_bus, peer, client, state) = start_editable_fixture(
+                published,
+                FakeEditableConfig {
+                    mutation: FakeMutation::NoOp,
+                    text_offset_model,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            let outcome = editable_outcome(
+                dispatch_editable_fixture(&client, &peer, requested)
+                    .await
+                    .unwrap(),
+            );
+
+            assert_eq!(
+                outcome,
+                EditableTextSetOutcome::MismatchAfterDeadline,
+                "{text_offset_model:?}"
+            );
+            let state = state.lock().unwrap();
+            assert_eq!(state.mutations, 1);
+            assert!(state.get_text_reads > 0, "{text_offset_model:?}");
+            assert_eq!(state.contents, published);
+        }
+    }
+
+    #[tokio::test]
+    async fn editable_text_readback_chunks_utf16_without_splitting_non_bmp() {
+        let (_bus, peer, client, state) = start_editable_fixture(
+            "",
+            FakeEditableConfig {
+                text_offset_model: FakeTextOffsetModel::Utf16CodeUnits,
+                ..Default::default()
+            },
+        )
+        .await;
+        let mut expected = "a".repeat(EDITABLE_TEXT_READ_CHUNK_UNITS - 1);
+        // The crab's surrogate pair straddles the first 4096-unit read boundary.
+        expected.push_str("🦀é");
         expected.push_str(&"内容\n".repeat(1_200));
-        assert!(expected.chars().count() > MAX_TEXT_READBACK_CHARS as usize);
+        assert!(expected.encode_utf16().count() > MAX_TEXT_READBACK_CHARS as usize);
 
         let outcome = editable_outcome(
             dispatch_editable_fixture(&client, &peer, &expected)

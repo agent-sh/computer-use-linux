@@ -7,17 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.23] - 2026-10-24
+
 ### Fixed
 
 - Report failed desktop actions and intentional refusals as MCP tool errors with `isError: true`, while preserving successful results when only post-action observation fails. Thanks @OnlyHa1bara. (#280)
-- Read stable machine-readable AT-SPI action names so Qt buttons use native click/press/toggle activation instead of pointer fallback. (#281)
+- Read stable machine-readable AT-SPI action names so Qt buttons use native click/press/toggle activation instead of pointer fallback. Thanks @sinantux for the detailed reports. (#281)
+- Map KWin element clicks using coherent frame, client, output and scale geometry. Reject ambiguous window ownership, unknown desktop visibility, mixed output scales and stale pointer dimensions before sending input. (#281)
 - Refresh stale semantic AT-SPI targets once before action dispatch, preserving the original app scope and never replaying numeric-index or already-dispatched actions. (#282)
 - Scope `get_app_state` by short or reverse-DNS `app_id` values, reject ambiguous aliases, and avoid whole-desktop fallback for unresolved explicit app IDs. (#283)
 - Verify editable-text `set_value` results with exact full-content readback, report mismatches or verification failures instead of false success, and mark password fields unverifiable. (#284)
+- Reject unsupported X11 PointerRoot keyboard monitoring before typing, preserve one xdotool dispatch with an explicit monitoring warning, and never replay the text. (#272)
 
 ### Security
 
-- Update Tokio to 1.53.3 and register the GNOME indicator socket with the I/O-safe `AsyncFd::register` API, addressing RUSTSEC-2026-0386. (#280)
+- Update Tokio to 1.53.3 and register the GNOME indicator socket with the I/O-safe `AsyncFd::register` API, addressing RUSTSEC-2026-0386. Thanks @OnlyHa1bara. (#280)
+- Update Pi and schema-check dependencies, including patched Undici, Vitest, Zod, body-parser, fast-uri and ip-address. Regenerate the bundled MCP client. (#285)
 
 ## [0.7.22] - 2026-10-20
 
@@ -861,7 +866,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.22...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.23...HEAD
+[0.7.23]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.22...v0.7.23
 [0.7.22]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.21...v0.7.22
 [0.7.21]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.20...v0.7.21
 [0.7.20]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.19...v0.7.20
