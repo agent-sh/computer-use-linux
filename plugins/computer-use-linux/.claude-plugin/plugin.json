@@ -1,6 +1,6 @@
 {
   "name": "computer-use-linux",
-  "version": "0.7.23",
+  "version": "0.7.24",
   "description": "Native Linux desktop control: semantic AT-SPI accessibility trees, screenshots, compositor window targeting (GNOME, KDE, Hyprland, niri, COSMIC, i3, X11), Wayland/X11 input, and an on-screen activity indicator.",
   "author": {
     "name": "agent-sh",

@@ -139,7 +139,7 @@ Pi native tools skip this MCP `command` config; see [Pi setup](references/pi-set
 4. If `can_build_accessibility_tree` is false, run `setup_accessibility` and restart the target app.
 5. If `can_query_windows` is false on GNOME Wayland, run `setup_window_targeting` and ask the user to log out and back in if setup says the shell extension needs a reload.
 6. Before targeted input, call `list_windows` or `focused_window` and verify the intended window by title, app id, pid, or wm class.
-7. Prefer semantic targeting from `get_app_state`: use element indices or role/name/text/states selectors.
+7. Prefer semantic targeting from `get_app_state`: use element indices or role/name/text/states selectors. Automatic recovery of a dead semantic target requires verified PID/window ownership and invalidates cached indices; call `get_app_state` again before further index-based actions.
 8. Use coordinates only when the UI surface has no useful accessibility tree.
 9. For text input, prefer `type_text` with a target selector (`window_id`, `pid`, `app_id`, `wm_class`, `title`, `tty`, `terminal_pid`, `terminal_command`, or `terminal_cwd`) rather than relying on current focus.
 10. After mutating actions (`click`, `drag`, `scroll`, `press_key`, `type_text`, `perform_action`, `set_value`, `activate_window`, `move_window`, `resize_window`), either pass `screenshot_after: true | "screen" | "window"` (with optional `format`, `quality`, `scale`, `max_width`, `max_height`, `max_bytes`) and/or `include_tree: true` on the action call itself to observe the result in the same tool call, or re-check state with `get_app_state`, `focused_window`, or an app-specific readback.

@@ -7,9 +7,9 @@ export interface GeneratedMcpToolDefinition {
 	annotations: Record<string, unknown>;
 }
 
-export const GENERATED_SERVER_VERSION = "0.7.23";
-export const GENERATED_TOOL_CATALOG_HASH = "3e2d6cbbf31957fcdc8d05e66f959ad1c3b277685dfa30ed3c3b2f4df451eec6";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "052c430ada325bd74fd764fc3f9d1139f4e6e401b6a5dbc6ef8a3de538214241";
+export const GENERATED_SERVER_VERSION = "0.7.24";
+export const GENERATED_TOOL_CATALOG_HASH = "dee39a43a4d642b61b861f4aa90cdabc9a416befbc10d463a005bcbb892eaf14";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "b78f54e50d3a2d615af92ee2a2373599684f02a802b06f1226981f985e34f456";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -963,7 +963,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Invoke an accessibility action exposed by an element selected by index, identifier, or semantic selector. Defaults to the primary action unless action is provided. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Invoke an accessibility action exposed by an element selected by index, identifier, or semantic selector. Defaults to the primary action unless action is provided. A stale semantic target can recover once with verified process/window ownership. Recovery invalidates cached indices; call get_app_state before further element_index actions. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {

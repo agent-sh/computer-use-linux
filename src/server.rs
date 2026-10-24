@@ -1230,7 +1230,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "perform_action",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
-        description = "Invoke an accessibility action exposed by an element selected by index, identifier, or semantic selector. Defaults to the primary action unless action is provided. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+        description = "Invoke an accessibility action exposed by an element selected by index, identifier, or semantic selector. Defaults to the primary action unless action is provided. A stale semantic target can recover once with verified process/window ownership. Recovery invalidates cached indices; call get_app_state before further element_index actions. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -2314,7 +2314,7 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.7.23",
+    version = "0.7.24",
     instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send literal type_text through KDE clipboard integration on Plasma Wayland, wtype on compatible Wayland compositors, or portal keysyms on other Wayland sessions. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Mutating tools (click, type_text, press_key, scroll, drag, perform_action, set_value, activate_window, move_window, resize_window) accept optional screenshot_after (true, \"screen\", or \"window\") with format/quality/scale/max_width/max_height/max_bytes and optional include_tree=true to return post-action observation in the same tool call. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype uses a single literal argument after -- to avoid stdin keymap-refresh corruption; text is visible in process arguments, so confirmed password fields are rejected (use set_value). Terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call; split larger input into smaller calls or expose accessibility. Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. X11 xdotool can silently substitute symbols under non-US XKB layouts (reported with br/ABNT2) or changing keymap state; inspect the text before pressing Enter or submitting it. A successful type_text result confirms dispatch only; every text backend leaves field contents unverified. Re-observe the target before retrying. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content."
 )]
 impl ServerHandler for ComputerUseLinux {}
@@ -5195,11 +5195,17 @@ impl ComputerUseLinux {
         }
 
         let original_error = format!("{error:#}");
-        let recovery_scope = self
+        let (recovery_scope, original_window) = self
             .last_snapshot
             .lock()
             .ok()
-            .and_then(|snapshot| snapshot.recovery_scope.clone());
+            .map(|snapshot| {
+                (
+                    snapshot.recovery_scope.clone(),
+                    snapshot.window_id.zip(snapshot.window_backend.clone()),
+                )
+            })
+            .unwrap_or((None, None));
         let Some(recovery_scope) = recovery_scope else {
             return action_error_output(
                 format!(
@@ -5208,6 +5214,17 @@ impl ComputerUseLinux {
                 &received,
             );
         };
+        let original_pid = recovery_scope.params.pid.or(recovery_scope.target_pid);
+        let observed_window_scope =
+            recovery_scope.params.window_id.is_some() && original_window.is_some();
+        if original_pid.is_none() && !observed_window_scope {
+            return action_error_output(
+                format!(
+                    "{original_error}. Automatic AT-SPI target recovery requires an observed PID or exact window-scoped snapshot. An app name, app_id, title, or an unobserved window_id cannot establish the original app identity. Call get_app_state with pid or window_id before retrying."
+                ),
+                &received,
+            );
+        }
 
         let refreshed = match refresh(recovery_scope.clone()).await {
             Ok(refreshed) => refreshed,
@@ -5221,20 +5238,21 @@ impl ComputerUseLinux {
             }
         };
         let snapshot = refreshed.snapshot;
-        let pid_scope_matches = refreshed
-            .target_pid
-            .is_none_or(|pid| snapshot.root_pid == Some(pid));
+        // Fresh window discovery must not replace the identity originally
+        // observed by get_app_state. A process change needs a new observation.
+        // A window match alone cannot identify its accessibility root.
+        let pid_scope_matches = original_pid
+            .or(refreshed.target_pid)
+            .is_some_and(|pid| snapshot.root_pid == Some(pid));
         let window_scope_matches = if recovery_scope.params.window_id.is_some() {
-            let original_window_id = self
-                .last_snapshot
-                .lock()
-                .ok()
-                .and_then(|cached| cached.window_id);
             // The resolver accepts JSON-rounded IDs. Compare the actual
-            // observed identity when available, not the raw requested number.
-            refreshed.window.as_ref().is_some_and(|window| {
-                original_window_id.is_none_or(|window_id| window.window_id == window_id)
-            })
+            // observed identity, not the raw requested number.
+            original_window
+                .as_ref()
+                .zip(refreshed.window.as_ref())
+                .is_some_and(|((window_id, backend), window)| {
+                    window.window_id == *window_id && window.backend == *backend
+                })
         } else {
             true
         };
@@ -5251,22 +5269,16 @@ impl ComputerUseLinux {
             );
         }
 
-        let root_pid = snapshot.root_pid;
         let (nodes, _) = compact_accessibility_tree_with_note(
             snapshot.nodes,
             snapshot.scoped,
             snapshot.truncated,
         );
-        let mut recovery_scope = recovery_scope;
-        recovery_scope.target_pid = root_pid;
-        self.cache_snapshot_with_window(
+        // A recovery tree has not been shown to the caller. Its compacted
+        // indices must never silently replace indices from get_app_state.
+        self.cache_snapshot(&[], None);
+        let recovered = match resolve_semantic_node(
             &nodes,
-            root_pid,
-            Some(recovery_scope),
-            refreshed.window.as_ref(),
-        );
-        let recovered = match self.resolve_cached_node(
-            None,
             &params.selector(),
             ElementResolvePurpose::Action,
         ) {
@@ -5289,10 +5301,14 @@ impl ComputerUseLinux {
             );
         }
 
-        match invoke(recovered.object_ref, requested_action.map(str::to_string)).await {
-            Ok(invocation) => action_invocation_output(invocation, &received),
-            Err(error) => action_error_output(error.to_string(), &received),
-        }
+        let Json(output) =
+            match invoke(recovered.object_ref, requested_action.map(str::to_string)).await {
+                Ok(invocation) => action_invocation_output(invocation, &received),
+                Err(error) => action_error_output(error.to_string(), &received),
+            };
+        Json(with_notes(output, [
+            "Recovery invalidated the cached element indices. Call get_app_state before any further element-indexed action.".to_string(),
+        ]))
     }
 }
 
@@ -5300,9 +5316,11 @@ fn action_recovery_target_pid(
     scope: &AccessibilityRecoveryScope,
     resolved_window_pid: Option<u32>,
 ) -> Option<u32> {
-    resolved_window_pid
-        .or(scope.params.pid)
+    scope
+        .params
+        .pid
         .or(scope.target_pid)
+        .or(resolved_window_pid)
 }
 
 fn is_recoverable_action_query_error(error: &anyhow::Error) -> bool {
@@ -12043,7 +12061,296 @@ mod action_recovery_tests {
     }
 
     #[tokio::test]
-    async fn dead_owner_recovers_new_identity_dispatches_once_and_replaces_snapshot() {
+    async fn semantic_recovery_regression_old_index_cannot_dispatch_a_reordered_element() {
+        let backend = ComputerUseLinux::default();
+        backend.cache_snapshot_with_scope(
+            &[action_node(0, OLD_REF)],
+            Some(1234),
+            Some(recovery_scope(serde_json::json!({"pid": 1234}))),
+        );
+        let Json(recovered) = backend
+            .perform_element_action_with(
+                &semantic_params(),
+                Some("click"),
+                |object_ref, _| async move {
+                    if object_ref == OLD_REF {
+                        Err(dead_name_error())
+                    } else {
+                        assert_eq!(object_ref, NEW_REF);
+                        Ok(successful_invocation())
+                    }
+                },
+                |_| async {
+                    let mut other = action_node(0, OTHER_REF);
+                    other.name = Some("Delete document".to_string());
+                    Ok(refreshed_snapshot(
+                        vec![other, action_node(1, NEW_REF)],
+                        true,
+                        Some(1234),
+                        Some(1234),
+                    ))
+                },
+            )
+            .await;
+        assert!(recovered.ok, "{}", recovered.message);
+
+        let stale_dispatches = Arc::new(Mutex::new(Vec::new()));
+        let Json(indexed) = backend
+            .perform_element_action_with(
+                &ActionParams {
+                    element_index: Some(0),
+                    ..Default::default()
+                },
+                Some("click"),
+                {
+                    let stale_dispatches = Arc::clone(&stale_dispatches);
+                    move |object_ref, _| {
+                        stale_dispatches.lock().unwrap().push(object_ref);
+                        async { Ok(successful_invocation()) }
+                    }
+                },
+                |_| async { panic!("indexed actions must never refresh") },
+            )
+            .await;
+        assert!(
+            stale_dispatches.lock().unwrap().is_empty(),
+            "stale index dispatched to {:?}",
+            stale_dispatches.lock().unwrap()
+        );
+        assert!(!indexed.ok);
+        assert!(recovered.message.contains("get_app_state"));
+        assert!(indexed.message.contains("get_app_state"));
+    }
+
+    #[tokio::test]
+    async fn semantic_recovery_regression_unstable_scope_cannot_rebind_another_app() {
+        for params in [
+            serde_json::json!({"app_name_or_bundle_identifier": "Editor"}),
+            serde_json::json!({"app_id": "org.example.Editor"}),
+            serde_json::json!({"title": "Editor window"}),
+        ] {
+            let backend = ComputerUseLinux::default();
+            backend.cache_snapshot_with_scope(
+                &[action_node(0, OLD_REF)],
+                None,
+                Some(recovery_scope(params)),
+            );
+            let refreshes = Arc::new(AtomicUsize::new(0));
+            let dispatches = Arc::new(AtomicUsize::new(0));
+            let Json(output) = backend
+                .perform_element_action_with(
+                    &semantic_params(),
+                    Some("click"),
+                    {
+                        let dispatches = Arc::clone(&dispatches);
+                        move |object_ref, _| {
+                            let dispatches = Arc::clone(&dispatches);
+                            async move {
+                                if object_ref == OLD_REF {
+                                    Err(dead_name_error())
+                                } else {
+                                    dispatches.fetch_add(1, Ordering::SeqCst);
+                                    Ok(successful_invocation())
+                                }
+                            }
+                        }
+                    },
+                    {
+                        let refreshes = Arc::clone(&refreshes);
+                        move |_| async move {
+                            refreshes.fetch_add(1, Ordering::SeqCst);
+                            // A different application's matching button can satisfy
+                            // a name substring without proving its old identity.
+                            Ok(refreshed_snapshot(
+                                vec![action_node(0, OTHER_REF)],
+                                true,
+                                None,
+                                None,
+                            ))
+                        }
+                    },
+                )
+                .await;
+            assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+            assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+            assert!(!output.ok);
+            assert!(output.message.contains("get_app_state"));
+        }
+    }
+
+    #[tokio::test]
+    async fn semantic_recovery_identity_regression_observed_pid_cannot_roll_over() {
+        for params in [
+            serde_json::json!({"title": "Editor"}),
+            serde_json::json!({"app_id": "org.example.Editor"}),
+        ] {
+            let backend = ComputerUseLinux::default();
+            backend
+                .commit_app_state_snapshot(
+                    &[action_node(0, OLD_REF)],
+                    Some(1234),
+                    Some(&recovery_window(42, 1234)),
+                    &serde_json::from_value(params).unwrap(),
+                    true,
+                )
+                .await;
+            let dispatches = Arc::new(AtomicUsize::new(0));
+            let Json(output) = backend
+                .perform_element_action_with(
+                    &semantic_params(),
+                    Some("click"),
+                    {
+                        let dispatches = Arc::clone(&dispatches);
+                        move |object_ref, _| {
+                            let dispatches = Arc::clone(&dispatches);
+                            async move {
+                                if object_ref == OLD_REF {
+                                    Err(dead_name_error())
+                                } else {
+                                    dispatches.fetch_add(1, Ordering::SeqCst);
+                                    Ok(successful_invocation())
+                                }
+                            }
+                        }
+                    },
+                    |_scope| async move {
+                        let mut refreshed = refreshed_snapshot(
+                            vec![action_node(0, OTHER_REF)],
+                            true,
+                            Some(5678),
+                            Some(5678),
+                        );
+                        refreshed.window = Some(recovery_window(43, 5678));
+                        Ok(refreshed)
+                    },
+                )
+                .await;
+            assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+            assert!(!output.ok);
+            assert!(output.message.contains("get_app_state"));
+            assert_eq!(backend.last_snapshot.lock().unwrap().pid, Some(1234));
+        }
+    }
+
+    #[tokio::test]
+    async fn semantic_recovery_identity_regression_unobserved_window_cannot_admit_refresh() {
+        let backend = ComputerUseLinux::default();
+        backend
+            .commit_app_state_snapshot(
+                &[action_node(0, OLD_REF)],
+                None,
+                None,
+                &serde_json::from_value(serde_json::json!({"window_id": 42})).unwrap(),
+                true,
+            )
+            .await;
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let Json(output) = backend
+            .perform_element_action_with(
+                &semantic_params(),
+                Some("click"),
+                |object_ref, _| async move {
+                    if object_ref == OLD_REF {
+                        Err(dead_name_error())
+                    } else {
+                        Ok(successful_invocation())
+                    }
+                },
+                {
+                    let refreshes = Arc::clone(&refreshes);
+                    move |_| async move {
+                        refreshes.fetch_add(1, Ordering::SeqCst);
+                        let mut refreshed = refreshed_snapshot(
+                            vec![action_node(0, OTHER_REF)],
+                            true,
+                            Some(5678),
+                            Some(5678),
+                        );
+                        refreshed.window = Some(recovery_window(42, 5678));
+                        Ok(refreshed)
+                    }
+                },
+            )
+            .await;
+        assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+        assert!(!output.ok);
+        assert!(output.message.contains("get_app_state"));
+    }
+
+    #[tokio::test]
+    async fn window_only_recovery_requires_exact_window_and_matching_root_pid() {
+        for (fresh_window_id, fresh_backend, fresh_pid, expected_ok) in [
+            (42, KWIN_BACKEND, Some(5678), true),
+            (43, KWIN_BACKEND, Some(5678), false),
+            (42, "x11", Some(5678), false),
+            (42, KWIN_BACKEND, None, false),
+        ] {
+            let backend = ComputerUseLinux::default();
+            let mut original_window = recovery_window(42, 1234);
+            original_window.pid = None;
+            backend
+                .commit_app_state_snapshot(
+                    &[action_node(0, OLD_REF)],
+                    None,
+                    Some(&original_window),
+                    &serde_json::from_value(serde_json::json!({"window_id": 42})).unwrap(),
+                    true,
+                )
+                .await;
+            let dispatches = Arc::new(AtomicUsize::new(0));
+            let Json(output) = backend
+                .perform_element_action_with(
+                    &semantic_params(),
+                    Some("click"),
+                    {
+                        let dispatches = Arc::clone(&dispatches);
+                        move |object_ref, _| {
+                            let dispatches = Arc::clone(&dispatches);
+                            async move {
+                                if object_ref == OLD_REF {
+                                    Err(dead_name_error())
+                                } else {
+                                    dispatches.fetch_add(1, Ordering::SeqCst);
+                                    Ok(successful_invocation())
+                                }
+                            }
+                        }
+                    },
+                    |scope| async move {
+                        let pid = action_recovery_target_pid(&scope, fresh_pid);
+                        assert_eq!(pid, fresh_pid);
+                        // An unrelated name-matching accessibility root still
+                        // looks scoped when neither owner supplies a PID.
+                        let object_ref = if fresh_pid.is_none() {
+                            OTHER_REF
+                        } else {
+                            NEW_REF
+                        };
+                        let mut refreshed = refreshed_snapshot(
+                            vec![action_node(0, object_ref)],
+                            true,
+                            fresh_pid,
+                            pid,
+                        );
+                        refreshed.window = Some(WindowInfo {
+                            backend: fresh_backend.to_string(),
+                            pid: fresh_pid,
+                            ..recovery_window(fresh_window_id, 5678)
+                        });
+                        Ok(refreshed)
+                    },
+                )
+                .await;
+            assert_eq!(dispatches.load(Ordering::SeqCst), usize::from(expected_ok));
+            assert_eq!(output.ok, expected_ok, "{}", output.message);
+            if fresh_pid.is_none() {
+                assert!(output.message.contains("could not prove"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dead_owner_recovers_new_identity_dispatches_once_and_invalidates_snapshot() {
         let backend = ComputerUseLinux::default();
         let scope = recovery_scope(serde_json::json!({
             "app_name_or_bundle_identifier": "org.example.Editor",
@@ -12053,7 +12360,12 @@ mod action_recovery_tests {
             "max_nodes": 50,
             "max_depth": 8
         }));
-        backend.cache_snapshot_with_scope(&[action_node(0, OLD_REF)], Some(1234), Some(scope));
+        backend.cache_snapshot_with_window(
+            &[action_node(0, OLD_REF)],
+            Some(1234),
+            Some(scope),
+            Some(&recovery_window(42, 1234)),
+        );
         let queries = Arc::new(AtomicUsize::new(0));
         let dispatches = Arc::new(AtomicUsize::new(0));
         let refreshes = Arc::new(AtomicUsize::new(0));
@@ -12126,17 +12438,15 @@ mod action_recovery_tests {
         assert_eq!(refreshes.load(Ordering::SeqCst), 1);
         assert_eq!(*invoked_refs.lock().unwrap(), vec![OLD_REF, NEW_REF]);
         let snapshot = backend.last_snapshot.lock().unwrap();
-        assert_eq!(snapshot.pid, Some(1234));
-        assert_eq!(snapshot.nodes.len(), 1, "recovery must compact the tree");
-        assert_eq!(snapshot.nodes[0].index, 0);
-        assert_eq!(snapshot.nodes[0].object_ref, NEW_REF);
-        let scope = snapshot.recovery_scope.as_ref().unwrap();
-        assert_eq!(scope.params.pid, Some(1234));
-        assert_eq!(scope.params.window_id, Some(42));
+        assert!(snapshot.nodes.is_empty());
+        assert!(snapshot.pid.is_none());
+        assert!(snapshot.window_id.is_none());
+        assert!(snapshot.recovery_scope.is_none());
+        assert!(output.message.contains("Call get_app_state"));
     }
 
     #[tokio::test]
-    async fn recovery_caches_fresh_window_binding_and_clears_unresolved_old_binding() {
+    async fn pid_scoped_recovery_invalidates_window_binding_after_local_resolution() {
         let old_window = WindowInfo {
             window_id: 42,
             title: Some("Editor".to_string()),
@@ -12154,12 +12464,18 @@ mod action_recovery_tests {
 
         for fresh_window_id in [Some(84), None] {
             let backend = ComputerUseLinux::default();
-            backend.cache_snapshot_with_window(
-                &[action_node(0, OLD_REF)],
-                Some(1234),
-                Some(named_scope()),
-                Some(&old_window),
-            );
+            backend
+                .commit_app_state_snapshot(
+                    &[action_node(0, OLD_REF)],
+                    Some(1234),
+                    Some(&old_window),
+                    &serde_json::from_value(serde_json::json!({
+                        "app_name_or_bundle_identifier": "Editor"
+                    }))
+                    .unwrap(),
+                    true,
+                )
+                .await;
             let fresh_window = fresh_window_id.map(|window_id| WindowInfo {
                 window_id,
                 ..old_window.clone()
@@ -12175,7 +12491,9 @@ mod action_recovery_tests {
                             Ok(successful_invocation())
                         }
                     },
-                    |_scope| async move {
+                    |scope| async move {
+                        assert_eq!(scope.params.pid, None);
+                        assert_eq!(scope.target_pid, Some(1234));
                         let mut refreshed = refreshed_snapshot(
                             vec![action_node(0, NEW_REF)],
                             true,
@@ -12190,13 +12508,12 @@ mod action_recovery_tests {
 
             assert!(output.ok, "{}", output.message);
             let cached = backend.last_snapshot.lock().unwrap();
-            assert_eq!(cached.nodes[0].object_ref, NEW_REF);
-            assert_eq!(cached.pid, Some(1234));
-            assert_eq!(cached.window_id, fresh_window_id);
-            assert_eq!(
-                cached.window_backend.as_deref(),
-                fresh_window_id.map(|_| KWIN_BACKEND)
-            );
+            assert!(cached.nodes.is_empty());
+            assert!(cached.pid.is_none());
+            assert!(cached.window_id.is_none());
+            assert!(cached.window_backend.is_none());
+            assert!(cached.recovery_scope.is_none());
+            assert!(output.message.contains("Call get_app_state"));
         }
     }
 
@@ -12265,7 +12582,7 @@ mod action_recovery_tests {
         scope.target_pid = Some(1234);
         assert_eq!(scope.params.pid, None);
         assert_eq!(action_recovery_target_pid(&scope, None), Some(1234));
-        assert_eq!(action_recovery_target_pid(&scope, Some(5678)), Some(5678));
+        assert_eq!(action_recovery_target_pid(&scope, Some(5678)), Some(1234));
         backend.cache_snapshot_with_scope(&[action_node(0, OLD_REF)], Some(1234), Some(scope));
         let queries = Arc::new(AtomicUsize::new(0));
         let dispatches = Arc::new(AtomicUsize::new(0));
@@ -12416,14 +12733,19 @@ mod action_recovery_tests {
     }
 
     #[tokio::test]
-    async fn recovery_uses_refreshed_pid_for_a_second_recovery() {
+    async fn window_scoped_recovery_requires_observation_before_a_second_recovery() {
         let backend = ComputerUseLinux::default();
         let mut scope = recovery_scope(serde_json::json!({
             "app_name_or_bundle_identifier": "Editor",
             "window_id": 42
         }));
         scope.target_pid = Some(1234);
-        backend.cache_snapshot_with_scope(&[action_node(0, OLD_REF)], Some(1234), Some(scope));
+        backend.cache_snapshot_with_window(
+            &[action_node(0, OLD_REF)],
+            Some(1234),
+            Some(scope),
+            Some(&recovery_window(42, 1234)),
+        );
         let params = semantic_params();
         let first_refs = Arc::new(Mutex::new(Vec::new()));
 
@@ -12450,10 +12772,10 @@ mod action_recovery_tests {
                     let mut refreshed = refreshed_snapshot(
                         vec![action_node(0, NEW_REF)],
                         true,
-                        Some(5678),
-                        Some(5678),
+                        Some(1234),
+                        Some(1234),
                     );
-                    refreshed.window = Some(recovery_window(42, 5678));
+                    refreshed.window = Some(recovery_window(42, 1234));
                     Ok(refreshed)
                 },
             )
@@ -12463,12 +12785,33 @@ mod action_recovery_tests {
         assert_eq!(*first_refs.lock().unwrap(), vec![OLD_REF, NEW_REF]);
         {
             let snapshot = backend.last_snapshot.lock().unwrap();
-            assert_eq!(snapshot.pid, Some(5678));
-            assert_eq!(snapshot.nodes[0].object_ref, NEW_REF);
-            let scope = snapshot.recovery_scope.as_ref().unwrap();
-            assert_eq!(scope.params.pid, None);
-            assert_eq!(scope.target_pid, Some(5678));
+            assert!(snapshot.nodes.is_empty());
+            assert!(snapshot.pid.is_none());
+            assert!(snapshot.recovery_scope.is_none());
         }
+
+        let Json(without_observation) = backend
+            .perform_element_action_with(
+                &params,
+                Some("click"),
+                |_, _| async { panic!("invalidated indices must not dispatch") },
+                |_| async { panic!("invalidated snapshots must not refresh") },
+            )
+            .await;
+        assert!(!without_observation.ok);
+        assert!(without_observation.message.contains("get_app_state"));
+
+        // Simulate the next explicit get_app_state. Its observed PID and exact
+        // window binding, rather than the hidden recovery tree, own this cache.
+        backend
+            .commit_app_state_snapshot(
+                &[action_node(0, NEW_REF)],
+                Some(5678),
+                Some(&recovery_window(42, 5678)),
+                &serde_json::from_value(serde_json::json!({"window_id": 42})).unwrap(),
+                true,
+            )
+            .await;
 
         let second_refs = Arc::new(Mutex::new(Vec::new()));
         let Json(output) = backend
@@ -12494,10 +12837,10 @@ mod action_recovery_tests {
                     let mut refreshed = refreshed_snapshot(
                         vec![action_node(0, OTHER_REF)],
                         true,
-                        Some(6789),
-                        Some(6789),
+                        Some(5678),
+                        Some(5678),
                     );
-                    refreshed.window = Some(recovery_window(42, 6789));
+                    refreshed.window = Some(recovery_window(42, 5678));
                     Ok(refreshed)
                 },
             )
@@ -12506,17 +12849,19 @@ mod action_recovery_tests {
         assert!(output.ok, "{}", output.message);
         assert_eq!(*second_refs.lock().unwrap(), vec![NEW_REF, OTHER_REF]);
         let snapshot = backend.last_snapshot.lock().unwrap();
-        assert_eq!(snapshot.pid, Some(6789));
-        assert_eq!(snapshot.nodes[0].object_ref, OTHER_REF);
-        let scope = snapshot.recovery_scope.as_ref().unwrap();
-        assert_eq!(scope.params.pid, None);
-        assert_eq!(scope.target_pid, Some(6789));
+        assert!(snapshot.nodes.is_empty());
+        assert!(snapshot.pid.is_none());
+        assert!(snapshot.recovery_scope.is_none());
     }
 
     #[tokio::test]
     async fn unscoped_refresh_is_not_cached_or_invoked() {
         let backend = ComputerUseLinux::default();
-        backend.cache_snapshot_with_scope(&[action_node(0, OLD_REF)], None, Some(named_scope()));
+        backend.cache_snapshot_with_scope(
+            &[action_node(0, OLD_REF)],
+            Some(1234),
+            Some(recovery_scope(serde_json::json!({"pid": 1234}))),
+        );
         let queries = Arc::new(AtomicUsize::new(0));
         let params = semantic_params();
 
@@ -12660,7 +13005,11 @@ mod action_recovery_tests {
     #[tokio::test]
     async fn recovered_dispatch_failure_is_not_retried() {
         let backend = ComputerUseLinux::default();
-        backend.cache_snapshot_with_scope(&[action_node(0, OLD_REF)], None, Some(named_scope()));
+        backend.cache_snapshot_with_scope(
+            &[action_node(0, OLD_REF)],
+            Some(1234),
+            Some(recovery_scope(serde_json::json!({"pid": 1234}))),
+        );
         let queries = Arc::new(AtomicUsize::new(0));
         let refreshes = Arc::new(AtomicUsize::new(0));
         let params = semantic_params();
@@ -12689,8 +13038,8 @@ mod action_recovery_tests {
                         Ok(refreshed_snapshot(
                             vec![action_node(0, NEW_REF)],
                             true,
-                            None,
-                            None,
+                            Some(1234),
+                            Some(1234),
                         ))
                     }
                 },
@@ -12701,6 +13050,8 @@ mod action_recovery_tests {
         assert!(output.message.contains("failed to invoke AT-SPI action 0"));
         assert_eq!(queries.load(Ordering::SeqCst), 2);
         assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+        assert!(backend.last_snapshot.lock().unwrap().nodes.is_empty());
+        assert!(output.message.contains("Call get_app_state"));
     }
 
     #[tokio::test]

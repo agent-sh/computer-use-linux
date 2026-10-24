@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.24] - 2026-10-24
+
+### Fixed
+
+- Keep semantic recovery trees local and invalidate cached indices before a recovered action, requiring fresh state instead of silently renumbering the caller's last tree.
+- Pin recovery to the observed process and exact window/backend identity, and reject name-only or PID-unproved rebinding after the original AT-SPI owner disappears. Thanks @ilysenko for the review.
+
 ## [0.7.23] - 2026-10-24
 
 ### Fixed
@@ -867,7 +874,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.23...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.24...HEAD
+[0.7.24]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.23...v0.7.24
 [0.7.23]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.22...v0.7.23
 [0.7.22]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.21...v0.7.22
 [0.7.21]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.20...v0.7.21
