@@ -701,6 +701,14 @@ fn kwin_window_script_source(
             active: read(window, "active") || window === activeWindow,
             clientType: clientType(window),
             normalWindow: read(window, "normalWindow"),
+            dialog: read(window, "dialog"),
+            transient: read(window, "transient"),
+            managed: read(window, "managed"),
+            wantsInput: read(window, "wantsInput"),
+            specialWindow: read(window, "specialWindow"),
+            popupWindow: read(window, "popupWindow") || read(window, "popupMenu")
+                || read(window, "dropdownMenu") || read(window, "tooltip")
+                || read(window, "comboBox") || read(window, "menu"),
             desktopWindow: read(window, "desktopWindow"),
             skipTaskbar: read(window, "skipTaskbar"),
             dock: read(window, "dock")
@@ -940,10 +948,7 @@ fn parse_kwin_windows(json: &str) -> Result<Vec<WindowInfo>> {
     let mut windows = snapshot
         .windows
         .into_iter()
-        .filter(|window| !json_value_as_bool(window.desktop_window.as_ref()).unwrap_or(false))
-        .filter(|window| !json_value_as_bool(window.dock.as_ref()).unwrap_or(false))
-        .filter(|window| !json_value_as_bool(window.skip_taskbar.as_ref()).unwrap_or(false))
-        .filter(|window| json_value_as_bool(window.normal_window.as_ref()).unwrap_or(true))
+        .filter(element_window)
         .map(WindowInfo::try_from)
         .collect::<Result<Vec<_>>>()?;
     windows.sort_by_key(|window| window.window_id);
@@ -1027,6 +1032,12 @@ struct KwinRawWindow {
     active: Option<serde_json::Value>,
     client_type: Option<String>,
     normal_window: Option<serde_json::Value>,
+    dialog: Option<serde_json::Value>,
+    transient: Option<serde_json::Value>,
+    managed: Option<serde_json::Value>,
+    wants_input: Option<serde_json::Value>,
+    special_window: Option<serde_json::Value>,
+    popup_window: Option<serde_json::Value>,
     desktop_window: Option<serde_json::Value>,
     skip_taskbar: Option<serde_json::Value>,
     dock: Option<serde_json::Value>,
@@ -1265,6 +1276,11 @@ impl KwinElementClickSnapshot {
         }) {
             anyhow::bail!("selected AT-SPI frame belongs to a different KWin window than the cached or requested window identity");
         }
+        if !element_window(window) {
+            anyhow::bail!(
+                "unsupported KWin window type: element mapping requires a normal window, dialog, or verified interactive top-level transient; desktop, dock, and popup windows cannot be mapped by refreshing the snapshot"
+            );
+        }
         if !visible_element_window(window) {
             anyhow::bail!(
                 "associated KWin window is hidden or its current-desktop visibility is unknown"
@@ -1352,16 +1368,33 @@ impl KwinElementClickSnapshot {
 }
 
 fn visible_element_window(window: &KwinRawWindow) -> bool {
-    element_window(window)
-        && !json_value_as_bool(window.minimized.as_ref()).unwrap_or(false)
+    !json_value_as_bool(window.minimized.as_ref()).unwrap_or(false)
         && json_value_as_bool(window.on_current_desktop.as_ref()) == Some(true)
 }
 
 fn element_window(window: &KwinRawWindow) -> bool {
-    !json_value_as_bool(window.desktop_window.as_ref()).unwrap_or(false)
-        && !json_value_as_bool(window.dock.as_ref()).unwrap_or(false)
-        && !json_value_as_bool(window.skip_taskbar.as_ref()).unwrap_or(false)
-        && json_value_as_bool(window.normal_window.as_ref()).unwrap_or(true)
+    if [
+        &window.desktop_window,
+        &window.dock,
+        &window.popup_window,
+        &window.special_window,
+    ]
+    .into_iter()
+    .any(|flag| json_value_as_bool(flag.as_ref()) == Some(true))
+    {
+        return false;
+    }
+    // skipTaskbar is a presentation hint. Dialogs and proven interactive
+    // transients remain targetable even when they do not have a taskbar entry.
+    let dialog = json_value_as_bool(window.dialog.as_ref()) == Some(true);
+    let interactive_transient = json_value_as_bool(window.transient.as_ref()) == Some(true)
+        && json_value_as_bool(window.managed.as_ref()) == Some(true)
+        && json_value_as_bool(window.wants_input.as_ref()) == Some(true)
+        && json_value_as_bool(window.special_window.as_ref()) == Some(false)
+        && json_value_as_bool(window.popup_window.as_ref()) == Some(false);
+    let normal = json_value_as_bool(window.normal_window.as_ref()).unwrap_or(true)
+        && !json_value_as_bool(window.skip_taskbar.as_ref()).unwrap_or(false);
+    normal || dialog || interactive_transient
 }
 
 fn global_element_point(
@@ -1790,6 +1823,105 @@ mod element_click_tests {
         assert_eq!(point.capture, (417, 528));
     }
 
+    fn dialog_window(caption: &str, skip_taskbar: bool) -> Value {
+        let mut dialog = reporter_window();
+        dialog["caption"] = json!(caption);
+        dialog["normalWindow"] = json!(false);
+        dialog["dialog"] = json!(true);
+        dialog["transient"] = json!(true);
+        dialog["skipTaskbar"] = json!(skip_taskbar);
+        dialog
+    }
+
+    #[test]
+    fn dialog_windows_are_listed_even_when_they_skip_the_taskbar() {
+        for caption in ["Save File", "Open File", "Confirm overwrite"] {
+            for skip_taskbar in [false, true] {
+                let json = json!({"windows": [dialog_window(caption, skip_taskbar)]}).to_string();
+                let listed = parse_kwin_windows(&json).unwrap();
+                assert_eq!(listed.len(), 1, "{caption}: skipTaskbar={skip_taskbar}");
+                assert_eq!(listed[0].title.as_deref(), Some(caption));
+            }
+        }
+    }
+
+    #[test]
+    fn dialog_element_clicks_map_even_when_they_skip_the_taskbar() {
+        for caption in ["Save File", "Open File", "Confirm overwrite"] {
+            for skip_taskbar in [false, true] {
+                let snapshot = snapshot(
+                    vec![dialog_window(caption, skip_taskbar)],
+                    vec![output("DP-1", rect(0, 0, 2560, 1440), json!(1.5))],
+                );
+                let point = snapshot
+                    .map_element_click(&target([0, 0, 800, 600], (32, 16)), 3840, 2160)
+                    .unwrap();
+                assert_eq!(point.logical, (278, 352));
+                assert_eq!(point.capture, (417, 528));
+            }
+        }
+    }
+
+    #[test]
+    fn interactive_transients_require_proven_top_level_input_capabilities() {
+        let mut transient = dialog_window("Tool window", true);
+        transient["dialog"] = json!(false);
+        transient["managed"] = json!(true);
+        transient["wantsInput"] = json!(true);
+        transient["specialWindow"] = json!(false);
+        transient["popupWindow"] = json!(false);
+        let json = json!({"windows": [transient.clone()]}).to_string();
+        assert_eq!(parse_kwin_windows(&json).unwrap().len(), 1);
+        let outputs = vec![output("DP-1", rect(0, 0, 2560, 1440), json!(1.5))];
+        assert!(snapshot(vec![transient.clone()], outputs.clone())
+            .map_element_click(&target([0, 0, 800, 600], (32, 16)), 3840, 2160)
+            .is_ok());
+        for flag in ["managed", "wantsInput", "specialWindow", "popupWindow"] {
+            let mut unproven = transient.clone();
+            unproven[flag] = Value::Null;
+            assert!(
+                parse_kwin_windows(&json!({"windows": [unproven.clone()]}).to_string())
+                    .unwrap()
+                    .is_empty(),
+                "{flag}"
+            );
+            let error = snapshot(vec![unproven], outputs.clone())
+                .map_element_click(&target([0, 0, 800, 600], (32, 16)), 3840, 2160)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("unsupported KWin window type"),
+                "{flag}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_dock_special_and_popup_windows_are_neither_listed_nor_mapped() {
+        for flag in ["desktopWindow", "dock", "specialWindow", "popupWindow"] {
+            let mut excluded = dialog_window("Excluded surface", true);
+            excluded[flag] = json!(true);
+            assert!(
+                parse_kwin_windows(&json!({"windows": [excluded.clone()]}).to_string())
+                    .unwrap()
+                    .is_empty(),
+                "{flag}"
+            );
+            let snapshot = snapshot(
+                vec![excluded],
+                vec![output("DP-1", rect(0, 0, 2560, 1440), json!(1.5))],
+            );
+            let error = snapshot
+                .map_element_click(&target([0, 0, 800, 600], (32, 16)), 3840, 2160)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("unsupported KWin window type"),
+                "{flag}: {error}"
+            );
+        }
+    }
+
     #[test]
     fn same_pid_local_frames_cannot_borrow_focused_or_explicit_window_identity() {
         let first = reporter_window();
@@ -2157,6 +2289,13 @@ mod element_click_tests {
             "read(output, \"enabled\")",
             "devicePixelRatio",
             "outputs: activeOutputs()",
+            "dialog: read(window, \"dialog\")",
+            "transient: read(window, \"transient\")",
+            "read(window, \"popupMenu\")",
+            "read(window, \"dropdownMenu\")",
+            "read(window, \"tooltip\")",
+            "read(window, \"comboBox\")",
+            "read(window, \"menu\")",
             "window.desktops",
             "workspace.currentDesktopForScreen(window.output)",
             "read(window, \"onAllDesktops\")",

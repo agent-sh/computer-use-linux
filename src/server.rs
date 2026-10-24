@@ -5434,9 +5434,12 @@ fn depth_one_kwin_element_frame(
         if parent.depth == 1 {
             if !matches!(
                 parent.role.trim().to_ascii_lowercase().as_str(),
-                "frame" | "window"
+                "frame" | "window" | "dialog" | "alert"
             ) {
-                return Err("cached element's depth-1 ancestor is not a frame/window".to_string());
+                return Err(
+                    "cached element's depth-1 ancestor is not a frame/window/dialog/alert"
+                        .to_string(),
+                );
             }
             let bounds = parent
                 .bounds
@@ -9881,6 +9884,25 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
         );
         window.backend = KWIN_BACKEND.to_string();
         window
+    }
+
+    #[test]
+    fn kwin_cached_dialog_and_alert_ancestors_keep_window_identity() {
+        for role in ["frame", "window", "dialog", "alert"] {
+            let backend = ComputerUseLinux::default();
+            let mut nodes = kwin_cached_element_nodes();
+            nodes[1].role = role.to_string();
+            backend.cache_snapshot_with_window(&nodes, Some(4242), None, Some(&kwin_window(42)));
+            let target = backend
+                .cached_kwin_element_target(&nodes[2], (32, 16), None)
+                .unwrap_or_else(|error| panic!("{role}: {error}"));
+            assert_eq!(target.window_id, Some(42));
+            assert_eq!(target.pid, Some(4242));
+            assert_eq!((target.frame.width, target.frame.height), (800, 600));
+        }
+        let mut nodes = kwin_cached_element_nodes();
+        nodes[1].role = "panel".to_string();
+        assert!(depth_one_kwin_element_frame(&nodes, &nodes[2], (32, 16)).is_err());
     }
 
     #[test]
