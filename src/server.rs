@@ -857,6 +857,17 @@ impl ComputerUseLinux {
                 received,
             });
         }
+        if params.coordinate_space == ClickCoordinateSpace::Atspi
+            && !self.should_map_kwin_element_click(None)
+        {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "click".to_string(),
+                message: "AT-SPI coordinate clicks require a KWin Wayland window backend. Use screenshot capture coordinates on this session.".to_string(),
+                received,
+            });
+        }
         // Raise the target window first (if specified) so the click lands on the
         // intended app rather than whatever is stacked on top at that pixel.
         let window_target = params.window_target();
@@ -1036,6 +1047,12 @@ impl ComputerUseLinux {
                             return self.kwin_element_click_failure(node.index, &message, received);
                         }
                     }
+                } else if global_point {
+                    return self.kwin_element_click_failure(
+                        node.index,
+                        "AT-SPI coordinate clicks require a KWin Wayland window backend; the focused window uses a different backend",
+                        received,
+                    );
                 } else {
                     (center.0, center.1, None)
                 }
@@ -10148,6 +10165,30 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
                 }
                 _ => panic!("explicit AT-SPI coordinates must retain pointer semantics"),
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_atspi_coordinates_reject_non_kwin_backend_before_target_resolution() {
+        for name in ["gnome", "niri", "x11"] {
+            let backend = ComputerUseLinux::default();
+            backend.last_snapshot.lock().unwrap().window_backend = Some(name.to_string());
+            let output = backend
+                .dispatch_click(ClickParams {
+                    element_index: Some(7),
+                    x: Some(32),
+                    y: Some(16),
+                    coordinate_space: ClickCoordinateSpace::Atspi,
+                    ..Default::default()
+                })
+                .await
+                .0;
+            assert!(!output.ok);
+            assert!(
+                output.message.contains("require a KWin Wayland"),
+                "{name}: {}",
+                output.message
+            );
         }
     }
 
