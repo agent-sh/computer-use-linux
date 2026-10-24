@@ -823,7 +823,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "click",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
-        description = "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. Plain left activation prefers a native AT-SPI click/press/toggle action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+        description = "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. Plain left activation prefers a native AT-SPI click/press/toggle action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics. Explicit x/y default to raw screenshot capture pixels; coordinate_space=\"atspi\" with element_index or a semantic selector maps a global AT-SPI screen point through the element's KWin window and output geometry on KDE Wayland. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -848,6 +848,15 @@ impl ComputerUseLinux {
         let mut portal_target_point = None;
         let mut input_focus = None;
         let mut target_pid = params.pid;
+        if let Err(message) = validate_click_coordinate_space(&params) {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "click".to_string(),
+                message,
+                received,
+            });
+        }
         // Raise the target window first (if specified) so the click lands on the
         // intended app rather than whatever is stacked on top at that pixel.
         let window_target = params.window_target();
@@ -919,7 +928,9 @@ impl ComputerUseLinux {
             }
             input_focus = focus;
         }
-        if params.x.zip(params.y).is_none() {
+        if params.x.zip(params.y).is_none()
+            || params.coordinate_space == ClickCoordinateSpace::Atspi
+        {
             if let Some(node) = self.cached_node_for(
                 params.element_index,
                 &params.selector(),
@@ -998,12 +1009,22 @@ impl ComputerUseLinux {
                 }),
             };
         }
+        let global_point = matches!(&target, ClickTarget::ElementPoint { .. });
         let (x, y, kwin_click) = match target {
             ClickTarget::Coordinates(x, y) => (x, y, None),
-            ClickTarget::ElementBounds { node, center } => {
+            ClickTarget::ElementBounds { node, center }
+            | ClickTarget::ElementPoint {
+                node,
+                point: center,
+            } => {
                 if self.should_map_kwin_element_click(input_focus.as_ref()) {
                     match self
-                        .prepare_kwin_element_click(&node, center, input_focus.as_ref())
+                        .prepare_kwin_element_click(
+                            &node,
+                            center,
+                            global_point,
+                            input_focus.as_ref(),
+                        )
                         .await
                     {
                         Ok(prepared) => {
@@ -3174,6 +3195,14 @@ struct GetAppStateOutput {
     message: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ClickCoordinateSpace {
+    #[default]
+    Capture,
+    Atspi,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct ClickParams {
     #[serde(default)]
@@ -3190,6 +3219,10 @@ struct ClickParams {
     x: Option<i32>,
     #[serde(default)]
     y: Option<i32>,
+    /// Pixel space for explicit x/y: raw screenshot capture pixels (default),
+    /// or global AT-SPI screen coordinates mapped through the element's KWin window.
+    #[serde(default)]
+    coordinate_space: ClickCoordinateSpace,
     #[serde(default)]
     button: Option<String>,
     #[serde(default)]
@@ -4893,9 +4926,10 @@ impl ComputerUseLinux {
         &self,
         node: &AccessibilityNode,
         center: (i32, i32),
+        global_point: bool,
         focus: Option<&WindowFocusResult>,
     ) -> std::result::Result<PreparedKwinElementClick, String> {
-        let mut target = self.cached_kwin_element_target(node, center, focus)?;
+        let mut target = self.cached_kwin_element_target(node, center, global_point, focus)?;
         if target.pid.is_none() {
             target.pid = Some(
                 object_ref_owner_pid(&node.object_ref)
@@ -4937,6 +4971,7 @@ impl ComputerUseLinux {
         &self,
         node: &AccessibilityNode,
         center: (i32, i32),
+        global_point: bool,
         focus: Option<&WindowFocusResult>,
     ) -> std::result::Result<KwinElementClickTarget, String> {
         let cached = self
@@ -4967,12 +5002,13 @@ impl ComputerUseLinux {
         } else {
             cached.window_id
         };
-        let frame = depth_one_kwin_element_frame(&cached.nodes, node, center)?;
+        let frame = depth_one_kwin_element_frame(&cached.nodes, node, center, global_point)?;
         Ok(KwinElementClickTarget {
             window_id,
             pid: cached.pid,
             frame,
             center,
+            global_point,
             require_exact_focus: focus.is_some(),
         })
     }
@@ -5006,8 +5042,10 @@ impl ComputerUseLinux {
         &self,
         params: &ClickParams,
     ) -> std::result::Result<ClickTarget, String> {
-        if let Some((x, y)) = params.x.zip(params.y) {
-            return Ok(ClickTarget::Coordinates(x, y));
+        if params.coordinate_space == ClickCoordinateSpace::Capture {
+            if let Some((x, y)) = params.x.zip(params.y) {
+                return Ok(ClickTarget::Coordinates(x, y));
+            }
         }
 
         let selector = params.selector();
@@ -5016,6 +5054,17 @@ impl ComputerUseLinux {
             &selector,
             ElementResolvePurpose::Click,
         )?;
+
+        if params.coordinate_space == ClickCoordinateSpace::Atspi {
+            let point = params
+                .x
+                .zip(params.y)
+                .ok_or_else(|| "AT-SPI coordinate clicks require both x and y.".to_string())?;
+            return Ok(ClickTarget::ElementPoint {
+                node: Box::new(node),
+                point,
+            });
+        }
 
         // Toolkit extents are not necessarily in the pointer backend's space
         // (GTK3 X11 HiDPI, GTK4 zero-origin bounds). Ordinary activation does
@@ -5435,6 +5484,7 @@ fn depth_one_kwin_element_frame(
     nodes: &[AccessibilityNode],
     node: &AccessibilityNode,
     center: (i32, i32),
+    global_point: bool,
 ) -> std::result::Result<KwinElementFrame, String> {
     let mut parent_index = node.parent_index;
     let mut visited = Vec::new();
@@ -5468,10 +5518,11 @@ fn depth_one_kwin_element_frame(
             })?;
             let right = i64::from(bounds.x) + i64::from(bounds.width);
             let bottom = i64::from(bounds.y) + i64::from(bounds.height);
-            if i64::from(center.0) < i64::from(bounds.x)
-                || i64::from(center.0) >= right
-                || i64::from(center.1) < i64::from(bounds.y)
-                || i64::from(center.1) >= bottom
+            if !global_point
+                && (i64::from(center.0) < i64::from(bounds.x)
+                    || i64::from(center.0) >= right
+                    || i64::from(center.1) < i64::from(bounds.y)
+                    || i64::from(center.1) >= bottom)
             {
                 return Err("element center is outside its depth-1 AT-SPI frame/window".to_string());
             }
@@ -5496,6 +5547,10 @@ enum ClickTarget {
     ElementBounds {
         node: Box<AccessibilityNode>,
         center: (i32, i32),
+    },
+    ElementPoint {
+        node: Box<AccessibilityNode>,
+        point: (i32, i32),
     },
     PrimaryAction {
         object_ref: String,
@@ -6241,6 +6296,27 @@ fn window_crop_rect(bounds: &crate::windowing::WindowBounds) -> Option<(i32, i32
         return None;
     }
     Some((x, y, bounds.width, bounds.height))
+}
+
+fn validate_click_coordinate_space(params: &ClickParams) -> std::result::Result<(), String> {
+    if params.coordinate_space == ClickCoordinateSpace::Capture {
+        return Ok(());
+    }
+    if params.relative == Some(true) {
+        return Err(
+            "AT-SPI coordinate clicks cannot use relative screenshot coordinates.".to_string(),
+        );
+    }
+    if params.x.zip(params.y).is_none() {
+        return Err("AT-SPI coordinate clicks require both x and y.".to_string());
+    }
+    if params.element_index.is_none() && params.selector().is_empty() {
+        return Err(
+            "AT-SPI coordinate clicks require element_index or a semantic selector to identify the window geometry."
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn apply_window_relative_click_coordinates(
@@ -9762,7 +9838,9 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
                 assert_eq!(action_name.as_deref(), Some("Click"));
                 assert_eq!(action_index, 0);
             }
-            ClickTarget::Coordinates(_, _) | ClickTarget::ElementBounds { .. } => {
+            ClickTarget::Coordinates(_, _)
+            | ClickTarget::ElementBounds { .. }
+            | ClickTarget::ElementPoint { .. } => {
                 panic!("expected AT-SPI primary-action fallback")
             }
         }
@@ -9912,7 +9990,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             nodes[1].role = role.to_string();
             backend.cache_snapshot_with_window(&nodes, Some(4242), None, Some(&kwin_window(42)));
             let target = backend
-                .cached_kwin_element_target(&nodes[2], (32, 16), None)
+                .cached_kwin_element_target(&nodes[2], (32, 16), false, None)
                 .unwrap_or_else(|error| panic!("{role}: {error}"));
             assert_eq!(target.window_id, Some(42));
             assert_eq!(target.pid, Some(4242));
@@ -9920,7 +9998,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
         }
         let mut nodes = kwin_cached_element_nodes();
         nodes[1].role = "panel".to_string();
-        assert!(depth_one_kwin_element_frame(&nodes, &nodes[2], (32, 16)).is_err());
+        assert!(depth_one_kwin_element_frame(&nodes, &nodes[2], (32, 16), false).is_err());
     }
 
     #[test]
@@ -9930,17 +10008,23 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
         backend.cache_snapshot_with_window(&nodes, Some(4242), None, Some(&kwin_window(42)));
 
         let target = backend
-            .cached_kwin_element_target(&nodes[2], (32, 16), None)
+            .cached_kwin_element_target(&nodes[2], (32, 16), false, None)
             .unwrap();
         assert_eq!(target.window_id, Some(42));
         assert_eq!(target.pid, Some(4242));
         assert_eq!((target.frame.x, target.frame.y), (0, 0));
         assert_eq!((target.frame.width, target.frame.height), (800, 600));
 
+        let global = backend
+            .cached_kwin_element_target(&nodes[2], (1148, 487), true, None)
+            .unwrap();
+        assert!(global.global_point);
+        assert_eq!(global.center, (1148, 487));
+
         let missing = node(7, nodes[2].bounds.clone());
-        let error = depth_one_kwin_element_frame(&nodes, &missing, (32, 16)).unwrap_err();
+        let error = depth_one_kwin_element_frame(&nodes, &missing, (32, 16), false).unwrap_err();
         assert!(error.contains("depth-1"), "{error}");
-        let error = depth_one_kwin_element_frame(&nodes, &nodes[2], (900, 16)).unwrap_err();
+        let error = depth_one_kwin_element_frame(&nodes, &nodes[2], (900, 16), false).unwrap_err();
         assert!(error.contains("outside"), "{error}");
 
         let requested = kwin_window(42);
@@ -9954,7 +10038,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             note: String::new(),
         };
         let error = backend
-            .cached_kwin_element_target(&nodes[2], (32, 16), Some(&app_only_focus))
+            .cached_kwin_element_target(&nodes[2], (32, 16), false, Some(&app_only_focus))
             .unwrap_err();
         assert!(error.contains("not app-only focus"), "{error}");
     }
@@ -10021,6 +10105,93 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             backend.resolve_click_target(&relative),
             Ok(ClickTarget::Coordinates(140, 276))
         ));
+    }
+
+    #[test]
+    fn atspi_coordinate_target_uses_cached_element_and_supplied_point() {
+        let backend = ComputerUseLinux::default();
+        let mut target = node_with_actions(
+            7,
+            Some(Bounds {
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 33,
+            }),
+            vec![click_action()],
+        );
+        target.role = "menu item".to_string();
+        target.name = Some("Görünüm".to_string());
+        backend.cache_nodes(&[target]);
+
+        for params in [
+            ClickParams {
+                element_index: Some(7),
+                x: Some(32),
+                y: Some(16),
+                coordinate_space: ClickCoordinateSpace::Atspi,
+                ..Default::default()
+            },
+            ClickParams {
+                role: Some("menu item".to_string()),
+                name: Some("Görünüm".to_string()),
+                x: Some(32),
+                y: Some(16),
+                coordinate_space: ClickCoordinateSpace::Atspi,
+                ..Default::default()
+            },
+        ] {
+            match backend.resolve_click_target(&params).unwrap() {
+                ClickTarget::ElementPoint { node, point } => {
+                    assert_eq!(node.index, 7);
+                    assert_eq!(point, (32, 16));
+                }
+                _ => panic!("explicit AT-SPI coordinates must retain pointer semantics"),
+            }
+        }
+    }
+
+    #[test]
+    fn atspi_coordinate_params_require_unambiguous_geometry() {
+        let valid = ClickParams {
+            element_index: Some(7),
+            x: Some(32),
+            y: Some(16),
+            coordinate_space: ClickCoordinateSpace::Atspi,
+            ..Default::default()
+        };
+        assert_eq!(validate_click_coordinate_space(&valid), Ok(()));
+
+        let relative = ClickParams {
+            relative: Some(true),
+            ..valid.clone()
+        };
+        assert!(validate_click_coordinate_space(&relative)
+            .unwrap_err()
+            .contains("cannot use relative"));
+
+        let missing_y = ClickParams {
+            y: None,
+            ..valid.clone()
+        };
+        assert!(validate_click_coordinate_space(&missing_y)
+            .unwrap_err()
+            .contains("both x and y"));
+
+        let missing_element = ClickParams {
+            element_index: None,
+            ..valid
+        };
+        assert!(validate_click_coordinate_space(&missing_element)
+            .unwrap_err()
+            .contains("require element_index or a semantic selector"));
+
+        let raw_capture = ClickParams {
+            x: Some(1148),
+            y: Some(487),
+            ..Default::default()
+        };
+        assert_eq!(validate_click_coordinate_space(&raw_capture), Ok(()));
     }
 
     #[test]
@@ -10189,7 +10360,9 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
                 assert_eq!(action_name.as_deref(), Some("Click"));
                 assert_eq!(action_index, 0);
             }
-            ClickTarget::Coordinates(_, _) | ClickTarget::ElementBounds { .. } => {
+            ClickTarget::Coordinates(_, _)
+            | ClickTarget::ElementBounds { .. }
+            | ClickTarget::ElementPoint { .. } => {
                 panic!("expected AT-SPI primary-action fallback")
             }
         }

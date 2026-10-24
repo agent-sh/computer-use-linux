@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.24";
-export const GENERATED_TOOL_CATALOG_HASH = "dee39a43a4d642b61b861f4aa90cdabc9a416befbc10d463a005bcbb892eaf14";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "b78f54e50d3a2d615af92ee2a2373599684f02a802b06f1226981f985e34f456";
+export const GENERATED_TOOL_CATALOG_HASH = "ca02e39b8ba12b0f3774af084e67a8401bdd0d3777a82af05da9a7579fa9e605";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "b0ae29440000015c1735b1da5744fbaccb505202e49de40b565800130e6dc48d";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -187,9 +187,16 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. Plain left activation prefers a native AT-SPI click/press/toggle action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. Plain left activation prefers a native AT-SPI click/press/toggle action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics. Explicit x/y default to raw screenshot capture pixels; coordinate_space=\"atspi\" with element_index or a semantic selector maps a global AT-SPI screen point through the element's KWin window and output geometry on KDE Wayland. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
+        "ClickCoordinateSpace": {
+          "enum": [
+            "capture",
+            "atspi"
+          ],
+          "type": "string"
+        },
         "ScreenshotOutputFormat": {
           "enum": [
             "png",
@@ -221,6 +228,11 @@ export const GENERATED_MCP_TOOLS =
             "integer",
             "null"
           ]
+        },
+        "coordinate_space": {
+          "$ref": "#/$defs/ClickCoordinateSpace",
+          "default": "capture",
+          "description": "Pixel space for explicit x/y: raw screenshot capture pixels (default),\nor global AT-SPI screen coordinates mapped through the element's KWin window."
         },
         "element_index": {
           "default": null,

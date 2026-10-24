@@ -1066,6 +1066,7 @@ pub(crate) struct KwinElementClickTarget {
     pub(crate) pid: Option<u32>,
     pub(crate) frame: KwinElementFrame,
     pub(crate) center: (i32, i32),
+    pub(crate) global_point: bool,
     pub(crate) require_exact_focus: bool,
 }
 
@@ -1428,7 +1429,7 @@ fn element_coordinate_matches(
     )
     .context("AT-SPI frame bounds are unusable")?;
     let center = (f64::from(target.center.0), f64::from(target.center.1));
-    if !atspi.contains(center) {
+    if !target.global_point && !atspi.contains(center) {
         anyhow::bail!("element center is outside its depth-1 AT-SPI frame");
     }
     let local_origin = near(atspi.x, 0.0) && near(atspi.y, 0.0);
@@ -1436,12 +1437,26 @@ fn element_coordinate_matches(
     let decorated_size = near(atspi.width, frame.width) && near(atspi.height, frame.height);
     let mut matches = Vec::new();
     if local_origin && client_size {
-        matches.push((client.x + center.0 - atspi.x, client.y + center.1 - atspi.y));
+        if target.global_point {
+            if client.contains(center) {
+                matches.push(center);
+            }
+        } else {
+            matches.push((client.x + center.0 - atspi.x, client.y + center.1 - atspi.y));
+        }
     }
-    if near(atspi.x, client.x) && near(atspi.y, client.y) && client_size {
+    if near(atspi.x, client.x)
+        && near(atspi.y, client.y)
+        && client_size
+        && (!target.global_point || client.contains(center))
+    {
         matches.push(center);
     }
-    if near(atspi.x, frame.x) && near(atspi.y, frame.y) && decorated_size {
+    if near(atspi.x, frame.x)
+        && near(atspi.y, frame.y)
+        && decorated_size
+        && (!target.global_point || frame.contains(center))
+    {
         matches.push(center);
     }
     Ok(matches)
@@ -1795,6 +1810,7 @@ mod element_click_tests {
                 height: atspi[3],
             },
             center,
+            global_point: false,
             require_exact_focus: false,
         }
     }
@@ -1821,6 +1837,27 @@ mod element_click_tests {
 
         assert_eq!(point.logical, (278, 352));
         assert_eq!(point.capture, (417, 528));
+    }
+
+    #[test]
+    fn reporter_global_atspi_point_maps_with_a_client_local_frame() {
+        let reporter = window(
+            UUID,
+            rect(530, 308, 1400, 823),
+            rect(530, 336, 1400, 795),
+            "DP-1",
+        );
+        let snapshot = snapshot(
+            vec![reporter],
+            vec![output("DP-1", rect(0, 0, 2560, 1440), json!(1.5))],
+        );
+        let mut target = target([0, 0, 1400, 795], (1148, 487));
+        target.global_point = true;
+
+        let point = snapshot.map_element_click(&target, 3840, 2160).unwrap();
+
+        assert_eq!(point.logical, (1148, 487));
+        assert_eq!(point.capture, (1722, 731));
     }
 
     fn dialog_window(caption: &str, skip_taskbar: bool) -> Value {

@@ -687,6 +687,16 @@ async fn portal_desktop_owner(connection: &zbus::Connection) -> Result<OwnedUniq
     let dbus = zbus::fdo::DBusProxy::new(connection)
         .await
         .context("failed to create session-bus identity proxy")?;
+    // A supervised portal can already own the name without an activation
+    // file, as in an isolated desktop. Use that owner before requesting start.
+    match dbus
+        .get_name_owner(BusName::try_from(PORTAL_DESKTOP_SERVICE)?)
+        .await
+    {
+        Ok(owner) => return Ok(owner),
+        Err(zbus::fdo::Error::NameHasNoOwner(_)) => {}
+        Err(error) => return Err(error).context("failed to resolve the XDG desktop portal owner"),
+    }
     let _: u32 = dbus
         .start_service_by_name(WellKnownName::try_from(PORTAL_DESKTOP_SERVICE)?, 0)
         .await

@@ -168,7 +168,13 @@ Plain left element/index/selector `click` prefers native AT-SPI `click`,
 `press`, or `toggle` over toolkit bounds, avoiding coordinate
 conversion when available. This preference does not replace a coordinate click
 with an arbitrary action name. Explicit `x`/`y`, right clicks, and double/multiple
-clicks retain pointer semantics.
+clicks retain pointer semantics. Explicit coordinates default to raw screenshot
+pixels (`coordinate_space: "capture"`). On KDE Wayland, pass
+`coordinate_space: "atspi"` with `element_index` or a semantic selector to map
+a global AT-SPI screen point through the element's KWin window, decoration,
+output origin, and display scale, even with a client-local AT-SPI window frame.
+This requires both `x`/`y` and element identity; do not
+combine it with `relative: true` or use it for ordinary screenshot pixels.
 Use `perform_action` explicitly for entry `activate` or slider `jump`; `click`
 never substitutes those actions, including when bounds are unavailable.
 

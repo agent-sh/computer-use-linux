@@ -106,7 +106,9 @@ The preference does not substitute an arbitrary action name for a coordinate
 click. Explicit `x`/`y`, right clicks, and double/multiple clicks retain pointer
 semantics. Re-check application state after either kind of activation.
 
-On KDE Wayland, element clicks that need pointer dispatch match the cached AT-SPI frame to a coherent KWin window/output snapshot, then map the target separately to physical capture pixels (uinput) and logical desktop coordinates (portal). Client-local and decorated frames, actual decoration offsets, and nonzero or negative output origins are supported when the geometry and uniform output scale can be verified. Ambiguous windows, mixed or unknown scales, overlapping outputs, or stale pointer geometry fail before input; explicit coordinates keep their existing behavior.
+On KDE Wayland, element clicks that need pointer dispatch match the cached AT-SPI frame to a coherent KWin window/output snapshot, then map the target separately to physical capture pixels (uinput) and logical desktop coordinates (portal). Client-local and decorated frames, actual decoration offsets, and nonzero or negative output origins are supported when the geometry and uniform output scale can be verified. Ambiguous windows, mixed or unknown scales, overlapping outputs, or stale pointer geometry fail before input.
+
+Explicit `x`/`y` defaults to `coordinate_space: "capture"` (raw screenshot pixels). To click a global AT-SPI screen point, pass `coordinate_space: "atspi"` together with its `element_index` or semantic selector; KDE Wayland then applies the same native KWin decoration and scale conversion as an element-bounds click, including when the AT-SPI window frame is client-local. This mode requires both coordinates and element identity and cannot be combined with `relative: true`. Other calls keep their existing coordinate behavior.
 
 For coordinate `click` or `scroll` with `relative: true`, select a target window
 and measure from its clipped screenshot crop origin. Divide preview `x` and

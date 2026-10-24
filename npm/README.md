@@ -151,7 +151,13 @@ does not yet forward the flag or include the tool in its catalog.
   avoiding pointer-coordinate conversion when that action is available. Explicit
   `activate`/`jump` requests belong in `perform_action`, not `click`, even when
   bounds are missing. Explicit
-  `x`/`y`, right clicks, and multi-clicks retain pointer semantics. For coordinate
+  `x`/`y`, right clicks, and multi-clicks retain pointer semantics. Explicit
+  coordinates default to raw screenshot pixels (`coordinate_space: "capture"`).
+  On KDE Wayland, `coordinate_space: "atspi"` with `element_index` or a semantic
+  selector converts a global AT-SPI screen point through the element's KWin window,
+  decoration, output origin, and display scale, even with a client-local AT-SPI
+  window frame. It requires both `x`/`y` and element identity
+  and cannot be combined with `relative: true`. For coordinate
   `click` or `scroll` with `relative: true`, use the clipped target-window
   screenshot crop origin and divide preview coordinates by screenshot `scale`.
   Do not use widget-local or raw GDK surface coordinates. A window target is
