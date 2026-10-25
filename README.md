@@ -169,6 +169,7 @@ The binary also exposes the same capabilities from the CLI for scripting and deb
 
 ```
 computer-use-linux mcp                                  # stdio MCP server
+computer-use-linux mcp --listen 127.0.0.1:5200         # streamable HTTP MCP; needs COMPUTER_USE_LINUX_MCP_TOKEN
 computer-use-linux doctor                               # JSON readiness report
 computer-use-linux setup                                # enable AT-SPI
 computer-use-linux guard-accessibility                  # explicit foreground GNOME accessibility guard
@@ -439,7 +440,7 @@ For one-off installs without adding the tap first, Hermes also accepts `hermes s
 
 ### Generic MCP client
 
-Spawn the binary with `["mcp"]` as the argv tail. It speaks MCP (JSON-RPC over stdio) through rmcp, with the protocol versions [listed above](#wire-it-into-your-mcp-host); capability discovery happens through `tools/list` and the `doctor` tool. The server normally needs no MCP-specific configuration, but desktop runtime environment still matters (`DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, portals, AT-SPI, `ydotoold`, and optionally `COMPUTER_USE_LINUX_COSMIC_HELPER`).
+Spawn the binary with `["mcp"]` as the argv tail. It speaks MCP (JSON-RPC over stdio) through rmcp, with the protocol versions [listed above](#wire-it-into-your-mcp-host); capability discovery happens through `tools/list` and the `doctor` tool. `mcp --listen 127.0.0.1:5200` with `COMPUTER_USE_LINUX_MCP_TOKEN` set serves the same protocol at `http://127.0.0.1:5200/mcp` (streamable HTTP, `Authorization: Bearer <token>`). That port is plain HTTP and belongs on loopback or a private network. The server normally needs no other MCP-specific configuration, but desktop runtime environment still matters (`DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, portals, AT-SPI, `ydotoold`, and optionally `COMPUTER_USE_LINUX_COSMIC_HELPER`).
 
 ### Selkies containers (linuxserver.io)
 
@@ -498,6 +499,7 @@ Most setups need none of these: the server and installers detect backends and pa
 | `COMPUTER_USE_LINUX_SCREENSHOT_BACKEND` | Force a single screenshot backend, skipping the fallback chain. Accepts `gnome-shell`, `portal`, `x11`, `gnome-screenshot`, or `pixelflux`. `x11` works only on a native X11 session. `pixelflux` needs `PIXELFLUX_CU` and `PIXELFLUX_CU_TOKEN`. Pin `gnome-screenshot` for background/systemd contexts where the GNOME Shell and portal DBus paths are denied. |
 | `PIXELFLUX_CU` | Loopback port of a Selkies pixelflux computer-use server (`5000` or `127.0.0.1:5000`). With `PIXELFLUX_CU_TOKEN`, screenshots try pixelflux before the other backends, and click, scroll, drag, press_key, and type_text go there without a portal prompt. A closed port falls through. A server error does not. Anything other than loopback is ignored. |
 | `PIXELFLUX_CU_TOKEN` | Bearer token for `PIXELFLUX_CU`. Never logged. Both variables must be set. |
+| `COMPUTER_USE_LINUX_MCP_TOKEN` | Required with `mcp --listen`. Clients send `Authorization: Bearer <token>`. The token is never logged. The listener is plain HTTP: bind it to loopback or a private network, and put TLS in front if it must cross a trust boundary. |
 | `COMPUTER_USE_LINUX_ENABLE_SHELL` | Set exactly to `1` before starting the MCP server to register the destructive `run_shell` tool. Unset by default. Do not enable for untrusted or unattended MCP hosts. |
 
 **Build-time identity overrides** (set while compiling a downstream embedded
@@ -550,7 +552,8 @@ Computer-use tooling is, by definition, a privilege-escalation surface. The thre
 - **AT-SPI exposes window contents to any client on your session bus.** Enabling the AT-SPI bridge (`setup_accessibility`) is a prerequisite for this binary; it's also what screen readers use, and it shares the same trust boundary.
 - **The GNOME Shell extension** is loaded only into your user's GNOME Shell, runs in the Shell's JS sandbox, and exposes a single DBus interface on the user session bus. It does not request any extra permissions.
 - **The indicator shows what agents type.** `type_text` text (its last 64 characters) and `press_key` keycaps are drawn on screen unless the target is, or might be, a password field: both are replaced by a fixed mask when the focused element's AT-SPI role is a password role or cannot be read within 250 ms. Generic text boxes and terminal focus are also masked because their roles do not establish whether input is obscured. `set_value` values are always masked, because an app can change a field to a password after its accessibility snapshot. The text also travels over a socket in the user's private runtime directory. Set `COMPUTER_USE_LINUX_INDICATOR_HIDE_TEXT=1` to mask all typed text and keycaps, or `COMPUTER_USE_LINUX_INDICATOR=0` to turn the indicator off.
-- **No network.** This binary opens no TCP/UDP listener, makes no outbound Internet connections, and ships no telemetry. It does use local session transports such as DBus and the per-user `ydotoold` Unix socket. With `PIXELFLUX_CU` and `PIXELFLUX_CU_TOKEN` set, it also connects to that loopback TCP port, and a `DISPLAY` that names a host makes X11 queries connect to that X server.
+- **No network by default.** This binary opens no TCP/UDP listener unless `mcp --listen` is passed, makes no outbound Internet connections, and ships no telemetry. It does use local session transports such as DBus and the per-user `ydotoold` Unix socket. With `PIXELFLUX_CU` and `PIXELFLUX_CU_TOKEN` set, it also connects to that loopback TCP port, and a `DISPLAY` that names a host makes X11 queries connect to that X server.
+- **HTTP MCP is opt-in and unencrypted.** `mcp --listen` opens a plain HTTP streamable MCP endpoint. It requires `COMPUTER_USE_LINUX_MCP_TOKEN` and rejects any other `Authorization` value. Bind it to `127.0.0.1` or a private address. Do not publish it on a public interface without TLS in front. Stdio remains the default and opens no port.
 - **Mutating tools are explicit.** The MCP tool list annotates read-only versus mutating tools, and CI fails if the published tool annotations drift from the table above. Treat those annotations as hints; the host is still responsible for user approval and policy.
 
 If you're running this on a shared workstation, set `ydotoold`'s socket permissions to `0600` (the default) and audit which processes on your user can `connect()` to it.

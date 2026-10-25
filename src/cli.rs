@@ -23,11 +23,11 @@ struct Subcommand {
 const SUBCOMMANDS: &[Subcommand] = &[
     Subcommand {
         name: "mcp",
-        arguments: "",
+        arguments: "[--listen ADDR:PORT]",
         required: 0,
         allowed: 0,
-        summary: "Serve the MCP tools over stdio.",
-        details: "Reads MCP JSON-RPC requests on stdin and writes responses on stdout until stdin closes. MCP hosts start this command.",
+        summary: "Serve the MCP tools over stdio, or over HTTP with --listen.",
+        details: "Reads MCP JSON-RPC requests on stdin and writes responses on stdout until stdin closes. MCP hosts start this command. With --listen ADDR:PORT it serves streamable HTTP at /mcp instead, and requires COMPUTER_USE_LINUX_MCP_TOKEN as a bearer token. The port is plain HTTP: bind loopback or a private address.",
         hidden: false,
     },
     Subcommand {
@@ -153,8 +153,8 @@ fn parse_invocation(arguments: &[String]) -> Result<Invocation, UsageError> {
             subcommand: None,
         });
     };
-    let rest = &arguments[1..];
-    let options_end = rest
+    let mut rest = arguments[1..].to_vec();
+    let mut options_end = rest
         .iter()
         .position(|argument| argument == "--")
         .unwrap_or(rest.len());
@@ -168,6 +168,21 @@ fn parse_invocation(arguments: &[String]) -> Result<Invocation, UsageError> {
         message,
         subcommand: Some(subcommand),
     };
+    // `mcp --listen ADDR:PORT` is the only option that takes a value.
+    let mut listen = None;
+    if subcommand.name == "mcp" {
+        if let Some(at) = rest[..options_end]
+            .iter()
+            .position(|argument| argument == "--listen")
+        {
+            if at + 1 >= options_end {
+                return Err(error("'--listen' needs ADDR:PORT".to_string()));
+            }
+            listen = Some(rest.remove(at + 1));
+            rest.remove(at);
+            options_end -= 2;
+        }
+    }
     if let Some(option) = rest[..options_end]
         .iter()
         .find(|argument| argument.len() > 1 && argument.starts_with('-'))
@@ -177,7 +192,7 @@ fn parse_invocation(arguments: &[String]) -> Result<Invocation, UsageError> {
             subcommand.name
         )));
     }
-    let positionals: Vec<String> = rest[..options_end]
+    let mut positionals: Vec<String> = rest[..options_end]
         .iter()
         .chain(rest.iter().skip(options_end + 1))
         .cloned()
@@ -202,6 +217,8 @@ fn parse_invocation(arguments: &[String]) -> Result<Invocation, UsageError> {
             return Err(error(format!("'{value}' is not an integer coordinate")));
         }
     }
+    // After the count check, so a bare address without --listen stays an error.
+    positionals.extend(listen);
     Ok(Invocation::Run(subcommand, positionals))
 }
 
@@ -290,7 +307,7 @@ pub(crate) async fn run_from_env() -> Result<()> {
     diagnostics::hydrate_session_bus_env();
 
     match subcommand.name {
-        "mcp" => server::serve_mcp().await,
+        "mcp" => server::serve_mcp(mcp_listen_addr(&positionals)?).await,
         "guard-accessibility" => crate::accessibility_guard::run().await,
         "doctor" => {
             let report = diagnostics::doctor_report();
@@ -425,6 +442,21 @@ fn abs_test_report(
     })
 }
 
+/// `parse_invocation` leaves the `--listen` value as the only `mcp` positional.
+fn mcp_listen_addr(positionals: &[String]) -> Result<Option<std::net::SocketAddr>> {
+    let Some(value) = positionals.first() else {
+        return Ok(None);
+    };
+    let addr = value
+        .parse()
+        .with_context(|| format!("invalid listen address {value}"))?;
+    let token = std::env::var("COMPUTER_USE_LINUX_MCP_TOKEN").unwrap_or_default();
+    if token.trim().is_empty() {
+        anyhow::bail!("COMPUTER_USE_LINUX_MCP_TOKEN is required with --listen");
+    }
+    Ok(Some(addr))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{abs_pointer, abs_test_report, parse_invocation, Invocation};
@@ -469,6 +501,27 @@ mod tests {
         );
         assert_eq!(parse(&["state", "-h", "--", "x"]), "help state");
         assert_eq!(parse(&["state", "-"]), r#"run state ["-"]"#);
+    }
+
+    #[test]
+    fn mcp_listen_takes_one_address() {
+        assert_eq!(parse(&["mcp"]), "run mcp []");
+        assert_eq!(
+            parse(&["mcp", "--listen", "127.0.0.1:5200"]),
+            r#"run mcp ["127.0.0.1:5200"]"#
+        );
+        assert_eq!(
+            parse(&["mcp", "--listen"]),
+            "error: '--listen' needs ADDR:PORT"
+        );
+        assert_eq!(
+            parse(&["mcp", "127.0.0.1:5200"]),
+            "error: unexpected argument '127.0.0.1:5200' for 'mcp'"
+        );
+        assert_eq!(
+            parse(&["state", "--listen", "x"]),
+            "error: unknown option '--listen' for 'state'"
+        );
     }
 
     #[test]

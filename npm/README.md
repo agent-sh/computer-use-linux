@@ -162,6 +162,7 @@ does not yet forward the flag or include the tool in its catalog.
   desktop coordinates.
 
 ## Input & coordinate contracts
+- **HTTP MCP**: `computer-use-linux mcp --listen 127.0.0.1:5200` needs `COMPUTER_USE_LINUX_MCP_TOKEN`. Clients send `Authorization: Bearer <token>`. The port is plain HTTP; keep it on loopback or a private network.
 
 - **Snapshot ids**: `get_app_state`, `include_tree` observations and
   `get_tree_page` return the `snapshot_id` of their tree. The server caches

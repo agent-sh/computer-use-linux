@@ -267,6 +267,7 @@ pub(crate) struct Indicator {
     mask_text: bool,
     agent_override: Option<String>,
     peer: OnceLock<Peer<RoleServer>>,
+    client_name: Mutex<Option<String>>,
     socket: Option<UnixDatagram>,
     /// The overlay's socket.
     path: Option<PathBuf>,
@@ -290,6 +291,7 @@ impl Default for Indicator {
                 .ok()
                 .filter(|name| !name.trim().is_empty()),
             peer: OnceLock::new(),
+            client_name: Mutex::new(None),
             socket,
             path: live.then(socket_path).flatten(),
             overlay: Mutex::new(Overlay::NotStarted),
@@ -304,9 +306,18 @@ impl Indicator {
         let _ = self.peer.set(peer);
     }
 
+    pub(crate) fn remember_client(&self, name: &str, title: Option<&str>) {
+        if let Ok(mut guard) = self.client_name.lock() {
+            *guard = Some(agent_display_name(name, title));
+        }
+    }
+
     fn agent(&self) -> String {
         if let Some(name) = &self.agent_override {
             return name.clone();
+        }
+        if let Some(name) = self.client_name.lock().ok().and_then(|guard| guard.clone()) {
+            return name;
         }
         self.peer
             .get()
@@ -709,6 +720,7 @@ mod tests {
             mask_text: false,
             agent_override: None,
             peer: OnceLock::new(),
+            client_name: Mutex::new(None),
             socket: Some(socket),
             path: Some(path.to_path_buf()),
             overlay: Mutex::new(Overlay::Unavailable),
