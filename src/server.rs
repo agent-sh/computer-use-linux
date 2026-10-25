@@ -7677,9 +7677,10 @@ fn kde_clipboard_shortcut_for_focus(
     terminal: Option<TerminalPasteShortcut>,
     focused_element: Option<&FocusedElementSummary>,
 ) -> KdeClipboardPasteShortcut {
-    // No AT-SPI answer (xterm exposes none) keeps the terminal chord; a
-    // concrete non-terminal focused element switches back to Ctrl+V.
-    if focused_element.is_some_and(|element| !element.is_terminal) {
+    // No AT-SPI answer (xterm exposes none) keeps the terminal chord; only a
+    // focused non-terminal text field switches back to Ctrl+V. A remaining
+    // container focus (filler, panel) keeps the terminal chord too.
+    if focused_element.is_some_and(|element| !element.is_terminal && element.accepts_text()) {
         return KdeClipboardPasteShortcut::Standard;
     }
     match terminal {
@@ -10515,6 +10516,36 @@ esac
         );
         assert_eq!(
             kde_clipboard_shortcut_for_focus(None, None),
+            KdeClipboardPasteShortcut::Standard
+        );
+    }
+
+    #[test]
+    fn kde_terminal_keeps_chord_for_non_text_focus() {
+        let ctrl_shift_v = Some(TerminalPasteShortcut::CtrlShiftV);
+        let shift_insert = Some(TerminalPasteShortcut::ShiftInsert);
+        assert_eq!(
+            kde_clipboard_shortcut_for_focus(ctrl_shift_v, Some(&focused("filler", false))),
+            KdeClipboardPasteShortcut::CtrlShiftV
+        );
+        assert_eq!(
+            kde_clipboard_shortcut_for_focus(ctrl_shift_v, Some(&focused("panel", false))),
+            KdeClipboardPasteShortcut::CtrlShiftV
+        );
+        assert_eq!(
+            kde_clipboard_shortcut_for_focus(shift_insert, Some(&focused("filler", false))),
+            KdeClipboardPasteShortcut::ShiftInsert
+        );
+        assert_eq!(
+            kde_clipboard_shortcut_for_focus(ctrl_shift_v, Some(&focused("text", false))),
+            KdeClipboardPasteShortcut::Standard
+        );
+        let editable_filler = FocusedElementSummary {
+            editable: true,
+            ..focused("filler", false)
+        };
+        assert_eq!(
+            kde_clipboard_shortcut_for_focus(ctrl_shift_v, Some(&editable_filler)),
             KdeClipboardPasteShortcut::Standard
         );
     }
