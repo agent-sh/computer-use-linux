@@ -23,6 +23,7 @@ mod terminal;
 mod tree_spill;
 mod windowing;
 mod windows;
+mod wlr_outputs;
 mod x11_display;
 mod ydotool;
 

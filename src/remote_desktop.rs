@@ -258,7 +258,7 @@ fn portal_input_lock() -> Arc<AsyncMutex<()>> {
     Arc::clone(INPUT_LOCK.get_or_init(|| Arc::new(AsyncMutex::new(()))))
 }
 
-async fn kwin_desktop_layout() -> Option<Vec<LogicalMonitor>> {
+pub(crate) async fn kwin_desktop_layout() -> Option<Vec<LogicalMonitor>> {
     if !env_token_contains("XDG_CURRENT_DESKTOP", "kde")
         && !env_token_contains("XDG_CURRENT_DESKTOP", "plasma")
     {
@@ -267,7 +267,7 @@ async fn kwin_desktop_layout() -> Option<Vec<LogicalMonitor>> {
     crate::windowing::backends::kwin::output_layout().await.ok()
 }
 
-async fn logical_desktop_layout() -> Option<Vec<LogicalMonitor>> {
+pub(crate) async fn logical_desktop_layout() -> Option<Vec<LogicalMonitor>> {
     if env_token_contains("XDG_CURRENT_DESKTOP", "gnome") {
         if let Some(layout) = crate::windowing::backends::gnome::extension_monitor_layout()
             .await
@@ -357,6 +357,11 @@ async fn logical_desktop_layout() -> Option<Vec<LogicalMonitor>> {
             {
                 return Some(layout);
             }
+        }
+    }
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        if let Some(layout) = crate::wlr_outputs::wlr_output_layout().await {
+            return Some(layout);
         }
     }
 

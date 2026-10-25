@@ -44,14 +44,17 @@ pub(crate) enum PixelfluxAction {
         button: PointerButton,
         count: u8,
     },
+    #[cfg_attr(not(test), allow(dead_code))]
     MouseMove {
         x: i32,
         y: i32,
     },
+    #[cfg_attr(not(test), allow(dead_code))]
     MouseDown {
         x: i32,
         y: i32,
     },
+    #[cfg_attr(not(test), allow(dead_code))]
     MouseUp {
         x: i32,
         y: i32,
@@ -89,6 +92,39 @@ pub(crate) async fn send(
 pub(crate) async fn probe(config: &PixelfluxConfig) -> Result<()> {
     exchange(config, br#"{"action":"cursor_position"}"#, PROBE_TIMEOUT).await?;
     Ok(())
+}
+
+pub(crate) fn is_unreachable(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    text.contains("connection failed")
+        || text.contains("timed out")
+        || text.contains("closed the connection before")
+}
+
+/// Pixelflux key text is lowercase modifiers plus `Return`, as observed on the
+/// labwc computer-use server (`ctrl+l`, `Return`, `ctrl+shift+t`).
+pub(crate) fn key_text(chord: &str) -> String {
+    chord
+        .split('+')
+        .map(|part| {
+            let trimmed = part.trim();
+            match trimmed.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => "ctrl".to_string(),
+                "alt" | "option" => "alt".to_string(),
+                "shift" => "shift".to_string(),
+                "super" | "win" | "meta" => "super".to_string(),
+                "enter" | "return" => "Return".to_string(),
+                "esc" | "escape" => "Escape".to_string(),
+                "tab" => "Tab".to_string(),
+                "backspace" => "BackSpace".to_string(),
+                "delete" | "del" => "Delete".to_string(),
+                "space" => "space".to_string(),
+                _ if trimmed.chars().count() == 1 => trimmed.to_ascii_lowercase(),
+                _ => trimmed.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+")
 }
 
 fn loopback_port(raw: &str) -> Option<u16> {

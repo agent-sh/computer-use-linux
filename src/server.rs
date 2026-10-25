@@ -1157,6 +1157,13 @@ impl ComputerUseLinux {
                 }),
             };
         }
+        let element_bounds = match &target {
+            ClickTarget::ElementBounds { node, .. } | ClickTarget::ElementPoint { node, .. } => {
+                node.bounds.clone()
+            }
+            _ => None,
+        };
+        let element_click = element_bounds.is_some();
         let global_point = matches!(&target, ClickTarget::ElementPoint { .. });
         let (x, y, kwin_click) = match target {
             ClickTarget::Coordinates(x, y) => (x, y, None),
@@ -1201,6 +1208,20 @@ impl ComputerUseLinux {
             .await;
         let button = mouse_button_code(params.button.as_deref());
         let click_count = params.click_count.unwrap_or(1).clamp(1, 10).to_string();
+        if let Some(output) = self
+            .try_pixelflux_click(
+                x,
+                y,
+                element_click,
+                element_bounds.as_ref(),
+                params.button.as_deref(),
+                params.click_count.unwrap_or(1),
+                received.clone(),
+            )
+            .await
+        {
+            return Json(output);
+        }
         if self.should_prefer_xdotool_pointer() {
             let off_screen_note = self.off_screen_note_for_point(x, y).await;
             if let Some(xdotool_args) = xdotool_pointer_click_args(
@@ -1715,6 +1736,24 @@ impl ComputerUseLinux {
             ScrollDirection::Left => (units, 0),
             ScrollDirection::Right => (-units, 0),
         };
+        if let Some((x, y)) = target_point {
+            if let Some(output) = self
+                .pixelflux_send(
+                    "scroll",
+                    crate::pixelflux::PixelfluxAction::Scroll {
+                        x,
+                        y,
+                        direction,
+                        amount: u32::try_from(units.max(1)).unwrap_or(1),
+                    },
+                    received.clone(),
+                )
+                .await
+            {
+                return Json(output);
+            }
+        }
+
         let off_screen_note = match target_point {
             Some((x, y)) => self.off_screen_note_for_point(x, y).await,
             None => None,
@@ -1905,6 +1944,20 @@ impl ComputerUseLinux {
         self.indicator
             .follow("drag", (params.end_x, params.end_y), space)
             .await;
+        if let Some(output) = self
+            .pixelflux_send(
+                "drag",
+                crate::pixelflux::PixelfluxAction::Drag {
+                    from: (params.start_x, params.start_y),
+                    to: (params.end_x, params.end_y),
+                },
+                received.clone(),
+            )
+            .await
+        {
+            return Json(output);
+        }
+
         if self.should_prefer_xdotool_pointer() {
             let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
                 run_xdotool_drag(
@@ -2075,6 +2128,19 @@ impl ComputerUseLinux {
         };
         let secret = self.typing_into_secret(focus.as_ref()).await;
         self.indicator.keys(&params.key, secret).await;
+        if let Some(output) = self
+            .pixelflux_send(
+                "press_key",
+                crate::pixelflux::PixelfluxAction::Key {
+                    chord: crate::pixelflux::key_text(&params.key),
+                },
+                received.clone(),
+            )
+            .await
+        {
+            return Json(output);
+        }
+
         if self.should_prefer_portal_keyboard_for_chords().await {
             let portal_target = match self
                 .portal_keyboard_target(&params.window_target(), focus.as_ref())
@@ -2289,6 +2355,19 @@ impl ComputerUseLinux {
             }
         }
         self.indicator.text("type_text", &params.text, secret).await;
+        if let Some(output) = self
+            .pixelflux_send(
+                "type_text",
+                crate::pixelflux::PixelfluxAction::Type {
+                    text: params.text.clone(),
+                },
+                received.clone(),
+            )
+            .await
+        {
+            return Json(output);
+        }
+
         if self.should_prefer_kde_clipboard_text_backend() {
             let portal_target = match self
                 .portal_keyboard_target(&window_target, focus.as_ref())
@@ -4974,6 +5053,87 @@ impl ComputerUseLinux {
         }
     }
 
+    async fn pixelflux_element_point(
+        &self,
+        bounds: Option<&crate::atspi_tree::Bounds>,
+    ) -> Option<(i32, i32)> {
+        let bounds = bounds?;
+        let capture = self.desktop_size.lock().ok().and_then(|guard| *guard)?;
+        let layout = crate::remote_desktop::logical_desktop_layout().await?;
+        pixelflux_point_for_element(
+            (bounds.x, bounds.y, bounds.width, bounds.height),
+            capture,
+            &layout,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn try_pixelflux_click(
+        &self,
+        x: i32,
+        y: i32,
+        element_click: bool,
+        element_bounds: Option<&crate::atspi_tree::Bounds>,
+        button: Option<&str>,
+        count: u32,
+        received: Option<serde_json::Value>,
+    ) -> Option<ActionOutput> {
+        if crate::pixelflux::PixelfluxConfig::from_env().is_none() || count.clamp(1, 10) > 3 {
+            return None;
+        }
+        let button = pixelflux_pointer_button(button)?;
+        let point = if element_click {
+            self.pixelflux_element_point(element_bounds).await
+        } else {
+            Some((x, y))
+        };
+        let Some((px, py)) = point else {
+            if element_click {
+                if let Some(config) = crate::pixelflux::PixelfluxConfig::from_env() {
+                    if crate::pixelflux::probe(&config).await.is_ok() {
+                        return Some(ActionOutput {
+                            ok: false,
+                            implemented: true,
+                            action: "click".to_string(),
+                            message: "pixelflux could not map the element onto the capture"
+                                .to_string(),
+                            received,
+                        });
+                    }
+                }
+            }
+            return None;
+        };
+        self.pixelflux_send(
+            "click",
+            crate::pixelflux::PixelfluxAction::Click {
+                x: px,
+                y: py,
+                button,
+                count: count.clamp(1, 3) as u8,
+            },
+            received,
+        )
+        .await
+    }
+
+    async fn pixelflux_send(
+        &self,
+        action: &str,
+        request: crate::pixelflux::PixelfluxAction,
+        received: Option<serde_json::Value>,
+    ) -> Option<ActionOutput> {
+        let config = crate::pixelflux::PixelfluxConfig::from_env()?;
+        if let Err(error) = crate::pixelflux::probe(&config).await {
+            if crate::pixelflux::is_unreachable(&error) {
+                return None;
+            }
+            return Some(pixelflux_action_output(action, Err(error), received));
+        }
+        let result = crate::pixelflux::send(&config, &request).await.map(|_| ());
+        Some(pixelflux_action_output(action, result, received))
+    }
+
     fn logical_portal_point(
         &self,
         session: &PortalPointerSession,
@@ -6018,6 +6178,71 @@ fn depth_one_kwin_element_frame(
         parent_index = parent.parent_index;
     }
     Err("cached element has no depth-1 frame/window ancestor".to_string())
+}
+
+pub(crate) fn pixelflux_point_for_element(
+    bounds: (i32, i32, i32, i32),
+    capture: (u32, u32),
+    layout: &[crate::remote_desktop::LogicalMonitor],
+) -> Option<(i32, i32)> {
+    if layout.is_empty() || capture.0 == 0 || capture.1 == 0 {
+        return None;
+    }
+    let logical_w = layout
+        .iter()
+        .map(|monitor| monitor.x.saturating_add(monitor.width))
+        .max()?;
+    let logical_h = layout
+        .iter()
+        .map(|monitor| monitor.y.saturating_add(monitor.height))
+        .max()?;
+    if logical_w <= 0 || logical_h <= 0 {
+        return None;
+    }
+    let scale_x = f64::from(capture.0) / f64::from(logical_w);
+    let scale_y = f64::from(capture.1) / f64::from(logical_h);
+    if (scale_x - scale_y).abs() > 0.02 {
+        return None;
+    }
+    let (x, y, width, height) = bounds;
+    let centre_x = f64::from(x) + f64::from(width) / 2.0;
+    let centre_y = f64::from(y) + f64::from(height) / 2.0;
+    Some((
+        (centre_x * scale_x).round() as i32,
+        (centre_y * scale_y).round() as i32,
+    ))
+}
+
+fn pixelflux_pointer_button(button: Option<&str>) -> Option<crate::remote_desktop::PointerButton> {
+    match button.unwrap_or("left").to_ascii_lowercase().as_str() {
+        "left" => Some(crate::remote_desktop::PointerButton::Left),
+        "right" => Some(crate::remote_desktop::PointerButton::Right),
+        "middle" => Some(crate::remote_desktop::PointerButton::Middle),
+        _ => None,
+    }
+}
+
+fn pixelflux_action_output(
+    action: &str,
+    result: anyhow::Result<()>,
+    received: Option<serde_json::Value>,
+) -> ActionOutput {
+    match result {
+        Ok(()) => ActionOutput {
+            ok: true,
+            implemented: true,
+            action: action.to_string(),
+            message: "Action sent through pixelflux.".to_string(),
+            received,
+        },
+        Err(error) => ActionOutput {
+            ok: false,
+            implemented: true,
+            action: action.to_string(),
+            message: format!("pixelflux did not accept {action}: {error:#}"),
+            received,
+        },
+    }
 }
 
 #[derive(Debug)]
@@ -15516,5 +15741,163 @@ mod tree_spill_server_tests {
         let page = tree_page(&[huge, node(1)], 0);
         assert_eq!(page.nodes.len(), 1);
         assert_eq!(page.next_offset, Some(1));
+    }
+}
+
+#[cfg(test)]
+mod pixelflux_routing_tests {
+    use super::pixelflux_point_for_element;
+    use crate::remote_desktop::LogicalMonitor;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn monitor(width: i32, height: i32) -> LogicalMonitor {
+        LogicalMonitor {
+            x: 0,
+            y: 0,
+            width,
+            height,
+            scale: 2.0,
+        }
+    }
+
+    #[test]
+    fn pixelflux_point_for_element_scales() {
+        let bounds = (166, 714, 54, 46);
+        let layout = [monitor(1432, 768)];
+        assert_eq!(
+            pixelflux_point_for_element(bounds, (2864, 1536), &layout),
+            Some((386, 1474))
+        );
+        assert_eq!(
+            pixelflux_point_for_element(bounds, (1432, 768), &layout),
+            Some((193, 737))
+        );
+        assert_eq!(
+            pixelflux_point_for_element(bounds, (2864, 1000), &layout),
+            None
+        );
+        assert_eq!(pixelflux_point_for_element(bounds, (2864, 1536), &[]), None);
+    }
+
+    #[test]
+    fn pixelflux_click_uses_new_geometry_after_resize() {
+        let server = super::ComputerUseLinux::default();
+        let bounds = (166, 714, 54, 46);
+        server.cache_desktop_size(2864, 1536);
+        server.cache_desktop_size(1428, 1536);
+        let capture = server.desktop_size.lock().unwrap().unwrap();
+        let layout = [monitor(714, 768)];
+        assert_eq!(
+            pixelflux_point_for_element(bounds, capture, &layout),
+            Some((386, 1474))
+        );
+        assert_eq!(
+            pixelflux_point_for_element(bounds, (2864, 1536), &layout),
+            None
+        );
+    }
+    #[tokio::test]
+    async fn pixelflux_failure_after_send_is_not_replayed() {
+        if std::env::var("CUL_PIXELFLUX_CHILD").as_deref() == Ok("500") {
+            let params = serde_json::from_value(serde_json::json!({"x": 10, "y": 20})).unwrap();
+            let result = super::ComputerUseLinux::default()
+                .click(rmcp::handler::server::wrapper::Parameters(params))
+                .await
+                .unwrap();
+            let message = result.structured_content.unwrap()["message"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            std::fs::write(std::env::var("CUL_PIXELFLUX_OUT").unwrap(), message).unwrap();
+            return;
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for (status, body) in [(200, "{\"text\":\"X=0,Y=0\"}"), (500, "{\"error\":\"no\"}")] {
+                let (mut sock, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 2048];
+                let _ = std::io::Read::read(&mut sock, &mut buf);
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = std::io::Write::write_all(&mut sock, response.as_bytes());
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let dir = std::env::temp_dir().join(format!("cul-pf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("ydotool.log");
+        let out = dir.join("out.txt");
+        let ydotool = dir.join("ydotool");
+        std::fs::write(
+            &ydotool,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CUL_PIXELFLUX_LOG\"\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&ydotool, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "server::pixelflux_routing_tests::pixelflux_failure_after_send_is_not_replayed",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PATH", &dir)
+            .env("CUL_PIXELFLUX_CHILD", "500")
+            .env("CUL_PIXELFLUX_LOG", &log)
+            .env("CUL_PIXELFLUX_OUT", &out)
+            .env("PIXELFLUX_CU", port.to_string())
+            .env("PIXELFLUX_CU_TOKEN", "secret")
+            .env("CU_DISABLE_ABS_POINTER", "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "{status}");
+        let message = std::fs::read_to_string(&out).unwrap();
+        assert!(message.contains("pixelflux did not accept"), "{message}");
+        assert!(!message.contains("secret"), "{message}");
+        let recorded = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(recorded.is_empty(), "{recorded}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn pixelflux_probe_failure_falls_through() {
+        if std::env::var("CUL_PIXELFLUX_CHILD").as_deref() == Ok("down") {
+            let server = super::ComputerUseLinux::default();
+            let params = serde_json::from_value(serde_json::json!({"x": 10, "y": 20})).unwrap();
+            let without = server
+                .click(rmcp::handler::server::wrapper::Parameters(params))
+                .await
+                .unwrap();
+            std::env::set_var("PIXELFLUX_CU", "1");
+            std::env::set_var("PIXELFLUX_CU_TOKEN", "secret");
+            let params = serde_json::from_value(serde_json::json!({"x": 10, "y": 20})).unwrap();
+            let with = server
+                .click(rmcp::handler::server::wrapper::Parameters(params))
+                .await
+                .unwrap();
+            let left = without.structured_content.unwrap()["message"].to_string();
+            let right = with.structured_content.unwrap()["message"].to_string();
+            assert_eq!(left, right, "unreachable pixelflux changed the fallback");
+            assert!(!right.contains("secret"));
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "server::pixelflux_routing_tests::pixelflux_probe_failure_falls_through",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("CUL_PIXELFLUX_CHILD", "down")
+            .env("CU_DISABLE_ABS_POINTER", "1")
+            .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/tmp/cul-no-bus")
+            .env("XDG_SESSION_TYPE", "tty")
+            .status()
+            .unwrap();
+        assert!(status.success(), "{status}");
     }
 }

@@ -161,6 +161,8 @@ pub struct InputReport {
     pub xdotool: Check,
     /// Wayland virtual-keyboard backend for layout-safe Unicode literal text.
     pub wtype: Check,
+    /// Selkies pixelflux computer-use server. Detail is the port only.
+    pub pixelflux: Check,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -331,6 +333,9 @@ fn capability_map_with_portal_keyboard(
     input: &InputReport,
 ) -> CapabilityMap {
     let mut input_backends = Vec::new();
+    if input.pixelflux.ok {
+        input_backends.push("pixelflux".to_string());
+    }
     // Absolute uinput pointer: accurate, non-blocking of coordinates; preferred.
     if input.uinput.ok && platform_is_wayland(platform) && !is_cosmic_wayland_platform(platform) {
         input_backends.push("abs_pointer".to_string());
@@ -928,6 +933,25 @@ fn check_from_backend_probe(probe: &registry::BackendProbe) -> Check {
     }
 }
 
+fn pixelflux_check() -> Check {
+    let Some(config) = crate::pixelflux::PixelfluxConfig::from_env() else {
+        return Check::fail("PIXELFLUX_CU is not set");
+    };
+    let port = config.port;
+    let probed = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        runtime.block_on(crate::pixelflux::probe(&config)).ok()
+    })
+    .join();
+    match probed {
+        Ok(Some(())) => Check::ok(port.to_string()),
+        _ => Check::fail(format!("{port} unreachable")),
+    }
+}
+
 fn input_report() -> InputReport {
     InputReport {
         ydotool: match ydotool::ensure_supported() {
@@ -939,6 +963,7 @@ fn input_report() -> InputReport {
         uinput: read_write_path_check(Path::new("/dev/uinput")),
         xdotool: command_path_check("xdotool"),
         wtype: command_path_check("wtype"),
+        pixelflux: pixelflux_check(),
     }
 }
 
@@ -1925,6 +1950,7 @@ pub(crate) mod tests {
             uinput,
             xdotool: Check::fail("missing xdotool"),
             wtype: Check::fail("missing wtype"),
+            pixelflux: Check::fail("PIXELFLUX_CU is not set"),
         }
     }
 
@@ -2051,6 +2077,7 @@ pub(crate) mod tests {
             uinput: Check::fail("missing"),
             xdotool: Check::ok("xdotool"),
             wtype: Check::fail("missing wtype"),
+            pixelflux: Check::fail("PIXELFLUX_CU is not set"),
         };
 
         let capabilities = capability_map(
@@ -2387,6 +2414,7 @@ pub(crate) mod tests {
             uinput: Check::fail("missing"),
             xdotool: Check::ok("xdotool"),
             wtype: Check::fail("missing wtype"),
+            pixelflux: Check::fail("PIXELFLUX_CU is not set"),
         };
 
         let capabilities = capability_map(
