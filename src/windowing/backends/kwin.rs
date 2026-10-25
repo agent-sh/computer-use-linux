@@ -67,9 +67,19 @@ pub(crate) async fn output_layout() -> Result<Vec<LogicalMonitor>> {
 
 /// Logical output rectangles in KWin's order; unlike `kscreen-doctor`, these stay
 /// right when KWin runs nested and reports its scale only to Wayland clients.
+/// Overlapping (mirrored) outputs are an error so `kscreen-doctor`, which drops
+/// replicas, handles those setups.
 pub(crate) fn kwin_output_layout(json: &str) -> Result<Vec<LogicalMonitor>> {
-    Ok(KwinElementClickSnapshot::from_json(json)?
-        .outputs
+    let outputs = KwinElementClickSnapshot::from_json(json)?.outputs;
+    for (index, output) in outputs.iter().enumerate() {
+        if outputs[index + 1..]
+            .iter()
+            .any(|other| output.geometry.overlaps(other.geometry))
+        {
+            bail!("overlapping or mirrored KWin outputs are unsupported");
+        }
+    }
+    Ok(outputs
         .into_iter()
         .map(|output| LogicalMonitor {
             x: output.geometry.x.round() as i32,
@@ -1789,6 +1799,12 @@ mod adapter_tests {
         );
 
         assert!(kwin_output_layout(r#"{"outputs":[],"windows":[]}"#).is_err());
+
+        let mirrored = r#"{"outputs":[
+            {"name":"DP-1","geometry":{"x":0,"y":0,"width":1920,"height":1080},"devicePixelRatio":1},
+            {"name":"HDMI-1","geometry":{"x":0,"y":0,"width":1920,"height":1080},"devicePixelRatio":1}
+        ],"windows":[]}"#;
+        assert!(kwin_output_layout(mirrored).is_err());
     }
 
     #[test]
