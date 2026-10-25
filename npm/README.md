@@ -195,7 +195,15 @@ does not yet forward the flag or include the tool in its catalog.
   snapshot's node budget before the app's own controls; when
   `accessibility_tree_truncated` is true, a missing editor proves nothing. Raise
   `max_nodes` (default 1000, hard cap 10000) and, if needed, `max_depth` (hard
-  cap 64); larger trees cost more context, and a busy renderer may give only a
-  few thousand nodes before the deadline. A snapshot stops reading at 10 seconds
+  cap 64); a busy renderer may give only a few thousand nodes before the
+  deadline. A snapshot stops reading at 10 seconds
   and returns what it read, marked truncated; if the editor is still missing,
   hide the embedded browser pane for the snapshot.
+
+  When a result would pass 32,000 bytes, the tree comes back as its leading
+  nodes plus `accessibility_tree_spill` (`path`, `node_count`, `bytes`,
+  `inline_node_count`). `path` is a private JSON file holding the whole tree
+  with the same `element_index` values (under `$XDG_RUNTIME_DIR` when it is
+  private, otherwise `~/.cache`). Search it instead of requesting the tree
+  again; hosts that cannot read files page through it with `get_tree_page`. The
+  file lasts until the next snapshot or until the server exits.

@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.26";
-export const GENERATED_TOOL_CATALOG_HASH = "ec0af1cf8525312554ae5b698f6cb6629190b189afe77ee1a8c3356d9dded33c";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "ca71b492f3682185e6b1ff1e0b9e9e95ef07ce1087c2bbfdcf05b99284cb3112";
+export const GENERATED_TOOL_CATALOG_HASH = "711deb97eb5c8a6cbe0a2fadbb64fdffc7592e304479dbbf277d3fcc4d58210f";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "1a927deb2579d314a975afc586bd31010862141779cbe7af50cd76f0387a607c";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -565,7 +565,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
+    "description": "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -757,6 +757,31 @@ export const GENERATED_MCP_TOOLS =
       "type": "object"
     },
     "name": "get_app_state"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Return a page of the accessibility tree from the latest get_app_state or include_tree snapshot, starting at node offset (default 0). Use it when a tree was too large to return inline (accessibility_tree_spill is set) and the host cannot read the spill file; page with next_offset until it is null. Element indices match the snapshot, so element_index actions work on these nodes. It does not read the desktop again.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "offset": {
+          "default": null,
+          "description": "First node to return, counted from the start of the cached tree (default 0).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "name": "get_tree_page"
   },
   {
     "annotations": {

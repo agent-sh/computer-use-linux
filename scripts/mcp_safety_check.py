@@ -23,6 +23,7 @@ EXPECTED_TOOLS = {
     "setup_window_targeting",
     "list_apps",
     "get_app_state",
+    "get_tree_page",
     "list_windows",
     "focused_window",
     "screenshot",
@@ -117,6 +118,7 @@ READ_ONLY_TOOLS = {
     "doctor",
     "list_apps",
     "get_app_state",
+    "get_tree_page",
     "list_windows",
     "focused_window",
 }

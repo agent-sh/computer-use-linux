@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `get_tree_page` pages through the latest cached tree by node offset, for hosts that cannot read the spill file.
+
+### Changed
+
+- Keep tool results under 32,000 bytes when they carry a large accessibility tree: the result holds the leading nodes, and the whole compacted tree goes to a private file named in `accessibility_tree_spill`, with the same `element_index` values. A 2,000-node tree was about 1.2 MB of JSON, far past what MCP hosts show a model. The file lasts until the next snapshot or until the server exits.
+
 ## [0.7.26] - 2026-10-25
 
 ### Fixed
