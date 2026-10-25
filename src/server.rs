@@ -1741,7 +1741,17 @@ impl ComputerUseLinux {
         let pixelflux_point = match (params.x.zip(params.y), params.element_index) {
             (None, Some(index)) => {
                 let bounds = self.cached_node_bounds(index);
-                self.pixelflux_element_point(bounds.as_ref()).await
+                match self.pixelflux_element_point(bounds.as_ref()).await {
+                    Some(point) => Some(point),
+                    None => {
+                        if let Some(output) =
+                            self.pixelflux_unmapped("scroll", received.clone()).await
+                        {
+                            return Json(output);
+                        }
+                        None
+                    }
+                }
             }
             _ => target_point,
         };
@@ -5097,19 +5107,7 @@ impl ComputerUseLinux {
             Some((x, y))
         };
         let Some((px, py)) = point else {
-            // Only an element click can fail to map. Fall through only if pixelflux is down.
-            let config = crate::pixelflux::PixelfluxConfig::from_env()?;
-            return match crate::pixelflux::probe(&config).await {
-                Ok(()) => Some(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "click".to_string(),
-                    message: "pixelflux could not map the element onto the capture".to_string(),
-                    received,
-                }),
-                Err(error) if crate::pixelflux::is_unreachable(&error) => None,
-                Err(error) => Some(pixelflux_action_output("click", Err(error), received)),
-            };
+            return self.pixelflux_unmapped("click", received).await;
         };
         self.pixelflux_send(
             "click",
@@ -5122,6 +5120,26 @@ impl ComputerUseLinux {
             received,
         )
         .await
+    }
+
+    /// An element pixelflux cannot map. Falls through only when pixelflux is absent or down.
+    async fn pixelflux_unmapped(
+        &self,
+        action: &str,
+        received: Option<serde_json::Value>,
+    ) -> Option<ActionOutput> {
+        let config = crate::pixelflux::PixelfluxConfig::from_env()?;
+        match crate::pixelflux::probe(&config).await {
+            Ok(()) => Some(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: action.to_string(),
+                message: "pixelflux could not map the element onto the capture".to_string(),
+                received,
+            }),
+            Err(error) if crate::pixelflux::is_unreachable(&error) => None,
+            Err(error) => Some(pixelflux_action_output(action, Err(error), received)),
+        }
     }
 
     async fn pixelflux_send(
