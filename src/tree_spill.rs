@@ -1,19 +1,21 @@
 //! Large accessibility trees go to a private file instead of the tool result.
 //!
 //! A big Electron or browser tree serializes to megabytes, far past what an MCP
-//! host shows a model (Codex cuts tool output at 10,000 tokens). Past
-//! [`INLINE_TREE_CHARS`] the result keeps only the nodes that fit, and the
-//! whole compacted tree is written as JSON to a per-user directory the agent
-//! can search. Indices in the file match the cached snapshot, so an
+//! host shows a model (Codex cuts tool output at 10,000 tokens). Past the
+//! inline budget a result keeps only the nodes that fit, and the whole
+//! compacted tree is written as JSON to a private per-user directory the agent
+//! can search; hosts without file access page through it with
+//! `get_tree_page`. Indices in the file match the cached snapshot, so an
 //! `element_index` read from it still works.
 //!
-//! Files are cleaned up: each spill replaces the server's previous one, the
-//! server removes its file when it exits, and every spill sweeps files left by
-//! servers that are gone or older than [`MAX_SPILL_AGE`].
+//! A file exists only while it matches the cache: the server removes it
+//! whenever it caches a new snapshot, when a new spill replaces it, and when it
+//! exits (stdin closed, SIGTERM or SIGINT). Files of servers that are gone are
+//! swept at startup and on every spill, and any file older than an hour.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufWriter, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -24,10 +26,10 @@ use serde::Serialize;
 
 use crate::atspi_tree::AccessibilityNode;
 
-/// Largest inline tree, in serialized characters. It keeps a whole
-/// `get_app_state` result under a 10,000-token host limit (about 40,000
-/// characters) with room for the readiness block and message.
-pub(crate) const INLINE_TREE_CHARS: usize = 32_000;
+/// Largest whole tool result, in serialized bytes, before the tree is spilled.
+/// It keeps a result inside a 10,000-token host limit (about 40,000 bytes of
+/// JSON), with room for a note about the spill.
+pub(crate) const INLINE_RESULT_BYTES: usize = 32_000;
 /// A spill file older than this is swept even if its server still runs.
 const MAX_SPILL_AGE: Duration = Duration::from_secs(60 * 60);
 const SPILL_PREFIX: &str = "tree-";
@@ -45,9 +47,12 @@ pub(crate) struct TreeSpill {
     pub inline_node_count: usize,
 }
 
-/// One server's spill files.
+/// One server's spill file.
 pub(crate) struct TreeSpiller {
     dir: Option<PathBuf>,
+    /// Start time of this process, so a leftover file from an earlier process
+    /// that had the same pid is not mistaken for this server's.
+    start: u64,
     current: Mutex<Option<PathBuf>>,
     sequence: AtomicU64,
 }
@@ -62,19 +67,23 @@ impl TreeSpiller {
     pub(crate) fn new(dir: Option<PathBuf>) -> Self {
         Self {
             dir,
+            start: process_start(std::process::id()).unwrap_or_default(),
             current: Mutex::new(None),
             sequence: AtomicU64::new(0),
         }
     }
 
-    /// Fit `nodes` into the inline budget. When they do not fit, write all of
-    /// them to a spill file and keep the prefix that fits. Without a writable
-    /// spill directory the tree is cut to the prefix and `Err` says why.
+    /// Fit `nodes` into `budget` bytes. When they do not fit, write all of them
+    /// to a spill file and keep the prefix that fits. Without a usable spill
+    /// directory the tree is cut to the prefix and `Err` says why. Call right
+    /// after the snapshot is cached, with no await in between, so the file and
+    /// the cache stay paired.
     pub(crate) fn fit(
         &self,
         nodes: &mut Vec<AccessibilityNode>,
+        budget: usize,
     ) -> Result<Option<TreeSpill>, (usize, String)> {
-        let inline = inline_prefix_len(nodes, INLINE_TREE_CHARS);
+        let inline = inline_prefix_len(nodes, budget);
         if inline == nodes.len() {
             return Ok(None);
         }
@@ -97,25 +106,33 @@ impl TreeSpiller {
                 "no private directory for spilled trees",
             )
         })?;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)?;
-        sweep(dir, std::process::id());
+        ensure_private_dir(dir)?;
+        sweep(dir, std::process::id(), self.start);
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
         let path = dir.join(format!(
-            "{SPILL_PREFIX}{}-{sequence}.json",
-            std::process::id()
+            "{SPILL_PREFIX}{}-{}-{sequence}.json",
+            std::process::id(),
+            self.start
         ));
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)?;
-        let mut writer = BufWriter::new(file);
-        serde_json::to_writer(&mut writer, nodes)?;
-        writer.flush()?;
-        let bytes = writer.get_ref().metadata()?.len() as usize;
+        let written = (|| {
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&path)?;
+            let mut writer = BufWriter::new(file);
+            serde_json::to_writer(&mut writer, nodes)?;
+            writer.flush()?;
+            Ok::<_, io::Error>(writer.get_ref().metadata()?.len() as usize)
+        })();
+        let bytes = match written {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = fs::remove_file(&path);
+                return Err(error);
+            }
+        };
         let previous = self
             .current
             .lock()
@@ -126,10 +143,9 @@ impl TreeSpiller {
         }
         Ok((path, bytes))
     }
-}
 
-impl TreeSpiller {
-    /// Remove this server's spill file, if any.
+    /// Remove this server's spill file, if any. Called whenever the cached
+    /// snapshot changes, so a file never outlives the snapshot it matches.
     pub(crate) fn remove_current(&self) {
         if let Some(path) = self
             .current
@@ -144,7 +160,9 @@ impl TreeSpiller {
     /// Remove files left by servers that are gone, or that are too old.
     pub(crate) fn sweep(&self) {
         if let Some(dir) = &self.dir {
-            sweep(dir, std::process::id());
+            if private_dir(dir).is_ok() {
+                sweep(dir, std::process::id(), self.start);
+            }
         }
     }
 }
@@ -155,22 +173,73 @@ impl Drop for TreeSpiller {
     }
 }
 
-/// `$XDG_RUNTIME_DIR/computer-use-linux/trees`: per-user, private, and cleared at
-/// logout. Falls back to `~/.cache/computer-use-linux/trees`.
+/// `$XDG_RUNTIME_DIR/computer-use-linux/trees` when the runtime directory is
+/// the user's own and private (as the XDG spec requires); otherwise
+/// `$XDG_CACHE_HOME` or `~/.cache`, under `computer-use-linux/trees`.
 fn spill_dir() -> Option<PathBuf> {
+    let leaf = |base: PathBuf| base.join("computer-use-linux").join("trees");
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
-        .filter(|p| p.is_absolute());
-    let base = runtime.or_else(|| {
-        std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-    })?;
-    Some(base.join("computer-use-linux").join("trees"))
+        .filter(|path| path.is_absolute() && private_dir(path).is_ok());
+    if let Some(runtime) = runtime {
+        return Some(leaf(runtime));
+    }
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .map(leaf)
 }
 
-/// Number of leading nodes whose JSON array fits in `budget` characters.
+/// A real directory, owned by this user, with no group or other access.
+fn private_dir(path: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a directory", path.display()),
+        ));
+    }
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    if meta.uid() != unsafe { libc::geteuid() } {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} is owned by another user", path.display()),
+        ));
+    }
+    if meta.permissions().mode() & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} is open to other users", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+/// Create the spill directory and its `computer-use-linux` parent as private
+/// directories, or check existing ones: never a symlink, another user's
+/// directory, or one others can write.
+fn ensure_private_dir(dir: &Path) -> io::Result<()> {
+    let parent = dir.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "spill directory has no parent")
+    })?;
+    for path in [parent, dir] {
+        match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if let Some(base) = path.parent() {
+                    fs::create_dir_all(base)?;
+                }
+                fs::DirBuilder::new().mode(0o700).create(path)?;
+            }
+            Err(error) => return Err(error),
+            Ok(_) => {}
+        }
+        private_dir(path)?;
+    }
+    Ok(())
+}
+
+/// Number of leading nodes whose JSON array fits in `budget` bytes.
 pub(crate) fn inline_prefix_len(nodes: &[AccessibilityNode], budget: usize) -> usize {
     let mut used: usize = 2; // the array brackets
     for (index, node) in nodes.iter().enumerate() {
@@ -184,15 +253,16 @@ pub(crate) fn inline_prefix_len(nodes: &[AccessibilityNode], budget: usize) -> u
     nodes.len()
 }
 
-/// Remove spill files whose server is gone, or that are older than [`MAX_SPILL_AGE`].
-fn sweep(dir: &Path, own_pid: u32) {
+/// Remove spill files whose server is gone (its pid is not running with the
+/// recorded start time), or that are older than [`MAX_SPILL_AGE`].
+fn sweep(dir: &Path, own_pid: u32, own_start: u64) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     let now = SystemTime::now();
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let Some(pid) = name.to_str().and_then(spill_file_pid) else {
+        let Some((pid, start)) = name.to_str().and_then(spill_file_owner) else {
             continue;
         };
         let old = entry
@@ -201,23 +271,36 @@ fn sweep(dir: &Path, own_pid: u32) {
             .ok()
             .and_then(|modified| now.duration_since(modified).ok())
             .is_some_and(|age| age > MAX_SPILL_AGE);
-        if old || (pid != own_pid && !process_alive(pid)) {
+        let own = pid == own_pid && start == own_start;
+        let alive = own || process_start(pid) == Some(start);
+        if old || !alive {
             let _ = fs::remove_file(entry.path());
         }
     }
 }
 
-fn spill_file_pid(name: &str) -> Option<u32> {
-    name.strip_prefix(SPILL_PREFIX)?
+/// `(pid, start time)` from a `tree-<pid>-<start>-<seq>.json` name.
+fn spill_file_owner(name: &str) -> Option<(u32, u64)> {
+    let mut parts = name
+        .strip_prefix(SPILL_PREFIX)?
         .strip_suffix(".json")?
-        .split_once('-')?
-        .0
-        .parse()
-        .ok()
+        .split('-');
+    let pid = parts.next()?.parse().ok()?;
+    let start = parts.next()?.parse().ok()?;
+    parts.next()?.parse::<u64>().ok()?;
+    parts.next().is_none().then_some((pid, start))
 }
 
-fn process_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+/// Start time of `pid` in clock ticks since boot (`/proc/<pid>/stat` field 22).
+fn process_start(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name can contain spaces and parentheses; fields follow the last ')'.
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
 }
 
 #[cfg(test)]
@@ -243,107 +326,196 @@ mod tests {
         }
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("cul-spill-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        dir
+    fn big_tree() -> Vec<AccessibilityNode> {
+        (0..200).map(|i| node(i, 400)).collect()
+    }
+
+    /// A private scratch directory; the spill directory is `<scratch>/cul/trees`.
+    fn scratch(name: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("cul-spill-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let dir = root.join("cul").join("trees");
+        (root, dir)
     }
 
     fn files(dir: &Path) -> Vec<PathBuf> {
         fs::read_dir(dir).map_or_else(|_| Vec::new(), |d| d.flatten().map(|e| e.path()).collect())
     }
 
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
     #[test]
     fn small_trees_stay_inline_and_write_nothing() {
-        let dir = scratch("small");
+        let (root, dir) = scratch("small");
         let spiller = TreeSpiller::new(Some(dir.clone()));
         let mut nodes = vec![node(0, 10), node(1, 10)];
-        assert!(matches!(spiller.fit(&mut nodes), Ok(None)));
+        assert!(matches!(
+            spiller.fit(&mut nodes, INLINE_RESULT_BYTES),
+            Ok(None)
+        ));
         assert_eq!(nodes.len(), 2);
         assert!(files(&dir).is_empty());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn large_trees_spill_whole_and_keep_a_prefix_that_fits() {
-        let dir = scratch("large");
+        let (root, dir) = scratch("large");
         let spiller = TreeSpiller::new(Some(dir.clone()));
-        let all: Vec<_> = (0..200).map(|i| node(i, 400)).collect();
-        let mut nodes = all.clone();
-        let spill = spiller.fit(&mut nodes).unwrap().expect("spilled");
-        assert_eq!(spill.node_count, 200);
-        assert_eq!(spill.inline_node_count, nodes.len());
-        assert!(serde_json::to_string(&nodes).unwrap().len() <= INLINE_TREE_CHARS);
-        assert!(nodes.len() < 200 && !nodes.is_empty());
+        let mut nodes = big_tree();
+        let spill = spiller
+            .fit(&mut nodes, INLINE_RESULT_BYTES)
+            .unwrap()
+            .expect("spilled");
+        assert_eq!(
+            (spill.node_count, spill.inline_node_count),
+            (200, nodes.len())
+        );
+        assert!(serde_json::to_string(&nodes).unwrap().len() <= INLINE_RESULT_BYTES);
+        assert!(!nodes.is_empty() && nodes.len() < 200);
         let written: Vec<serde_json::Value> =
             serde_json::from_slice(&fs::read(&spill.path).unwrap()).unwrap();
         assert_eq!(written.len(), 200);
         assert_eq!(
-            written[150]["index"], 150,
-            "file indices match the snapshot"
-        );
-        let mode = fs::metadata(&spill.path).unwrap().permissions();
-        assert_eq!(
-            std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777,
-            0o600
-        );
-        let dir_mode = fs::metadata(&dir).unwrap().permissions();
-        assert_eq!(
-            std::os::unix::fs::PermissionsExt::mode(&dir_mode) & 0o777,
-            0o700
+            (
+                mode(Path::new(&spill.path)),
+                mode(&dir),
+                mode(dir.parent().unwrap())
+            ),
+            (0o600, 0o700, 0o700)
         );
         drop(spiller);
         assert!(
             !Path::new(&spill.path).exists(),
             "the server removes its file on exit"
         );
-        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn a_new_spill_replaces_the_previous_one() {
-        let dir = scratch("replace");
+    fn a_new_spill_replaces_the_previous_one_and_a_new_snapshot_removes_it() {
+        let (root, dir) = scratch("replace");
         let spiller = TreeSpiller::new(Some(dir.clone()));
         let first = spiller
-            .fit(&mut (0..200).map(|i| node(i, 400)).collect())
+            .fit(&mut big_tree(), INLINE_RESULT_BYTES)
             .unwrap()
             .unwrap();
         let second = spiller
-            .fit(&mut (0..200).map(|i| node(i, 400)).collect())
+            .fit(&mut big_tree(), INLINE_RESULT_BYTES)
             .unwrap()
             .unwrap();
         assert!(!Path::new(&first.path).exists());
         assert_eq!(files(&dir), vec![PathBuf::from(&second.path)]);
-        drop(spiller);
-        let _ = fs::remove_dir_all(dir);
+        spiller.remove_current();
+        assert!(
+            files(&dir).is_empty(),
+            "a newly cached snapshot removes the file"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn sweep_removes_files_of_servers_that_are_gone() {
-        let dir = scratch("sweep");
+    fn sweep_keeps_live_servers_and_removes_gone_or_reused_pids() {
+        let (root, dir) = scratch("sweep");
+        ensure_private_dir(&dir).unwrap();
+        let me = std::process::id();
+        let my_start = process_start(me).unwrap();
+        let init_start = process_start(1).unwrap();
+        let live_other = dir.join(format!("{SPILL_PREFIX}1-{init_start}-0.json"));
+        let mine = dir.join(format!("{SPILL_PREFIX}{me}-{my_start}-0.json"));
+        // Same pid as this process, but an earlier process's start time: a leftover.
+        let reused = dir.join(format!(
+            "{SPILL_PREFIX}{me}-{}-0.json",
+            my_start.wrapping_sub(1)
+        ));
+        let gone = dir.join(format!("{SPILL_PREFIX}0-5-3.json"));
+        let unrelated = dir.join("notes.txt");
+        for path in [&live_other, &mine, &reused, &gone, &unrelated] {
+            fs::write(path, "[]").unwrap();
+        }
+        sweep(&dir, me, my_start);
+        assert!(live_other.exists() && mine.exists() && unrelated.exists());
+        assert!(!reused.exists() && !gone.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sweep_removes_files_older_than_an_hour() {
+        let (root, dir) = scratch("age");
+        ensure_private_dir(&dir).unwrap();
+        let me = std::process::id();
+        let start = process_start(me).unwrap();
+        let old = dir.join(format!("{SPILL_PREFIX}{me}-{start}-9.json"));
+        fs::write(&old, "[]").unwrap();
+        let past = SystemTime::now() - MAX_SPILL_AGE - Duration::from_secs(60);
+        fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+        sweep(&dir, me, start);
+        assert!(!old.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_directory_others_can_write_is_refused() {
+        let (root, dir) = scratch("shared");
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&dir)
             .unwrap();
-        // pid 0 never names a live server process; other names are left alone.
-        let dead = dir.join(format!("{SPILL_PREFIX}0-3.json"));
-        let mine = dir.join(format!("{SPILL_PREFIX}{}-0.json", std::process::id()));
-        let other = dir.join("notes.txt");
-        for path in [&dead, &mine, &other] {
-            fs::write(path, "[]").unwrap();
-        }
-        sweep(&dir, std::process::id());
-        assert!(!dead.exists());
-        assert!(mine.exists() && other.exists());
-        let _ = fs::remove_dir_all(dir);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
+        let spiller = TreeSpiller::new(Some(dir.clone()));
+        let mut nodes = big_tree();
+        let (inline, error) = spiller.fit(&mut nodes, INLINE_RESULT_BYTES).unwrap_err();
+        assert_eq!(nodes.len(), inline);
+        assert!(error.contains("open to other users"), "{error}");
+        assert!(files(&dir).is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_symlinked_directory_is_refused() {
+        let (root, dir) = scratch("symlink");
+        let elsewhere = root.join("elsewhere");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&elsewhere)
+            .unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(dir.parent().unwrap())
+            .unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &dir).unwrap();
+        assert!(ensure_private_dir(&dir).is_err());
+        assert!(files(&elsewhere).is_empty());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn without_a_spill_directory_the_tree_is_cut_and_says_why() {
         let spiller = TreeSpiller::new(None);
-        let mut nodes: Vec<_> = (0..200).map(|i| node(i, 400)).collect();
-        let (inline, error) = spiller.fit(&mut nodes).unwrap_err();
+        let mut nodes = big_tree();
+        let (inline, error) = spiller.fit(&mut nodes, INLINE_RESULT_BYTES).unwrap_err();
         assert_eq!(nodes.len(), inline);
         assert!(error.contains("no private directory"));
+    }
+
+    #[test]
+    fn spill_names_carry_pid_and_start_time() {
+        assert_eq!(spill_file_owner("tree-42-1234-7.json"), Some((42, 1234)));
+        assert_eq!(spill_file_owner("tree-42-7.json"), None);
+        assert_eq!(spill_file_owner("tree-42-1234-7-8.json"), None);
+        assert_eq!(spill_file_owner("notes.json"), None);
     }
 }

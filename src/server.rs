@@ -274,6 +274,28 @@ impl ComputerUseLinux {
     }
 
     #[tool(
+        name = "get_tree_page",
+        description = "Return a page of the accessibility tree from the latest get_app_state or include_tree snapshot, starting at node offset (default 0). Use it when a tree was too large to return inline (accessibility_tree_spill is set) and the host cannot read the spill file; page with next_offset until it is null. Element indices match the snapshot, so element_index actions work on these nodes. It does not read the desktop again.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn get_tree_page(
+        &self,
+        Parameters(params): Parameters<GetTreePageParams>,
+    ) -> Json<GetTreePageOutput> {
+        let nodes = self
+            .last_snapshot
+            .lock()
+            .map(|snapshot| snapshot.nodes.clone())
+            .unwrap_or_default();
+        Json(tree_page(&nodes, params.offset.unwrap_or(0)))
+    }
+
+    #[tool(
         name = "list_windows",
         description = "List compositor windows with title, app id, class, focus state, client type, and known bounds.",
         annotations(
@@ -521,10 +543,7 @@ impl ComputerUseLinux {
         } else {
             self.commit_snapshot(&[], None).await;
         }
-        let mut accessibility_tree = accessibility_tree;
         let compacted_count = accessibility_tree.len();
-        let (accessibility_tree_spill, spill_note) =
-            fit_tree(&self.tree_spiller, &mut accessibility_tree);
         let mut message = if let Some(error) = &accessibility_error {
             format!("MCP registration is working, but AT-SPI tree extraction failed: {error}")
         } else if let Some(capture) = &screenshot {
@@ -571,10 +590,6 @@ impl ComputerUseLinux {
             message.push(' ');
             message.push_str(note);
         }
-        if let Some(note) = spill_note {
-            message.push(' ');
-            message.push_str(&note);
-        }
 
         // Full diagnostics are huge (portal/process dumps); emit them only on
         // request. The compact readiness block always travels, and failures get
@@ -588,7 +603,7 @@ impl ComputerUseLinux {
         {
             message.push_str(" Pass verbose=true for full diagnostics.");
         }
-        let output = GetAppStateOutput {
+        let mut output = GetAppStateOutput {
             app_name_or_bundle_identifier: params.app_name_or_bundle_identifier,
             window_context,
             window_error,
@@ -596,9 +611,9 @@ impl ComputerUseLinux {
             backend: "linux-atspi".to_string(),
             screenshot: screenshot.as_ref().map(ScreenshotSummary::from),
             screenshot_error,
-            accessibility_tree,
+            accessibility_tree: Vec::new(),
             accessibility_tree_raw_count,
-            accessibility_tree_spill,
+            accessibility_tree_spill: None,
             tree_scoped,
             accessibility_tree_truncated,
             accessibility_error,
@@ -606,6 +621,20 @@ impl ComputerUseLinux {
             diagnostics: include_full.then_some(diagnostics),
             message,
         };
+        // The tree gets whatever the rest of the result leaves of the budget.
+        let rest = serde_json::to_string(&output).map_or(0, |json| json.len());
+        let mut accessibility_tree = accessibility_tree;
+        let (spill, note) = fit_tree(
+            &self.tree_spiller,
+            &mut accessibility_tree,
+            tree_budget(rest),
+        );
+        output.accessibility_tree = accessibility_tree;
+        output.accessibility_tree_spill = spill;
+        if let Some(note) = note {
+            output.message.push(' ');
+            output.message.push_str(&note);
+        }
         app_state_result(output, screenshot)
     }
 
@@ -2364,7 +2393,7 @@ impl ComputerUseLinux {
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
     version = "0.7.26",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send literal type_text through KDE clipboard integration on Plasma Wayland, wtype on compatible Wayland compositors, or portal keysyms on other Wayland sessions. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Mutating tools (click, type_text, press_key, scroll, drag, perform_action, set_value, activate_window, move_window, resize_window) accept optional screenshot_after (true, \"screen\", or \"window\") with format/quality/scale/max_width/max_height/max_bytes and optional include_tree=true to return post-action observation in the same tool call. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype uses a single literal argument after -- to avoid stdin keymap-refresh corruption; text is visible in process arguments, so confirmed password fields are rejected (use set_value). Terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call; split larger input into smaller calls or expose accessibility. Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. X11 xdotool can silently substitute symbols under non-US XKB layouts (reported with br/ABNT2) or changing keymap state; inspect the text before pressing Enter or submitting it. A successful type_text result confirms dispatch only; every text backend leaves field contents unverified. Re-observe the target before retrying. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, read, or time budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 10000 and 64), not by lowering max_nodes. A compacted tree too large to return inline comes back as its leading nodes plus accessibility_tree_spill.path, a private JSON file with the whole tree and the same element_index values; search that file instead of requesting the tree again. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content."
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send literal type_text through KDE clipboard integration on Plasma Wayland, wtype on compatible Wayland compositors, or portal keysyms on other Wayland sessions. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Mutating tools (click, type_text, press_key, scroll, drag, perform_action, set_value, activate_window, move_window, resize_window) accept optional screenshot_after (true, \"screen\", or \"window\") with format/quality/scale/max_width/max_height/max_bytes and optional include_tree=true to return post-action observation in the same tool call. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype uses a single literal argument after -- to avoid stdin keymap-refresh corruption; text is visible in process arguments, so confirmed password fields are rejected (use set_value). Terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call; split larger input into smaller calls or expose accessibility. Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. X11 xdotool can silently substitute symbols under non-US XKB layouts (reported with br/ABNT2) or changing keymap state; inspect the text before pressing Enter or submitting it. A successful type_text result confirms dispatch only; every text backend leaves field contents unverified. Re-observe the target before retrying. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, read, or time budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 10000 and 64), not by lowering max_nodes. A compacted tree too large to return inline comes back as its leading nodes plus accessibility_tree_spill.path, a private JSON file with the whole tree and the same element_index values; search that file instead of requesting the tree again, or page through it with get_tree_page when files are not readable. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content."
 )]
 impl ServerHandler for ComputerUseLinux {}
 
@@ -2655,15 +2684,18 @@ pub async fn serve_mcp() -> Result<()> {
     // tree is removed either way.
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    tokio::select! {
+    let signal = tokio::select! {
         result = running.waiting() => {
             tree_spiller.remove_current();
             result?;
+            return Ok(());
         }
-        _ = terminate.recv() => tree_spiller.remove_current(),
-        _ = interrupt.recv() => tree_spiller.remove_current(),
-    }
-    Ok(())
+        _ = terminate.recv() => libc::SIGTERM,
+        _ = interrupt.recv() => libc::SIGINT,
+    };
+    tree_spiller.remove_current();
+    // Exit now: returning would wait forever for the stdin reader thread.
+    std::process::exit(128 + signal);
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -3210,6 +3242,67 @@ fn app_state_result(
 ) -> Result<CallToolResult, ErrorData> {
     structured_tool_result(output, screenshot)
 }
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+struct GetTreePageParams {
+    /// First node to return, counted from the start of the cached tree (default 0).
+    #[serde(default)]
+    offset: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct GetTreePageOutput {
+    /// Nodes from `offset`, as many as fit in one result.
+    nodes: Vec<AccessibilityNode>,
+    offset: usize,
+    /// Offset of the next page, or null when this page ends the tree.
+    next_offset: Option<usize>,
+    /// Nodes in the cached tree.
+    node_count: usize,
+    message: String,
+}
+
+/// A page of `nodes` from `offset` that fits the inline budget. Always at least
+/// one node, so paging advances even past a node larger than the budget.
+fn tree_page(nodes: &[AccessibilityNode], offset: usize) -> GetTreePageOutput {
+    let node_count = nodes.len();
+    if node_count == 0 {
+        return GetTreePageOutput {
+            nodes: Vec::new(),
+            offset,
+            next_offset: None,
+            node_count,
+            message: "No accessibility tree is cached; call get_app_state first.".to_string(),
+        };
+    }
+    let start = offset.min(node_count);
+    let rest = &nodes[start..];
+    let fit = crate::tree_spill::inline_prefix_len(rest, tree_budget(TREE_PAGE_RESERVE))
+        .max(usize::from(!rest.is_empty()));
+    let end = start + fit;
+    let next_offset = (end < node_count).then_some(end);
+    let message = match next_offset {
+        Some(next) => format!(
+            "Nodes {start}-{} of {node_count}; continue with offset {next}.",
+            end - 1
+        ),
+        None if start < end => format!(
+            "Nodes {start}-{} of {node_count}; this is the end of the tree.",
+            end - 1
+        ),
+        None => format!("Offset {offset} is past the end of the {node_count}-node tree."),
+    };
+    GetTreePageOutput {
+        nodes: rest[..fit].to_vec(),
+        offset: start,
+        next_offset,
+        node_count,
+        message,
+    }
+}
+
+/// Bytes kept for a tree page's other fields.
+const TREE_PAGE_RESERVE: usize = 500;
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 struct GetAppStateOutput {
@@ -4148,7 +4241,11 @@ impl ComputerUseLinux {
                         notes.push(note.to_string());
                     }
                     let mut nodes = nodes;
-                    let (spill, spill_note) = fit_tree(&self.tree_spiller, &mut nodes);
+                    let (spill, spill_note) = fit_tree(
+                        &self.tree_spiller,
+                        &mut nodes,
+                        tree_budget(POST_ACTION_RESULT_RESERVE),
+                    );
                     notes.extend(spill_note);
                     observation.accessibility_tree_spill = spill;
                     observation.accessibility_tree = Some(nodes);
@@ -4883,6 +4980,8 @@ impl ComputerUseLinux {
         recovery_scope: Option<AccessibilityRecoveryScope>,
         window: Option<&WindowInfo>,
     ) {
+        // A spilled file matches only the snapshot it was written from.
+        self.tree_spiller.remove_current();
         if let Ok(mut cached) = self.last_snapshot.lock() {
             *cached = CachedAccessibilitySnapshot {
                 nodes: nodes.to_vec(),
@@ -5908,18 +6007,29 @@ fn shell_only_accessibility_tree_note(
         )
 }
 
+/// Bytes kept for an action result's other fields when it carries a tree.
+const POST_ACTION_RESULT_RESERVE: usize = 4_000;
+/// Bytes kept for the spill field and its note.
+const SPILL_NOTE_RESERVE: usize = 1_000;
+
+/// Inline tree budget once `rest` bytes of the result are spoken for.
+fn tree_budget(rest: usize) -> usize {
+    crate::tree_spill::INLINE_RESULT_BYTES.saturating_sub(rest + SPILL_NOTE_RESERVE)
+}
+
 /// Keep `nodes` within the inline budget, spilling the whole tree to a private
 /// file when it does not fit. Returns the spill and a note for the message.
 fn fit_tree(
     spiller: &crate::tree_spill::TreeSpiller,
     nodes: &mut Vec<AccessibilityNode>,
+    budget: usize,
 ) -> (Option<crate::tree_spill::TreeSpill>, Option<String>) {
     let total = nodes.len();
-    match spiller.fit(nodes) {
+    match spiller.fit(nodes, budget) {
         Ok(None) => (None, None),
         Ok(Some(spill)) => {
             let note = format!(
-                "The compacted tree has {total} nodes ({} KB), too large to return inline: the first {} are here and the whole tree is in {} (a JSON array with the same element_index values). Search that file for a role, name, or text instead of requesting the tree again; it is replaced by the next large tree and removed when this server exits.",
+                "The compacted tree has {total} nodes ({} KB), too large to return inline: the first {} are here and the whole tree is in {} (a JSON array with the same element_index values), or page through it with get_tree_page. Search that file for a role, name, or text instead of requesting the tree again; it lasts until the next snapshot or until this server exits.",
                 spill.bytes.div_ceil(1024),
                 spill.inline_node_count,
                 spill.path,
@@ -14090,5 +14200,113 @@ mod focus_feedback_tests {
         assert!(feedback.starts_with("WARNING:"));
         assert!(feedback.contains("not editable"));
         assert!(!feedback.contains("went nowhere"));
+    }
+}
+
+#[cfg(test)]
+mod tree_spill_server_tests {
+    use super::*;
+    use std::os::unix::fs::DirBuilderExt;
+
+    fn node(index: u32) -> AccessibilityNode {
+        AccessibilityNode {
+            index,
+            parent_index: index.checked_sub(1),
+            depth: 1,
+            object_ref: format!(":1.1/org/a11y/atspi/accessible/{index}"),
+            role: "push button".into(),
+            name: Some(format!("Button {index} {}", "x".repeat(300))),
+            description: None,
+            child_count: 0,
+            bounds: Some(Bounds {
+                x: 10,
+                y: i32::try_from(index).unwrap() * 20,
+                width: 80,
+                height: 18,
+            }),
+            states: vec!["enabled".into(), "visible".into(), "showing".into()],
+            actions: Vec::new(),
+            value: None,
+            text: None,
+            supports_editable_text: false,
+        }
+    }
+
+    fn backend(name: &str) -> (ComputerUseLinux, std::path::PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("cul-spill-server-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let spiller = crate::tree_spill::TreeSpiller::new(Some(root.join("cul").join("trees")));
+        (
+            ComputerUseLinux {
+                tree_spiller: Arc::new(spiller),
+                ..ComputerUseLinux::default()
+            },
+            root,
+        )
+    }
+
+    #[test]
+    fn an_index_past_the_inline_prefix_resolves_against_the_cached_tree() {
+        let (backend, root) = backend("index");
+        let tree: Vec<_> = (0..300).map(node).collect();
+        backend.cache_snapshot(&tree, None);
+        let mut inline = tree.clone();
+        let (spill, note) = fit_tree(&backend.tree_spiller, &mut inline, tree_budget(2_000));
+        let spill = spill.expect("a 300-node tree spills");
+        assert!(note.unwrap().contains("get_tree_page"));
+        assert!(
+            inline.len() < 250,
+            "inline prefix is short: {}",
+            inline.len()
+        );
+        // The last node is only in the file, yet element_index actions still find it.
+        assert_eq!(
+            backend.center_for_cached_node(299),
+            Some((50, 299 * 20 + 9))
+        );
+        assert!(std::path::Path::new(&spill.path).exists());
+        // The next snapshot, even a small one, removes the file it no longer matches.
+        backend.cache_snapshot(&tree[..3], None);
+        assert!(!std::path::Path::new(&spill.path).exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tree_pages_cover_the_whole_tree_in_order() {
+        let tree: Vec<_> = (0..300).map(node).collect();
+        let mut seen = Vec::new();
+        let mut offset = 0;
+        loop {
+            let page = tree_page(&tree, offset);
+            assert!(!page.nodes.is_empty());
+            assert!(
+                serde_json::to_string(&page).unwrap().len()
+                    <= crate::tree_spill::INLINE_RESULT_BYTES
+            );
+            assert_eq!(page.node_count, 300);
+            seen.extend(page.nodes.iter().map(|node| node.index));
+            match page.next_offset {
+                Some(next) => offset = next,
+                None => break,
+            }
+        }
+        assert_eq!(seen, (0..300).collect::<Vec<_>>());
+        assert!(tree_page(&tree, 999).nodes.is_empty());
+        assert!(tree_page(&[], 0).message.contains("call get_app_state"));
+    }
+
+    #[test]
+    fn a_page_holds_one_node_even_past_the_budget() {
+        let mut huge = node(0);
+        huge.name = Some("x".repeat(crate::tree_spill::INLINE_RESULT_BYTES * 2));
+        let page = tree_page(&[huge, node(1)], 0);
+        assert_eq!(page.nodes.len(), 1);
+        assert_eq!(page.next_offset, Some(1));
     }
 }

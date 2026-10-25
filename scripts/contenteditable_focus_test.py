@@ -93,6 +93,11 @@ def payload(result):
         return {"ok": not result.get("isError", False), "message": text}
 
 
+def wire_bytes(value):
+    """Size of `value` as compact UTF-8 JSON, the way the server sends it."""
+    return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode())
+
+
 def stop(proc):
     """SIGTERM first so Chrome removes its shared-memory and socket files."""
     proc.terminate()
@@ -213,7 +218,7 @@ def run_page(binary, scratch, env, chrome, name, html, check_snapshot):
                 found[nodes] = "Work with Codex" in inline or bool(
                     spill and "Work with Codex" in Path(spill["path"]).read_text())
                 # A large tree must not flood the result: the rest is in the spill file.
-                assert len(inline) < 40_000, len(inline)
+                assert wire_bytes(state) <= 32_000, wire_bytes(state)
                 if spill:
                     spills.append(spill["path"])
                     assert spill["node_count"] == len(json.loads(Path(spill["path"]).read_text()))
@@ -222,7 +227,7 @@ def run_page(binary, scratch, env, chrome, name, html, check_snapshot):
                 if os.environ.get("CUL_290_DUMP"):
                     Path(scratch, f"{name}-{nodes}-state.json").write_text(json.dumps(state))
                 print(f"[{name}] get_app_state max_nodes={nodes}: {time.monotonic() - started:.1f}s "
-                      f"inline_chars={len(inline)} spill={spill and spill['node_count']} "
+                      f"result_bytes={wire_bytes(state)} spill={spill and spill['node_count']} "
                       f"raw={state.get('accessibility_tree_raw_count')} "
                       f"truncated={state.get('accessibility_tree_truncated')} composer={found[nodes]}"
                       + (f" error={state.get('accessibility_error')}" if state.get('accessibility_error') else ""))
@@ -231,7 +236,20 @@ def run_page(binary, scratch, env, chrome, name, html, check_snapshot):
             # what it read instead of failing at its deadline (needs > 200 nodes/s).
             assert raw[10000] > 2000, raw
             assert spills, "a large tree must be spilled to a file"
-            stop(mcp)
+            # Hosts without file access page through the cached tree instead.
+            offset, paged, pages = 0, [], 0
+            while offset is not None:
+                page = payload(rpc(mcp, {"jsonrpc": "2.0", "id": 100 + pages, "method": "tools/call", "params": {
+                    "name": "get_tree_page", "arguments": {"offset": offset}}}))
+                assert wire_bytes(page) <= 32_000, wire_bytes(page)
+                paged += page["nodes"]
+                offset, pages = page["next_offset"], pages + 1
+            print(f"[{name}] get_tree_page: {len(paged)} nodes in {pages} pages")
+            assert len(paged) == json.loads(Path(spills[-1]).read_text()).__len__()
+            assert any(node.get("name") == "Work with Codex" for node in paged) == found[10000]
+            # SIGTERM must stop the server promptly and remove its file.
+            mcp.terminate()
+            assert mcp.wait(timeout=3) == 128 + signal.SIGTERM, mcp.returncode
             mcp = None
             assert not any(Path(path).exists() for path in spills), "the server removes its spill file on exit"
         return message

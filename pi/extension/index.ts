@@ -43,6 +43,7 @@ const DEFAULT_TOOLS = [
 	"list_windows",
 	"focused_window",
 	"get_app_state",
+	"get_tree_page",
 ] as const;
 const MAX_RESULT_TEXT_CHARS = 200_000;
 const MAX_RESULT_IMAGE_BYTES = 2 * 1024 * 1024;
@@ -113,6 +114,7 @@ const TOOL_ALIASES: Record<string, string[]> = {
 	drag: ["mouse drag"],
 	focused_window: ["active window", "focus"],
 	get_app_state: ["accessibility", "observe", "snapshot", "screen state"],
+	get_tree_page: ["tree page", "more nodes", "spilled tree"],
 	list_apps: ["applications", "processes"],
 	list_windows: ["windows", "titles"],
 	move_window: ["position window"],
