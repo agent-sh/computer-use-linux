@@ -134,7 +134,7 @@ Pi native tools skip this MCP `command` config; see [Pi setup](references/pi-set
 ## Procedure
 
 1. In Pi, call `computer_use_linux_tools` with the exact tools or capability you need. Enabled tools use the `computer_use_linux_<name>` prefix, appear starting on the next model turn, and remain active for the session.
-2. Begin every desktop-control turn with `get_app_state`, scoped to the app you are working in: pass `app_name_or_bundle_identifier` or a window target (`window_id`, `pid`, `app_id`, `wm_class`, `title`). An `app_id` may be a full desktop ID or its final dot-separated segment; matching is case-insensitive, ambiguous aliases are rejected, and an unresolved explicit `app_id` returns an empty scoped tree rather than the desktop. Without a target the result is the whole desktop AT-SPI tree, `tree_scoped` is `false`, and `message` warns; that can flood context. Use `include_screenshot: false` when the accessibility tree is sufficient. If `accessibility_tree_truncated` is `true`, the tree is incomplete: scope to a narrower target and raise `max_nodes` or `max_depth` (hard caps 2000 and 64) rather than lowering them. The compact readiness block identifies missing setup.
+2. Begin every desktop-control turn with `get_app_state`, scoped to the app you are working in: pass `app_name_or_bundle_identifier` or a window target (`window_id`, `pid`, `app_id`, `wm_class`, `title`). An `app_id` may be a full desktop ID or its final dot-separated segment; matching is case-insensitive, ambiguous aliases are rejected, and an unresolved explicit `app_id` returns an empty scoped tree rather than the desktop. Without a target the result is the whole desktop AT-SPI tree, `tree_scoped` is `false`, and `message` warns; that can flood context. Use `include_screenshot: false` when the accessibility tree is sufficient. If `accessibility_tree_truncated` is `true`, the tree is incomplete: scope to a narrower target and raise `max_nodes` or `max_depth` (hard caps 10000 and 64) rather than lowering them. The compact readiness block identifies missing setup.
 3. Use `doctor` only when you need the full diagnostic report.
 4. If `can_build_accessibility_tree` is false, run `setup_accessibility` and restart the target app.
 5. If `can_query_windows` is false on GNOME Wayland, run `setup_window_targeting` and ask the user to log out and back in if setup says the shell extension needs a reload.
@@ -163,6 +163,21 @@ warnings: only a complete scoped tree containing window/menu chrome without
 content makes the feedback informational. Such trees get a conditional
 Electron/Chromium hint computed before compaction; this is not positive Electron
 detection.
+
+Chromium can mark a `document web` focused alongside its contenteditable editor.
+The focus probe keeps searching that document and reports the editor; a document
+that holds focus itself still gets a warning, which no longer claims the text
+was lost. An editor can carry the `editable` state without the EditableText
+interface (`supports_editable_text: false`): `type_text` can reach it,
+`set_value` cannot. Verify its text or a screenshot before submitting or
+retrying. Embedded browser documents can use up an app-scoped snapshot's node
+budget before the app's own controls; when `accessibility_tree_truncated` is
+true, a missing editor proves nothing. Raise `max_nodes` (default 1000, hard cap
+10000) and, if needed, `max_depth` (hard cap 64); larger trees cost more
+context, and a busy renderer may give only a few thousand nodes before the
+deadline. A snapshot stops reading at 10 seconds and returns what it read,
+marked truncated; if the editor is still missing, hide the embedded browser pane
+for the snapshot.
 
 Plain left element/index/selector `click` prefers native AT-SPI `click`,
 `press`, or `toggle` over toolkit bounds, avoiding coordinate
