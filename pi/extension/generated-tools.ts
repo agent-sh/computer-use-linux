@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.26";
-export const GENERATED_TOOL_CATALOG_HASH = "968e17fec6e5d13edb71901c1f940b6b11bf968f18bdf68a0c6017e511bf1589";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "1713270b16dc9d1ff6494108a97e74a99e0b280900ce9c516e8a24af9900295b";
+export const GENERATED_TOOL_CATALOG_HASH = "711deb97eb5c8a6cbe0a2fadbb64fdffc7592e304479dbbf277d3fcc4d58210f";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "1a927deb2579d314a975afc586bd31010862141779cbe7af50cd76f0387a607c";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -762,7 +762,7 @@ export const GENERATED_MCP_TOOLS =
     "annotations": {
       "destructiveHint": false,
       "idempotentHint": true,
-      "openWorldHint": false,
+      "openWorldHint": true,
       "readOnlyHint": true
     },
     "description": "Return a page of the accessibility tree from the latest get_app_state or include_tree snapshot, starting at node offset (default 0). Use it when a tree was too large to return inline (accessibility_tree_spill is set) and the host cannot read the spill file; page with next_offset until it is null. Element indices match the snapshot, so element_index actions work on these nodes. It does not read the desktop again.",
