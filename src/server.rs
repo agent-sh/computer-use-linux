@@ -5078,7 +5078,11 @@ impl ComputerUseLinux {
     ) -> Option<(i32, i32)> {
         let bounds = bounds?;
         let capture = self.desktop_size.lock().ok().and_then(|guard| *guard)?;
-        let layout = crate::remote_desktop::logical_desktop_layout().await?;
+        // kscreen-doctor misreports nested KWin scale (2864x1536 at scale 1); KWin does not.
+        let layout = match crate::remote_desktop::kwin_desktop_layout().await {
+            Some(layout) => layout,
+            None => crate::remote_desktop::logical_desktop_layout().await?,
+        };
         pixelflux_point_for_element(
             (bounds.x, bounds.y, bounds.width, bounds.height),
             capture,
