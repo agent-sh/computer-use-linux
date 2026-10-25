@@ -7,11 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.26] - 2026-10-25
+
 ### Fixed
 
 - Keep searching a focused Chromium document for its focused contenteditable editor, and stop claiming that typed text went nowhere when focus is on a non-editable element. Thanks @pnll1991 for the report and the patch. (#290)
 - Return the partial accessibility tree, marked truncated, when a snapshot reaches its 10-second deadline, instead of failing with an empty tree.
 - Allow `max_nodes` up to 10000, so a snapshot can read past a large embedded browser document to the app's own controls. The default stays 1000. (#290)
+- Isolate the text preflight test from an inherited KDE desktop session. Thanks @ArcticLampyrid. (#293)
 
 ## [0.7.25] - 2026-10-24
 
@@ -888,7 +891,9 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.24...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.26...HEAD
+[0.7.26]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.25...v0.7.26
+[0.7.25]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.24...v0.7.25
 [0.7.24]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.23...v0.7.24
 [0.7.23]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.22...v0.7.23
 [0.7.22]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.21...v0.7.22
