@@ -140,6 +140,8 @@ fn http_initialize_and_list_tools() {
     let _ = child.kill();
 }
 
+// Needs CUL_INPUT_LOCK_HOLD_MS, which only debug builds read.
+#[cfg(debug_assertions)]
 #[test]
 fn http_sessions_share_input_lock() {
     let mut child = spawn(Some(TOKEN), Some("400"));
