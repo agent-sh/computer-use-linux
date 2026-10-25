@@ -92,13 +92,13 @@ struct PortalStream {
     pixel_scale: f64,
 }
 
-#[derive(Debug, Clone)]
-struct LogicalMonitor {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    scale: f64,
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LogicalMonitor {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) width: i32,
+    pub(crate) height: i32,
+    pub(crate) scale: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,6 +295,9 @@ async fn logical_desktop_layout() -> Option<Vec<LogicalMonitor>> {
     if env_token_contains("XDG_CURRENT_DESKTOP", "kde")
         || env_token_contains("XDG_CURRENT_DESKTOP", "plasma")
     {
+        if let Ok(layout) = crate::windowing::backends::kwin::output_layout().await {
+            return Some(layout);
+        }
         let mut command = Command::new("kscreen-doctor");
         command.arg("-j");
         if let Ok(output) = command_runner::output(command, "query KDE monitor layout").await {
@@ -2551,6 +2554,27 @@ mod tests {
         assert_eq!(
             map_capture_point_to_stream_layout(&streams, &layout, 1280, 800, 2560, 1600),
             Some((960, 600))
+        );
+    }
+
+    #[test]
+    fn kwin_layout_maps_nested_scale_two_capture() {
+        // Recorded in the alpine-kde webtop at SELKIES_SCALING_DPI=192: kscreen-doctor
+        // reports 2128x1152 at scale 1, while KWin and the portal stream are 1064x576.
+        let streams = [PortalStream {
+            node_id: 46,
+            position: Some((0, 0)),
+            size: Some((1064, 576)),
+            pixel_scale: 1.0,
+        }];
+        let layout = crate::windowing::backends::kwin::kwin_output_layout(
+            r#"{"desktopGeometry":{"x":0,"y":0,"width":1064,"height":576},"outputs":[{"name":"WL-0","geometry":{"x":0,"y":0,"width":1064,"height":576},"devicePixelRatio":2}],"windows":[]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            map_capture_point_to_stream_layout(&streams, &layout, 386, 1092, 2128, 1152),
+            Some((193, 546))
         );
     }
 

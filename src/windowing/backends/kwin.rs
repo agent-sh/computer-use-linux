@@ -1,4 +1,5 @@
 use crate::diagnostics::hydrate_session_bus_env;
+use crate::remote_desktop::LogicalMonitor;
 use crate::terminal::enrich_terminal_windows;
 use crate::windowing::registry::BackendProbe;
 use crate::windowing::types::{WindowBounds, WindowInfo};
@@ -58,6 +59,26 @@ pub async fn list_windows() -> Result<Vec<WindowInfo>> {
 pub(crate) async fn logical_desktop_rect() -> Result<(i32, i32, i32, i32)> {
     let json = call_kwin_window_script().await?;
     parse_kwin_logical_desktop_rect(&json)
+}
+
+pub(crate) async fn output_layout() -> Result<Vec<LogicalMonitor>> {
+    kwin_output_layout(&call_kwin_window_script().await?)
+}
+
+/// Logical output rectangles in KWin's order; unlike `kscreen-doctor`, these stay
+/// right when KWin runs nested and reports its scale only to Wayland clients.
+pub(crate) fn kwin_output_layout(json: &str) -> Result<Vec<LogicalMonitor>> {
+    Ok(KwinElementClickSnapshot::from_json(json)?
+        .outputs
+        .into_iter()
+        .map(|output| LogicalMonitor {
+            x: output.geometry.x.round() as i32,
+            y: output.geometry.y.round() as i32,
+            width: output.geometry.width.round() as i32,
+            height: output.geometry.height.round() as i32,
+            scale: output.device_pixel_ratio,
+        })
+        .collect())
 }
 
 pub(crate) async fn element_click_snapshot() -> Result<KwinElementClickSnapshot> {
@@ -1726,6 +1747,48 @@ mod adapter_tests {
             parse_kwin_logical_desktop_rect(windows_json).unwrap(),
             (100, -50, 3840, 2160)
         );
+    }
+
+    #[test]
+    fn kwin_output_layout_parses_outputs() {
+        // Recorded from the nested KWin in the alpine-kde webtop at SELKIES_SCALING_DPI=192.
+        let nested = r#"{"backend":"kwin","desktopGeometry":{"x":0,"y":0,"width":1064,"height":576},"outputs":[{"name":"WL-0","geometry":{"x":0,"y":0,"width":1064,"height":576},"devicePixelRatio":2}],"windows":[]}"#;
+        assert_eq!(
+            kwin_output_layout(nested).unwrap(),
+            vec![LogicalMonitor {
+                x: 0,
+                y: 0,
+                width: 1064,
+                height: 576,
+                scale: 2.0,
+            }]
+        );
+
+        let two = r#"{"outputs":[
+            {"name":"DP-2","geometry":{"x":1920,"y":0,"width":1280,"height":720},"devicePixelRatio":1.5},
+            {"name":"DP-1","geometry":{"x":0,"y":0,"width":1920,"height":1080},"devicePixelRatio":1}
+        ],"windows":[]}"#;
+        assert_eq!(
+            kwin_output_layout(two).unwrap(),
+            vec![
+                LogicalMonitor {
+                    x: 1920,
+                    y: 0,
+                    width: 1280,
+                    height: 720,
+                    scale: 1.5,
+                },
+                LogicalMonitor {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                    scale: 1.0,
+                },
+            ]
+        );
+
+        assert!(kwin_output_layout(r#"{"outputs":[],"windows":[]}"#).is_err());
     }
 
     #[test]
