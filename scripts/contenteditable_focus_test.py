@@ -92,6 +92,29 @@ def payload(result):
         return {"ok": not result.get("isError", False), "message": text}
 
 
+def stop(proc):
+    """SIGTERM first so Chrome removes its shared-memory and socket files."""
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def find_window(env, pattern, timeout=40):
+    """xdotool search fails with BadWindow when a window closes mid-search; retry."""
+    deadline = time.monotonic() + timeout
+    while True:
+        found = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", pattern], env=env,
+                               capture_output=True, text=True, timeout=10).stdout.split()
+        if found:
+            return found[-1]
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"no visible window matches {pattern!r}")
+        time.sleep(0.3)
+
+
 def window_title(env, window):
     return subprocess.check_output(["xdotool", "getwindowname", window], env=env, timeout=5).decode().strip()
 
@@ -117,8 +140,7 @@ def inner(binary, scratch):
     (shims / "wmctrl").write_text(WMCTRL_SHIM)
     (shims / "wmctrl").chmod(0o755)
     env["PATH"] = f"{shims}{os.pathsep}{env['PATH']}"
-    wm = subprocess.Popen(["openbox"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                          start_new_session=True)
+    wm = subprocess.Popen(["openbox"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(1)
     try:
         # A small page: the probe reaches the composer and must name it.
@@ -129,10 +151,7 @@ def inner(binary, scratch):
         run_page(binary, scratch, env, chrome, "large", page(2600), check_snapshot=True)
         print("PASS")
     finally:
-        try:
-            os.killpg(wm.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        stop(wm)
 
 
 def run_page(binary, scratch, env, chrome, name, html, check_snapshot):
@@ -143,12 +162,10 @@ def run_page(binary, scratch, env, chrome, name, html, check_snapshot):
         [chrome, f"--user-data-dir={scratch}/chrome-{name}", "--no-first-run", "--no-default-browser-check",
          "--force-renderer-accessibility", "--disable-gpu", "--password-store=basic",
          "--window-size=1200,900", f"--app=file://{path}"],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     mcp = None
     try:
-        window = subprocess.check_output(
-            ["xdotool", "search", "--sync", "--onlyvisible", "--name", f"^CUL-290-{name}"],
-            env=env, timeout=40).decode().split()[-1]
+        window = find_window(env, f"^CUL-290-{name}")
         wait_title(env, window, f"CUL-290-{name}-READY")
         subprocess.run(["xdotool", "windowactivate", "--sync", window], env=env, check=False, timeout=5)
         subprocess.run(["xdotool", "windowfocus", "--sync", window], env=env, check=True, timeout=5)
@@ -194,23 +211,20 @@ def run_page(binary, scratch, env, chrome, name, html, check_snapshot):
                 raw[nodes] = state.get("accessibility_tree_raw_count") or 0
                 assert not state.get("accessibility_error"), state.get("accessibility_error")
                 if os.environ.get("CUL_290_DUMP"):
-                    Path(os.environ["CUL_290_DUMP"]).write_text(json.dumps(state))
+                    Path(scratch, f"{name}-{nodes}-state.json").write_text(json.dumps(state))
                 print(f"[{name}] get_app_state max_nodes={nodes}: {time.monotonic() - started:.1f}s "
                       f"raw={state.get('accessibility_tree_raw_count')} "
                       f"truncated={state.get('accessibility_tree_truncated')} composer={found[nodes]}"
                       + (f" error={state.get('accessibility_error')}" if state.get('accessibility_error') else ""))
             # Whether the composer is reached depends on how fast this machine reads
-            # AT-SPI; the snapshot must at least read past the old 2000-node cap and
-            # return what it read instead of failing at its deadline.
+            # AT-SPI. A 10000-node request must not be clamped at 2000, and must return
+            # what it read instead of failing at its deadline (needs > 200 nodes/s).
             assert raw[10000] > 2000, raw
         return message
     finally:
         if mcp:
-            mcp.terminate()
-        try:
-            os.killpg(browser.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+            stop(mcp)
+        stop(browser)
 
 
 
@@ -232,7 +246,7 @@ def main():
             env.pop(key, None)
         # The XDG homes are set before the bus starts, so bus-activated dconf
         # and AT-SPI services never touch the real user's files.
-        env.update(CUL_290_PRIVATE_BUS="1", CUL_290_SCRATCH=scratch, DISPLAY=display,
+        env.update(CUL_290_PRIVATE_BUS="1", CUL_290_SCRATCH=scratch, DISPLAY=display, TMPDIR=scratch,
                    HOME=scratch, XDG_CONFIG_HOME=f"{scratch}/config", XDG_CACHE_HOME=f"{scratch}/cache",
                    XDG_DATA_HOME=f"{scratch}/data", XDG_RUNTIME_DIR=str(runtime),
                    XDG_SESSION_TYPE="x11", XDG_CURRENT_DESKTOP="Openbox", DESKTOP_SESSION="openbox",

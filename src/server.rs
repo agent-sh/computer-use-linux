@@ -6665,11 +6665,6 @@ fn describe_focused_element(element: &FocusedElementSummary, expects_editable: b
             "Focused element: {}{name} (terminal keyboard input).",
             element.role
         )
-    } else if crate::atspi_tree_impl::focus_is_container(element) {
-        format!(
-            "Focused-element feedback unavailable: AT-SPI reports focused container {}{name}, not a verified keyboard recipient. Field contents were not verified; inspect the editor before retrying.",
-            element.role
-        )
     } else if expects_editable {
         format!(
             "WARNING: focused element is {}{name}, which is not editable, so the text may not have reached a field. Click the intended input or use set_value on an editable one, and re-observe before retrying.",
@@ -13984,7 +13979,9 @@ mod focus_feedback_tests {
     use super::*;
 
     #[test]
-    fn document_focus_does_not_claim_text_was_lost() {
+    fn document_focus_warns_without_claiming_text_was_lost() {
+        // A container is only reported once its subtree was searched and nothing
+        // inside it holds focus, so the document itself has the keys.
         let element = FocusedElementSummary {
             role: "document web".into(),
             name: Some("Synthetic host".into()),
@@ -13993,10 +13990,13 @@ mod focus_feedback_tests {
             is_terminal: false,
         };
         let feedback = describe_focused_element(&element, true);
-        assert!(feedback.contains("not a verified keyboard recipient"));
-        assert!(!feedback.contains("WARNING"));
+        assert!(feedback.starts_with("WARNING:"));
         assert!(!feedback.contains("went nowhere"));
-        assert!(feedback.contains("before retrying"));
+        assert_eq!(
+            describe_focused_element(&element, false),
+            "Focused element: document web \"Synthetic host\" (not editable).",
+            "press_key feedback on a page is unchanged"
+        );
     }
 
     #[test]

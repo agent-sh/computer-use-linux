@@ -126,7 +126,8 @@ const DEFAULT_SNAPSHOT_MAX_DEPTH: u32 = 32;
 const HARD_SNAPSHOT_MAX_DEPTH: u32 = 64;
 const CHILD_READ_CONCURRENCY: usize = 16;
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Time past `SNAPSHOT_TIMEOUT` for the node being read to finish.
+/// Time past `SNAPSHOT_TIMEOUT` for the node being read to finish; a node still
+/// reading after it is dropped and the tree is returned truncated.
 const SNAPSHOT_HARD_GRACE: Duration = Duration::from_secs(2);
 const MAX_ACTIONS_PER_OBJECT: i32 = 64;
 const ACTION_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -359,10 +360,11 @@ pub(crate) async fn snapshot_accessibility_tree(
 ) -> Result<AccessibilitySnapshot> {
     let (max_nodes, max_depth) = snapshot_limits(Some(max_nodes), Some(max_depth));
     // Traversal stops at the deadline and returns what it read, marked truncated.
-    // The hard timeout only catches a single AT-SPI call that never returns.
+    // The outer timeout only bounds app discovery, which runs before any node
+    // is read; the traversal itself ends by `stop_reading` plus the grace.
     let stop_reading = Instant::now() + SNAPSHOT_TIMEOUT;
     timeout(
-        SNAPSHOT_TIMEOUT + SNAPSHOT_HARD_GRACE,
+        SNAPSHOT_TIMEOUT + SNAPSHOT_HARD_GRACE + SNAPSHOT_HARD_GRACE,
         snapshot_tree_inner(
             app_name_or_bundle_identifier,
             target_pid,
@@ -372,7 +374,7 @@ pub(crate) async fn snapshot_accessibility_tree(
         ),
     )
     .await
-    .context("AT-SPI snapshot exceeded its 10-second deadline")?
+    .context("AT-SPI snapshot could not find its target before the deadline")?
 }
 
 async fn snapshot_tree_inner(
@@ -411,34 +413,50 @@ async fn snapshot_tree_inner(
             .map(|object_ref| (object_ref, 0_u32, None)),
     );
 
+    // Each node's reads may run past `stop_reading` by the grace, never more: a
+    // slow action query (up to ACTION_QUERY_TIMEOUT) near the deadline cuts the
+    // tree there instead of losing it to the outer timeout.
+    let node_cutoff = stop_reading + SNAPSHOT_HARD_GRACE;
     while let Some((object_ref, depth, parent_index)) = traversal.pop() {
         if Instant::now() >= stop_reading {
             truncated = true;
             break;
         }
-        let Ok(proxy) = open_accessible(&conn, &object_ref).await else {
-            continue;
-        };
         let index = nodes.len() as u32;
         let remaining = traversal.remaining_capacity();
-        let node = read_node(&proxy, &object_ref, index, parent_index, depth).await;
-        let child_refs = if depth < max_depth && remaining > 0 {
-            match children_up_to(&proxy, remaining, &mut remaining_traversal_reads).await {
-                Ok(batch) => {
-                    // A read-budget cut inside the fetch reports `incomplete`; an
-                    // already-exhausted budget returns the I/O-free empty batch, so
-                    // fall back to the child_count read_node already fetched.
-                    truncated |= batch.incomplete || (batch.attempted == 0 && node.child_count > 0);
-                    batch.items
+        let read = timeout_at(node_cutoff, async {
+            let Ok(proxy) = open_accessible(&conn, &object_ref).await else {
+                return None;
+            };
+            let node = read_node(&proxy, &object_ref, index, parent_index, depth).await;
+            let mut cut = false;
+            let child_refs = if depth < max_depth && remaining > 0 {
+                match children_up_to(&proxy, remaining, &mut remaining_traversal_reads).await {
+                    Ok(batch) => {
+                        // A read-budget cut inside the fetch reports `incomplete`; an
+                        // already-exhausted budget returns the I/O-free empty batch, so
+                        // fall back to the child_count read_node already fetched.
+                        cut = batch.incomplete || (batch.attempted == 0 && node.child_count > 0);
+                        batch.items
+                    }
+                    Err(_) => Vec::new(),
                 }
-                Err(_) => Vec::new(),
-            }
-        } else {
-            // Depth or node cap reached: any child this node reports is unread.
-            truncated |= node.child_count > 0;
-            Vec::new()
+            } else {
+                // Depth or node cap reached: any child this node reports is unread.
+                cut = node.child_count > 0;
+                Vec::new()
+            };
+            Some((node, child_refs, cut))
+        })
+        .await;
+        let Ok(read) = read else {
+            truncated = true;
+            break;
         };
-
+        let Some((node, child_refs, cut)) = read else {
+            continue;
+        };
+        truncated |= cut;
         nodes.push(node);
 
         traversal.enqueue(
@@ -535,6 +553,7 @@ async fn focused_element_probe(
     let mut shell_only = true;
     let mut observed_nodes = 0;
     let mut focused_container = None;
+    let mut depth_base = 0_u32;
 
     traversal.enqueue(
         selected_roots
@@ -576,14 +595,23 @@ async fn focused_element_probe(
             // its subtree, and nodes left unread elsewhere no longer matter.
             if focus_is_container(&summary) {
                 focused_container = Some(summary);
-                traversal.narrow();
-                incomplete = false;
+                // Only within one app: across apps a stale focused document in
+                // another app must not hide the real focus.
+                if require_scoped {
+                    traversal.narrow();
+                    // The discarded queue had spent its child reads; the subtree
+                    // gets the rest of the node budget, and its depth counts from
+                    // the container.
+                    remaining_traversal_reads = traversal.remaining_capacity();
+                    depth_base = depth;
+                    incomplete = false;
+                }
             } else {
                 return Ok(FocusProbe::Found(summary));
             }
         }
         let remaining = traversal.remaining_capacity();
-        if depth < FOCUS_PROBE_MAX_DEPTH && remaining > 0 {
+        if depth - depth_base < FOCUS_PROBE_MAX_DEPTH && remaining > 0 {
             if let Ok(batch) =
                 children_up_to(&proxy, remaining, &mut remaining_traversal_reads).await
             {

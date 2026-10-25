@@ -164,19 +164,20 @@ content makes the feedback informational. Such trees get a conditional
 Electron/Chromium hint computed before compaction; this is not positive Electron
 detection.
 
-Chromium can mark a `document web` focused alongside its contenteditable
-editor. The focus probe keeps searching that document for the editor; when only
-the container is found, the result says the recipient is unverified instead of
-warning that text was lost. An editor can carry the `editable` state without the
-EditableText interface (`supports_editable_text: false`): `type_text` reaches
-it, `set_value` does not. Verify its text or a screenshot before submitting or
+Chromium can mark a `document web` focused alongside its contenteditable editor.
+The focus probe keeps searching that document and reports the editor; a document
+that holds focus itself still gets a warning, which no longer claims the text
+was lost. An editor can carry the `editable` state without the EditableText
+interface (`supports_editable_text: false`): `type_text` can reach it,
+`set_value` cannot. Verify its text or a screenshot before submitting or
 retrying. Embedded browser documents can use up an app-scoped snapshot's node
 budget before the app's own controls; when `accessibility_tree_truncated` is
-true, a missing editor proves nothing. Raise `max_nodes` (default 1000, hard
-cap 10000) and, if needed, `max_depth` (hard cap 64); larger trees cost more
-context. A snapshot stops reading at 10 seconds and returns what it read,
-marked truncated; if the editor is still missing, hide the embedded browser
-pane for the snapshot.
+true, a missing editor proves nothing. Raise `max_nodes` (default 1000, hard cap
+10000) and, if needed, `max_depth` (hard cap 64); larger trees cost more
+context, and a busy renderer may give only a few thousand nodes before the
+deadline. A snapshot stops reading at 10 seconds and returns what it read,
+marked truncated; if the editor is still missing, hide the embedded browser pane
+for the snapshot.
 
 Plain left element/index/selector `click` prefers native AT-SPI `click`,
 `press`, or `toggle` over toolkit bounds, avoiding coordinate
