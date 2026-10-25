@@ -6,8 +6,9 @@ Requires Xvfb, openbox, xdotool, xprop, dbus-run-session, AT-SPI and google-chro
 A large page with a nested contenteditable composer stands in for the Codex app:
 Chrome marks both the document and the composer focused. Checks that type_text
 reaches the composer without a false "not editable" warning, and that an
-app-scoped get_app_state with max_nodes above 2000 reads past the old cap and
-returns its partial tree at the deadline instead of failing.
+app-scoped get_app_state with max_nodes above 2000 reads past the old cap,
+returns its partial tree at the deadline instead of failing, and spills a large
+tree to a private file that is removed when the server exits.
 
     scripts/contenteditable_focus_test.py target/debug/computer-use-linux
 """
@@ -201,18 +202,27 @@ def run_page(binary, scratch, env, chrome, name, html, check_snapshot):
         assert MARKER in delivered, delivered
         assert "not editable" not in message and "went nowhere" not in message, message
         if check_snapshot:
-            found, raw = {}, {}
+            found, raw, spills = {}, {}, []
             for nodes in (2000, 10000):
                 started = time.monotonic()
                 state = payload(rpc(mcp, {"jsonrpc": "2.0", "id": 10 + nodes, "method": "tools/call", "params": {
                     "name": "get_app_state", "arguments": {
                         "pid": browser.pid, "max_nodes": nodes, "max_depth": 64, "include_screenshot": False}}}))
-                found[nodes] = "Work with Codex" in json.dumps(state)
+                inline = json.dumps(state)
+                spill = state.get("accessibility_tree_spill")
+                found[nodes] = "Work with Codex" in inline or bool(
+                    spill and "Work with Codex" in Path(spill["path"]).read_text())
+                # A large tree must not flood the result: the rest is in the spill file.
+                assert len(inline) < 40_000, len(inline)
+                if spill:
+                    spills.append(spill["path"])
+                    assert spill["node_count"] == len(json.loads(Path(spill["path"]).read_text()))
                 raw[nodes] = state.get("accessibility_tree_raw_count") or 0
                 assert not state.get("accessibility_error"), state.get("accessibility_error")
                 if os.environ.get("CUL_290_DUMP"):
                     Path(scratch, f"{name}-{nodes}-state.json").write_text(json.dumps(state))
                 print(f"[{name}] get_app_state max_nodes={nodes}: {time.monotonic() - started:.1f}s "
+                      f"inline_chars={len(inline)} spill={spill and spill['node_count']} "
                       f"raw={state.get('accessibility_tree_raw_count')} "
                       f"truncated={state.get('accessibility_tree_truncated')} composer={found[nodes]}"
                       + (f" error={state.get('accessibility_error')}" if state.get('accessibility_error') else ""))
@@ -220,6 +230,10 @@ def run_page(binary, scratch, env, chrome, name, html, check_snapshot):
             # AT-SPI. A 10000-node request must not be clamped at 2000, and must return
             # what it read instead of failing at its deadline (needs > 200 nodes/s).
             assert raw[10000] > 2000, raw
+            assert spills, "a large tree must be spilled to a file"
+            stop(mcp)
+            mcp = None
+            assert not any(Path(path).exists() for path in spills), "the server removes its spill file on exit"
         return message
     finally:
         if mcp:

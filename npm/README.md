@@ -199,3 +199,9 @@ does not yet forward the flag or include the tool in its catalog.
   few thousand nodes before the deadline. A snapshot stops reading at 10 seconds
   and returns what it read, marked truncated; if the editor is still missing,
   hide the embedded browser pane for the snapshot.
+
+  A compacted tree too large to return inline (over 32,000 characters) comes
+  back as its leading nodes plus `accessibility_tree_spill`: the path of a
+  private JSON file holding the whole tree with the same `element_index` values.
+  Search that file instead of requesting the tree again. The next large tree
+  replaces it, and the server removes it on exit.

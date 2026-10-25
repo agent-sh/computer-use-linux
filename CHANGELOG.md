@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Return a large accessibility tree as its leading nodes, under 32,000 characters, and write the whole compacted tree to a private file named in `accessibility_tree_spill`, with the same `element_index` values. A 2,000-node tree was about 1.2 MB of JSON, far past what MCP hosts show a model. The next large tree replaces the file, and the server removes it when it exits.
+
 ## [0.7.26] - 2026-10-25
 
 ### Fixed

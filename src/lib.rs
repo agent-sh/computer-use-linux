@@ -16,6 +16,7 @@ mod remote_desktop;
 mod screenshot_impl;
 mod server;
 mod terminal;
+mod tree_spill;
 mod windowing;
 mod windows;
 mod x11_display;
