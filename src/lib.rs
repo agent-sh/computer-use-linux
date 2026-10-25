@@ -13,6 +13,7 @@ mod gnome_extension;
 mod identity;
 pub mod indicator;
 mod keyboard_keymap;
+mod pixelflux;
 mod pointer_path;
 mod remote_desktop;
 #[path = "screenshot.rs"]
