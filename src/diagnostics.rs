@@ -993,11 +993,8 @@ fn readiness_report_with_portal_keyboard(
     let can_send_development_input =
         can_send_development_input(platform, remote_desktop_keyboard, input);
 
-    if !can_build_accessibility_tree {
-        blockers.push(
-            "AT-SPI accessibility is disabled; enable org.a11y.Status IsEnabled or org.gnome.desktop.interface toolkit-accessibility for tree extraction."
-                .to_string(),
-        );
+    if let Some(blocker) = atspi_disabled_blocker(accessibility, toolkit_bridge_forced()) {
+        blockers.push(blocker);
     }
 
     if !can_query_windows {
@@ -1118,9 +1115,81 @@ pub(crate) fn can_build_accessibility_tree_now() -> bool {
 }
 
 fn can_build_accessibility_tree(accessibility: &AccessibilityReport) -> bool {
+    accessibility_tree_ready(accessibility, toolkit_bridge_forced())
+}
+
+fn accessibility_tree_ready(accessibility: &AccessibilityReport, forced_bridge: bool) -> bool {
     accessibility.at_spi_bus.ok
-        && (check_detail_contains_true(&accessibility.at_spi_enabled)
+        && (forced_bridge
+            || check_detail_contains_true(&accessibility.at_spi_enabled)
             || check_detail_contains_true(&accessibility.toolkit_accessibility))
+}
+
+fn atspi_disabled_blocker(
+    accessibility: &AccessibilityReport,
+    forced_bridge: bool,
+) -> Option<String> {
+    if accessibility_tree_ready(accessibility, forced_bridge) {
+        None
+    } else {
+        Some(
+            "AT-SPI accessibility is disabled; enable org.a11y.Status IsEnabled or org.gnome.desktop.interface toolkit-accessibility for tree extraction."
+                .to_string(),
+        )
+    }
+}
+
+fn toolkit_bridge_forced() -> bool {
+    let compositor = compositor_environ();
+    toolkit_bridge_forced_by_env(|key| {
+        env_var(key).or_else(|| compositor.as_ref().and_then(|vars| vars.get(key).cloned()))
+    })
+}
+
+fn toolkit_bridge_forced_by_env(vars: impl Fn(&str) -> Option<String>) -> bool {
+    vars("QT_LINUX_ACCESSIBILITY_ALWAYS_ON").is_some_and(|value| value == "1")
+        || vars("GTK_MODULES").is_some_and(|value| value.contains("atk-bridge"))
+}
+
+fn compositor_environ() -> Option<HashMap<String, String>> {
+    const NAMES: &[&str] = &[
+        "labwc",
+        "kwin_wayland",
+        "gnome-shell",
+        "Hyprland",
+        "niri",
+        "cosmic-comp",
+    ];
+    let entries = fs::read_dir("/proc").ok()?;
+    for entry in entries.flatten() {
+        let pid = entry.file_name();
+        if !pid
+            .to_string_lossy()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+        {
+            continue;
+        }
+        let comm = fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
+        if !NAMES.contains(&comm.trim()) {
+            continue;
+        }
+        let Ok(bytes) = fs::read(entry.path().join("environ")) else {
+            continue;
+        };
+        let mut vars = HashMap::new();
+        for item in bytes.split(|byte| *byte == 0) {
+            let Ok(item) = std::str::from_utf8(item) else {
+                continue;
+            };
+            let Some((key, value)) = item.split_once('=') else {
+                continue;
+            };
+            vars.insert(key.to_string(), value.to_string());
+        }
+        return Some(vars);
+    }
+    None
 }
 
 fn check_detail_contains_true(check: &Check) -> bool {
@@ -1814,6 +1883,24 @@ pub(crate) mod tests {
             at_spi_enabled: Check::fail("(<false>,)"),
             screen_reader_enabled: Check::fail("(<false>,)"),
         }
+    }
+    #[test]
+    fn bus_reachable_and_forced_bridge_is_enabled() {
+        let enabled = accessibility_report(Check::ok("bus"), Check::fail("false"));
+        assert!(accessibility_tree_ready(&enabled, true));
+        assert!(atspi_disabled_blocker(&enabled, true).is_none());
+        let down = accessibility_report(Check::fail("no bus"), Check::fail("false"));
+        assert!(!accessibility_tree_ready(&down, true));
+        assert!(
+            atspi_disabled_blocker(&down, true).is_some_and(|blocker| blocker.contains("disabled"))
+        );
+        assert!(toolkit_bridge_forced_by_env(|key| {
+            (key == "QT_LINUX_ACCESSIBILITY_ALWAYS_ON").then(|| "1".to_string())
+        }));
+        assert!(toolkit_bridge_forced_by_env(|key| {
+            (key == "GTK_MODULES").then(|| "gail:atk-bridge".to_string())
+        }));
+        assert!(!toolkit_bridge_forced_by_env(|_| None));
     }
 
     fn windowing_report(can_list_windows: bool, can_focus_windows: bool) -> WindowingReport {
