@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.27] - 2026-10-25
+
 ### Added
 
 - `get_tree_page` pages through the latest cached tree by node offset, for hosts that cannot read the spill file.
@@ -899,7 +901,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.26...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.27...HEAD
+[0.7.27]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.26...v0.7.27
 [0.7.26]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.25...v0.7.26
 [0.7.25]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.24...v0.7.25
 [0.7.24]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.23...v0.7.24
