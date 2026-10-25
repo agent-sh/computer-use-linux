@@ -11270,6 +11270,9 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             .env("PATH", &dir)
             .env("XDG_SESSION_TYPE", "wayland")
             .env("XDG_CURRENT_DESKTOP", "Hyprland")
+            // Set all related environment variables to prevent inherited values.
+            .env("DESKTOP_SESSION", "hyprland")
+            .env("XDG_SESSION_DESKTOP", "Hyprland")
             .env_remove("DISPLAY");
         for key in [
             "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
