@@ -1,6 +1,6 @@
 use crate::windowing::registry::{
     self, COSMIC_WAYLAND_BACKEND, GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND,
-    HYPRLAND_BACKEND, I3_BACKEND, KWIN_BACKEND, NIRI_BACKEND, X11_BACKEND,
+    HYPRLAND_BACKEND, I3_BACKEND, KWIN_BACKEND, LABWC_BACKEND, NIRI_BACKEND, X11_BACKEND,
 };
 use crate::ydotool;
 use schemars::JsonSchema;
@@ -403,15 +403,17 @@ fn capability_map_with_portal_keyboard(
     if windowing.niri.ok {
         window_backends.push(NIRI_BACKEND.to_string());
     }
-    // i3 and the generic X11/EWMH backend have no dedicated
+    // i3, labwc and the generic X11/EWMH backend have no dedicated
     // WindowingReport field; read them from the probe map so the capability
     // list matches the registry order.
-    if windowing
-        .backends
-        .get(I3_BACKEND)
-        .is_some_and(|check| check.ok)
-    {
-        window_backends.push(I3_BACKEND.to_string());
+    for backend in [I3_BACKEND, LABWC_BACKEND] {
+        if windowing
+            .backends
+            .get(backend)
+            .is_some_and(|check| check.ok)
+        {
+            window_backends.push(backend.to_string());
+        }
     }
     if x11_available && !prefer_x11_over_introspect {
         window_backends.push(X11_BACKEND.to_string());

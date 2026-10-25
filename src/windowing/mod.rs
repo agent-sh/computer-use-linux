@@ -56,6 +56,7 @@ mod tests {
                 HYPRLAND_BACKEND,
                 NIRI_BACKEND,
                 I3_BACKEND,
+                LABWC_BACKEND,
                 X11_BACKEND,
             ]
         );

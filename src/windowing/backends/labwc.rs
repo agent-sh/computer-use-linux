@@ -171,8 +171,13 @@ mod foreign {
     pub(super) async fn activate(window: &WindowInfo) -> Result<()> {
         let title = window.title.clone();
         let app_id = window.app_id.clone();
-        tokio::task::spawn_blocking(move || activate_blocking(title.as_deref(), app_id.as_deref()))
+        let task = tokio::task::spawn_blocking(move || {
+            activate_blocking(title.as_deref(), app_id.as_deref())
+        });
+        // A roundtrip to a stuck compositor would otherwise hold the input lock forever.
+        tokio::time::timeout(super::QUERY_TIMEOUT, task)
             .await
+            .context("labwc activation timed out")?
             .context("labwc activation task failed")?
     }
 
