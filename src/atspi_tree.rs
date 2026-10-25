@@ -120,11 +120,14 @@ const EDITABLE_TEXT_VERIFY_TIMEOUT: Duration = Duration::from_secs(1);
 const EDITABLE_TEXT_VERIFY_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_TEXT_SELECTIONS: i32 = 8;
 const DEFAULT_SNAPSHOT_MAX_NODES: usize = 1_000;
-const HARD_SNAPSHOT_MAX_NODES: usize = 2_000;
+// Larger trees are opt-in; the default and the 10-second deadline stay unchanged.
+const HARD_SNAPSHOT_MAX_NODES: usize = 10_000;
 const DEFAULT_SNAPSHOT_MAX_DEPTH: u32 = 32;
 const HARD_SNAPSHOT_MAX_DEPTH: u32 = 64;
 const CHILD_READ_CONCURRENCY: usize = 16;
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Time past `SNAPSHOT_TIMEOUT` for the node being read to finish.
+const SNAPSHOT_HARD_GRACE: Duration = Duration::from_secs(2);
 const MAX_ACTIONS_PER_OBJECT: i32 = 64;
 const ACTION_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_DISCOVERY_ROOTS: usize = 256;
@@ -188,6 +191,13 @@ impl<T> BoundedTraversal<T> {
     fn remaining_capacity(&self) -> usize {
         self.max_items
             .saturating_sub(self.attempted.saturating_add(self.queue.len()))
+    }
+
+    /// Drop pending and earlier dropped work, keeping the spent budget, so the
+    /// rest of the budget goes to the subtree enqueued next.
+    fn narrow(&mut self) {
+        self.queue.clear();
+        self.dropped = false;
     }
 
     /// True when the budget stopped work that was actually offered. `enqueue`
@@ -320,7 +330,7 @@ pub(crate) struct AccessibilitySnapshot {
     /// filter was supplied. Normal snapshots retain their PID-only fallback;
     /// action recovery requires this evidence before invoking a fresh node.
     pub app_filter_matched: bool,
-    /// True when max_nodes, max_depth, or the child read budget stopped
+    /// True when max_nodes, max_depth, the child read budget, or the deadline stopped
     /// traversal with unread elements left. Failed element reads do not count.
     pub truncated: bool,
 }
@@ -348,13 +358,17 @@ pub(crate) async fn snapshot_accessibility_tree(
     max_depth: u32,
 ) -> Result<AccessibilitySnapshot> {
     let (max_nodes, max_depth) = snapshot_limits(Some(max_nodes), Some(max_depth));
+    // Traversal stops at the deadline and returns what it read, marked truncated.
+    // The hard timeout only catches a single AT-SPI call that never returns.
+    let stop_reading = Instant::now() + SNAPSHOT_TIMEOUT;
     timeout(
-        SNAPSHOT_TIMEOUT,
+        SNAPSHOT_TIMEOUT + SNAPSHOT_HARD_GRACE,
         snapshot_tree_inner(
             app_name_or_bundle_identifier,
             target_pid,
             max_nodes,
             max_depth,
+            stop_reading,
         ),
     )
     .await
@@ -366,6 +380,7 @@ async fn snapshot_tree_inner(
     target_pid: Option<u32>,
     max_nodes: usize,
     max_depth: u32,
+    stop_reading: Instant,
 ) -> Result<AccessibilitySnapshot> {
     let conn = connect().await?;
     // App discovery is bounded independently so a tiny requested tree still
@@ -397,6 +412,10 @@ async fn snapshot_tree_inner(
     );
 
     while let Some((object_ref, depth, parent_index)) = traversal.pop() {
+        if Instant::now() >= stop_reading {
+            truncated = true;
+            break;
+        }
         let Ok(proxy) = open_accessible(&conn, &object_ref).await else {
             continue;
         };
@@ -515,6 +534,7 @@ async fn focused_element_probe(
     let mut incomplete = false;
     let mut shell_only = true;
     let mut observed_nodes = 0;
+    let mut focused_container = None;
 
     traversal.enqueue(
         selected_roots
@@ -543,13 +563,24 @@ async fn focused_element_probe(
         if state.contains(atspi::State::Focused) {
             let proxies = proxy.proxies().await.ok();
             let is_terminal = matches!(proxy.get_role().await, Ok(atspi::Role::Terminal));
-            return Ok(FocusProbe::Found(FocusedElementSummary {
+            let summary = FocusedElementSummary {
                 role: role_name(&proxy).await,
                 name: optional_string(proxy.name().await.ok()),
                 editable: supports_editable_text(proxies.as_ref()).await,
                 states: state_labels(state),
                 is_terminal,
-            }));
+            };
+            // Chromium can mark both a document and its contenteditable entry
+            // focused. Do not stop at the ancestor before visiting the editor:
+            // the focus is inside it, so the rest of the budget searches only
+            // its subtree, and nodes left unread elsewhere no longer matter.
+            if focus_is_container(&summary) {
+                focused_container = Some(summary);
+                traversal.narrow();
+                incomplete = false;
+            } else {
+                return Ok(FocusProbe::Found(summary));
+            }
         }
         let remaining = traversal.remaining_capacity();
         if depth < FOCUS_PROBE_MAX_DEPTH && remaining > 0 {
@@ -579,15 +610,47 @@ async fn focused_element_probe(
             incomplete = proxy.child_count().await.map_or(true, |count| count > 0);
         }
     }
-    if incomplete || traversal.truncated() {
-        return Ok(FocusProbe::Incomplete);
-    }
+    Ok(finish_focus_probe(
+        incomplete || traversal.truncated(),
+        require_scoped && shell_only && observed_nodes > 0,
+        focused_container,
+    ))
+}
 
-    Ok(if require_scoped && shell_only && observed_nodes > 0 {
+pub(crate) fn focus_is_container(element: &FocusedElementSummary) -> bool {
+    !element.editable
+        && !element.states.iter().any(|state| state == "editable")
+        && !element.is_terminal
+        && matches!(
+            element.role.as_str(),
+            "application"
+                | "frame"
+                | "window"
+                | "panel"
+                | "filler"
+                | "section"
+                | "document web"
+                | "document frame"
+                | "document text"
+        )
+}
+
+fn finish_focus_probe(
+    incomplete: bool,
+    shell_only: bool,
+    focused_container: Option<FocusedElementSummary>,
+) -> FocusProbe {
+    // A focused container is not a definitive recipient if descendants were
+    // unread. Preserve uncertainty rather than reporting a non-editable field.
+    if incomplete {
+        FocusProbe::Incomplete
+    } else if let Some(container) = focused_container {
+        FocusProbe::Found(container)
+    } else if shell_only {
         FocusProbe::ShellOnly
     } else {
         FocusProbe::NoneFocused
-    })
+    }
 }
 
 /// Window and native menu chrome can exist without Electron renderer content.
@@ -2501,7 +2564,7 @@ mod tests {
     #[test]
     fn requested_snapshot_limits_remain_bounded() {
         assert_eq!(snapshot_limits(Some(0), Some(0)), (1, 0));
-        assert_eq!(snapshot_limits(Some(10_000), Some(128)), (2_000, 64));
+        assert_eq!(snapshot_limits(Some(100_000), Some(128)), (10_000, 64));
     }
 
     #[test]
@@ -2609,5 +2672,78 @@ mod tests {
         let all_failed =
             fetch_indexed_up_to(2, 2, &mut failed_attempts, |_| async { Err::<i32, _>(()) }).await;
         assert!(all_failed.all_failed());
+    }
+
+    fn document() -> FocusedElementSummary {
+        FocusedElementSummary {
+            role: "document web".into(),
+            name: Some("Synthetic editor host".into()),
+            editable: false,
+            states: vec!["focused".into()],
+            is_terminal: false,
+        }
+    }
+
+    #[test]
+    fn focused_document_does_not_end_the_search_before_contenteditable() {
+        assert!(focus_is_container(&document()));
+        let mut entry = document();
+        entry.role = "entry".into();
+        entry.states.push("editable".into());
+        // Chromium need not implement EditableText for keyboard input.
+        assert!(!entry.editable);
+        assert!(!focus_is_container(&entry));
+    }
+
+    #[test]
+    fn incomplete_descendants_do_not_make_the_document_a_definitive_recipient() {
+        assert!(matches!(
+            finish_focus_probe(true, false, Some(document())),
+            FocusProbe::Incomplete
+        ));
+        assert!(matches!(
+            finish_focus_probe(false, false, Some(document())),
+            FocusProbe::Found(_)
+        ));
+    }
+
+    #[test]
+    fn opt_in_snapshot_budget_reaches_controls_after_embedded_browser_content() {
+        let (limit, _) = snapshot_limits(Some(4_000), None);
+        assert_eq!(limit, 4_000);
+        let mut traversal = BoundedTraversal::new(limit);
+        traversal.enqueue(0..3_000);
+        let mut reached_editor = false;
+        while let Some(node) = traversal.pop() {
+            reached_editor |= node == 2_500;
+        }
+        assert!(reached_editor);
+        assert!(!traversal.truncated());
+        let (default, _) = snapshot_limits(None, None);
+        assert_eq!(default, 1_000);
+    }
+
+    #[test]
+    fn narrowing_keeps_the_spent_budget_and_forgets_dropped_work() {
+        let mut traversal = BoundedTraversal::new(4);
+        traversal.enqueue(0..6);
+        assert!(traversal.truncated());
+        assert_eq!(traversal.pop(), Some(0));
+        traversal.narrow();
+        assert!(
+            !traversal.truncated(),
+            "work dropped outside the subtree no longer counts"
+        );
+        assert_eq!(traversal.pop(), None);
+        traversal.enqueue([10, 11, 12, 13]);
+        assert_eq!(traversal.pop(), Some(10));
+        assert_eq!(traversal.pop(), Some(11));
+        assert_eq!(traversal.pop(), Some(12));
+        assert_eq!(
+            traversal.pop(),
+            None,
+            "the budget spent before narrowing still counts"
+        );
+        assert!(traversal.truncated());
     }
 }

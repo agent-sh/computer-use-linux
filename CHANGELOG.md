@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep searching a focused Chromium document for its focused contenteditable editor, and report a focused container as an unverified recipient instead of warning that typed text was lost. Thanks @pnll1991 for the report and the patch. (#290)
+- Return the partial accessibility tree, marked truncated, when a snapshot reaches its 10-second deadline, instead of failing with an empty tree.
+- Allow `max_nodes` up to 10000, so a snapshot can read past a large embedded browser document to the app's own controls. The default stays 1000. (#290)
+
 ## [0.7.25] - 2026-10-24
 
 ### Fixed

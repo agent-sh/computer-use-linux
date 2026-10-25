@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.25";
-export const GENERATED_TOOL_CATALOG_HASH = "ca02e39b8ba12b0f3774af084e67a8401bdd0d3777a82af05da9a7579fa9e605";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "b0ae29440000015c1735b1da5744fbaccb505202e49de40b565800130e6dc48d";
+export const GENERATED_TOOL_CATALOG_HASH = "ec0af1cf8525312554ae5b698f6cb6629190b189afe77ee1a8c3356d9dded33c";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "ca71b492f3682185e6b1ff1e0b9e9e95ef07ce1087c2bbfdcf05b99284cb3112";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -643,7 +643,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "max_nodes": {
           "default": null,
-          "description": "Maximum raw AT-SPI nodes to inspect before compaction (default 1000, hard max 2000).",
+          "description": "Maximum raw AT-SPI nodes to inspect before compaction (default 1000, hard max 10000).",
           "minimum": 0,
           "type": [
             "integer",
