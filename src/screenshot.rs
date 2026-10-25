@@ -1168,11 +1168,19 @@ mod tests {
 
     #[test]
     fn forced_backend_reads_env_override() {
-        // Only this test touches SCREENSHOT_BACKEND_ENV, so no cross-test race.
+        let _guard = crate::pixelflux::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var(SCREENSHOT_BACKEND_ENV, "gnome-screenshot");
         assert_eq!(
             forced_backend().unwrap(),
             Some(ScreenshotBackend::GnomeScreenshot)
+        );
+
+        std::env::set_var(SCREENSHOT_BACKEND_ENV, "pixelflux");
+        assert_eq!(
+            forced_backend().unwrap(),
+            Some(ScreenshotBackend::Pixelflux)
         );
 
         std::env::set_var(SCREENSHOT_BACKEND_ENV, "   ");
@@ -1186,18 +1194,12 @@ mod tests {
         assert_eq!(forced_backend().unwrap(), None);
     }
 
-    #[test]
-    fn forced_backend_parses_pixelflux() {
-        std::env::set_var(SCREENSHOT_BACKEND_ENV, "pixelflux");
-        assert_eq!(
-            forced_backend().unwrap(),
-            Some(ScreenshotBackend::Pixelflux)
-        );
-        std::env::remove_var(SCREENSHOT_BACKEND_ENV);
-    }
-
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // current-thread test: other env tests wait on the lock.
     async fn screenshot_prefers_pixelflux_when_configured() {
+        let _guard = crate::pixelflux::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let png = solid_png(4, 5);
         let payload = serde_json::json!({"data": base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,

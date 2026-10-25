@@ -56,8 +56,10 @@ pub(crate) fn logical_layout(heads: &[RecordedHead]) -> Option<Vec<LogicalMonito
 }
 
 pub(crate) async fn wlr_output_layout() -> Option<Vec<LogicalMonitor>> {
-    tokio::task::spawn_blocking(collect_layout)
+    // blocking_dispatch can wait past the loop deadline; bound the whole task.
+    tokio::time::timeout(LAYOUT_TIMEOUT, tokio::task::spawn_blocking(collect_layout))
         .await
+        .ok()?
         .ok()
         .and_then(Result::ok)
 }

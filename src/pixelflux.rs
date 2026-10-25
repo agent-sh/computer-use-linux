@@ -101,32 +101,6 @@ pub(crate) fn is_unreachable(error: &anyhow::Error) -> bool {
         || text.contains("closed the connection before")
 }
 
-/// Pixelflux key text is lowercase modifiers plus `Return`, as observed on the
-/// labwc computer-use server (`ctrl+l`, `Return`, `ctrl+shift+t`).
-pub(crate) fn key_text(chord: &str) -> String {
-    chord
-        .split('+')
-        .map(|part| {
-            let trimmed = part.trim();
-            match trimmed.to_ascii_lowercase().as_str() {
-                "ctrl" | "control" => "ctrl".to_string(),
-                "alt" | "option" => "alt".to_string(),
-                "shift" => "shift".to_string(),
-                "super" | "win" | "meta" => "super".to_string(),
-                "enter" | "return" => "Return".to_string(),
-                "esc" | "escape" => "Escape".to_string(),
-                "tab" => "Tab".to_string(),
-                "backspace" => "BackSpace".to_string(),
-                "delete" | "del" => "Delete".to_string(),
-                "space" => "space".to_string(),
-                _ if trimmed.chars().count() == 1 => trimmed.to_ascii_lowercase(),
-                _ => trimmed.to_string(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("+")
-}
-
 fn loopback_port(raw: &str) -> Option<u16> {
     let port = if let Some(rest) = raw.strip_prefix("[::1]:") {
         rest
@@ -427,14 +401,15 @@ async fn read_exact(stream: &mut TcpStream, mut buf: Vec<u8>, n: usize) -> Resul
     Ok(buf)
 }
 
+/// Serializes tests that change `PIXELFLUX_CU*` or the screenshot backend variable.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct EnvReset {
         saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
@@ -525,7 +500,7 @@ mod tests {
 
     #[test]
     fn from_env_requires_port_and_token() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for (port, token) in [
             (None, None),
             (Some("5000"), None),

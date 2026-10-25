@@ -281,7 +281,7 @@ pub fn doctor_report() -> DoctorReport {
         &accessibility,
         &windowing,
         &input,
-        !screenshot_backends(&platform, &portals).is_empty(),
+        !screenshot_backends(&platform, &portals, &input).is_empty(),
     );
 
     let capabilities = capability_map_with_portal_keyboard(
@@ -378,7 +378,7 @@ fn capability_map_with_portal_keyboard(
         input_backends.push("portal".to_string());
     }
 
-    let screenshot_backends = screenshot_backends(platform, portals);
+    let screenshot_backends = screenshot_backends(platform, portals, input);
 
     let mut window_backends = Vec::new();
     let x11_available = windowing
@@ -981,14 +981,21 @@ fn readiness_report(
         accessibility,
         windowing,
         input,
-        !screenshot_backends(platform, portals).is_empty(),
+        !screenshot_backends(platform, portals, input).is_empty(),
     )
 }
 
 /// Screenshot routes in the order `capture_screenshot_raw` tries them. Both the
 /// capability map and readiness read this list so they cannot disagree.
-fn screenshot_backends(platform: &PlatformReport, portals: &PortalReport) -> Vec<String> {
+fn screenshot_backends(
+    platform: &PlatformReport,
+    portals: &PortalReport,
+    input: &InputReport,
+) -> Vec<String> {
     let mut backends = Vec::new();
+    if input.pixelflux.ok {
+        backends.push("pixelflux".to_string());
+    }
     if platform.gnome_shell_version.ok {
         backends.push("gnome_shell".to_string());
     }
@@ -2159,6 +2166,24 @@ pub(crate) mod tests {
 
         assert_eq!(capabilities.input, ["ydotool", "portal"]);
         assert_eq!(capabilities.preferred.input.as_deref(), Some("ydotool"));
+    }
+
+    #[test]
+    fn writable_uinput_advertises_abs_pointer_first() {
+        let platform = platform_report();
+        let portals = portal_report(Check::fail("missing"));
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let input = input_report_parts(
+            Check::ok("ydotool"),
+            Check::ok("ydotoold"),
+            Check::ok("connectable"),
+            Check::ok("read/write: /dev/uinput"),
+        );
+
+        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+
+        assert_eq!(capabilities.input, ["abs_pointer", "ydotool"]);
     }
 
     #[test]

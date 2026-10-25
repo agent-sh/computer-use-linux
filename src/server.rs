@@ -1212,7 +1212,8 @@ impl ComputerUseLinux {
             .try_pixelflux_click(
                 x,
                 y,
-                element_click,
+                // KWin already mapped the element into capture pixels.
+                element_click && kwin_click.is_none(),
                 element_bounds.as_ref(),
                 params.button.as_deref(),
                 params.click_count.unwrap_or(1),
@@ -1736,7 +1737,15 @@ impl ComputerUseLinux {
             ScrollDirection::Left => (units, 0),
             ScrollDirection::Right => (-units, 0),
         };
-        if let Some((x, y)) = target_point {
+        // Element centres are AT-SPI logical points; pixelflux wants capture pixels.
+        let pixelflux_point = match (params.x.zip(params.y), params.element_index) {
+            (None, Some(index)) => {
+                let bounds = self.cached_node_bounds(index);
+                self.pixelflux_element_point(bounds.as_ref()).await
+            }
+            _ => target_point,
+        };
+        if let Some((x, y)) = pixelflux_point {
             if let Some(output) = self
                 .pixelflux_send(
                     "scroll",
@@ -2128,17 +2137,17 @@ impl ComputerUseLinux {
         };
         let secret = self.typing_into_secret(focus.as_ref()).await;
         self.indicator.keys(&params.key, secret).await;
-        if let Some(output) = self
-            .pixelflux_send(
-                "press_key",
-                crate::pixelflux::PixelfluxAction::Key {
-                    chord: crate::pixelflux::key_text(&params.key),
-                },
-                received.clone(),
-            )
-            .await
-        {
-            return Json(output);
+        if let Some(chord) = xdotool_key_spec(&params.key) {
+            if let Some(output) = self
+                .pixelflux_send(
+                    "press_key",
+                    crate::pixelflux::PixelfluxAction::Key { chord },
+                    received.clone(),
+                )
+                .await
+            {
+                return Json(output);
+            }
         }
 
         if self.should_prefer_portal_keyboard_for_chords().await {
@@ -5088,21 +5097,19 @@ impl ComputerUseLinux {
             Some((x, y))
         };
         let Some((px, py)) = point else {
-            if element_click {
-                if let Some(config) = crate::pixelflux::PixelfluxConfig::from_env() {
-                    if crate::pixelflux::probe(&config).await.is_ok() {
-                        return Some(ActionOutput {
-                            ok: false,
-                            implemented: true,
-                            action: "click".to_string(),
-                            message: "pixelflux could not map the element onto the capture"
-                                .to_string(),
-                            received,
-                        });
-                    }
-                }
-            }
-            return None;
+            // Only an element click can fail to map. Fall through only if pixelflux is down.
+            let config = crate::pixelflux::PixelfluxConfig::from_env()?;
+            return match crate::pixelflux::probe(&config).await {
+                Ok(()) => Some(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "click".to_string(),
+                    message: "pixelflux could not map the element onto the capture".to_string(),
+                    received,
+                }),
+                Err(error) if crate::pixelflux::is_unreachable(&error) => None,
+                Err(error) => Some(pixelflux_action_output("click", Err(error), received)),
+            };
         };
         self.pixelflux_send(
             "click",
@@ -5740,12 +5747,17 @@ impl ComputerUseLinux {
     }
 
     fn center_for_cached_node(&self, element_index: u32) -> Option<(i32, i32)> {
+        bounds_center(&self.cached_node_bounds(element_index)?)
+    }
+
+    fn cached_node_bounds(&self, element_index: u32) -> Option<crate::atspi_tree::Bounds> {
         let cached = self.last_snapshot.lock().ok()?;
-        let node = cached
+        cached
             .nodes
             .iter()
-            .find(|node| node.index == element_index)?;
-        bounds_center(node.bounds.as_ref()?)
+            .find(|node| node.index == element_index)?
+            .bounds
+            .clone()
     }
 
     fn resolve_object_ref(
