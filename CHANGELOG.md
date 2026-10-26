@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Reuse the desktop diagnostics behind the `get_app_state` readiness block for up to 30 seconds, so a repeat call on KDE Plasma takes about 140 ms less and starts 6 of the 26 diagnostic subprocesses. Those 6 recheck accessibility on every call, so switching it off takes effect at once. `verbose: true`, a failed observation or action, and the setup tools run all the diagnostics again, and `doctor` always runs them.
+
 ## [0.7.28] - 2026-10-27
 
 ### Fixed

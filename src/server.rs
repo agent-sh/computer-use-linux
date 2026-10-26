@@ -6,6 +6,7 @@ use crate::atspi_tree::{
     FocusedElementSummary, ValueSetInvocation,
 };
 use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
+use crate::diagnostics_cache::DiagnosticsCache;
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
 use crate::remote_desktop::{
     click as portal_click, drag as portal_drag, keysyms_for_text, press_key_chord,
@@ -118,6 +119,10 @@ pub struct ComputerUseLinux {
     indicator: Arc<crate::indicator::Indicator>,
     /// Private files for trees too large to return inline; removed on exit.
     tree_spiller: Arc<crate::tree_spill::TreeSpiller>,
+    /// Diagnostics behind get_app_state's readiness block. Failed observations,
+    /// failed actions, and setup tools invalidate it; the doctor tool bypasses
+    /// it.
+    diagnostics: Arc<DiagnosticsCache<DoctorReport>>,
 }
 
 fn sanitize_unsigned_integer_formats(value: &mut serde_json::Value) {
@@ -229,11 +234,11 @@ impl ComputerUseLinux {
         )
     )]
     async fn setup_accessibility(&self) -> Json<SetupReport> {
-        Json(
-            tokio::task::spawn_blocking(setup_accessibility_report)
-                .await
-                .expect("accessibility setup task panicked"),
-        )
+        let report = tokio::task::spawn_blocking(setup_accessibility_report)
+            .await
+            .expect("accessibility setup task panicked");
+        self.diagnostics.invalidate();
+        Json(report)
     }
 
     #[tool(
@@ -247,7 +252,9 @@ impl ComputerUseLinux {
         )
     )]
     async fn setup_window_targeting(&self) -> Json<WindowTargetingSetupReport> {
-        Json(setup_window_targeting_report().await)
+        let report = setup_window_targeting_report().await;
+        self.diagnostics.invalidate();
+        Json(report)
     }
 
     #[tool(
@@ -263,7 +270,10 @@ impl ComputerUseLinux {
     async fn list_apps(&self) -> Json<ListAppsOutput> {
         let (accessible_apps, accessibility_error) = match list_accessible_apps(50).await {
             Ok(apps) => (apps, None),
-            Err(error) => (Vec::new(), Some(format!("{error:#}"))),
+            Err(error) => {
+                self.diagnostics.invalidate();
+                (Vec::new(), Some(format!("{error:#}")))
+            }
         };
 
         Json(ListAppsOutput {
@@ -307,7 +317,11 @@ impl ComputerUseLinux {
         )
     )]
     async fn list_windows(&self) -> Json<ListWindowsOutput> {
-        Json(window_list_output().await)
+        let output = window_list_output().await;
+        if output.error.is_some() {
+            self.diagnostics.invalidate();
+        }
+        Json(output)
     }
 
     #[tool(
@@ -334,6 +348,7 @@ impl ComputerUseLinux {
                 })
             }
             Err(error) => {
+                self.diagnostics.invalidate();
                 let error = format!("{error:#}");
                 Json(FocusedWindowOutput {
                     backend: UNAVAILABLE_BACKEND.to_string(),
@@ -428,9 +443,23 @@ impl ComputerUseLinux {
 
     async fn app_state(&self, params: GetAppStateParams) -> Result<CallToolResult, ErrorData> {
         let verbose = params.verbose.unwrap_or(false);
-        let mut diagnostics = tokio::task::spawn_blocking(doctor_report)
+        // A clone: this call's screenshot result is recorded on it, not on the
+        // cached report.
+        let (mut diagnostics, probed) = self.diagnostics.report_and_probed(verbose).await;
+        // The tree gate below must see accessibility switched off within the
+        // TTL. A report this call just probed is already current, and a cached
+        // "disabled" skips the tree and its error invalidates the cache, so
+        // only a cached "enabled" needs the live check.
+        if !probed
+            && diagnostics.readiness.can_build_accessibility_tree
+            && !tokio::task::spawn_blocking(
+                crate::diagnostics_impl::can_build_accessibility_tree_now,
+            )
             .await
-            .expect("diagnostics task panicked");
+            .unwrap_or(false)
+        {
+            diagnostics = self.diagnostics.report(true).await;
+        }
         let (window_context, window_error, window_permissions_hint, window_enumerated) =
             self.resolve_window_context(&params).await;
         let (max_nodes, max_depth) =
@@ -526,6 +555,14 @@ impl ComputerUseLinux {
                     ),
                 )
             };
+        if observation_failed(
+            screenshot_error.as_deref(),
+            window_error.as_deref(),
+            accessibility_error.as_deref(),
+            accessibility_tree_raw_count,
+        ) {
+            self.diagnostics.invalidate();
+        }
         if accessibility_error.is_none() {
             // Record a pid only when the tree's roots were matched by it. A pid
             // with no AT-SPI root falls back to every app, or to an app-name
@@ -651,7 +688,10 @@ impl ComputerUseLinux {
     async fn screenshot(&self, Parameters(params): Parameters<ScreenshotParams>) -> CallToolResult {
         let result = match self.capture_screenshot(params).await {
             Ok(result) => result,
-            Err(error) => CallToolResult::error(vec![ContentBlock::text(format!("{error:#}"))]),
+            Err(error) => {
+                self.diagnostics.invalidate();
+                CallToolResult::error(vec![ContentBlock::text(format!("{error:#}"))])
+            }
         };
         self.indicator.action("screenshot").await;
         result
@@ -3304,6 +3344,21 @@ fn tree_page(nodes: &[AccessibilityNode], offset: usize) -> GetTreePageOutput {
 /// Bytes kept for a tree page's other fields.
 const TREE_PAGE_RESERVE: usize = 500;
 
+/// Whether get_app_state hit a failure that can mean the desktop changed under
+/// the cached diagnostics. A tree with no nodes counts, as it does for the
+/// post-action observation.
+fn observation_failed(
+    screenshot_error: Option<&str>,
+    window_error: Option<&str>,
+    accessibility_error: Option<&str>,
+    accessibility_tree_raw_count: usize,
+) -> bool {
+    screenshot_error.is_some()
+        || window_error.is_some()
+        || accessibility_error.is_some()
+        || accessibility_tree_raw_count == 0
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 struct GetAppStateOutput {
     app_name_or_bundle_identifier: Option<String>,
@@ -4017,6 +4072,7 @@ impl ComputerUseLinux {
             match list_windows().await {
                 Ok(windows) => resolve_window_target(&windows, target)?.clone(),
                 Err(error) => {
+                    self.diagnostics.invalidate();
                     if let Some(window) = fallback_window {
                         window.clone()
                     } else {
@@ -4160,13 +4216,23 @@ impl ComputerUseLinux {
                 {
                     list_windows()
                         .await
+                        .inspect_err(|_| self.diagnostics.invalidate())
                         .ok()
-                        .and_then(|windows| resolve_window_target(&windows, target).ok().cloned())
+                        .and_then(|windows| {
+                            resolve_window_target(&windows, target)
+                                .inspect_err(|_| self.diagnostics.invalidate())
+                                .ok()
+                                .cloned()
+                        })
                         .or_else(|| fallback_window.cloned())
                 } else if let Some(window) = fallback_window {
                     Some(window.clone())
                 } else {
-                    focused_window().await.ok().flatten()
+                    focused_window()
+                        .await
+                        .inspect_err(|_| self.diagnostics.invalidate())
+                        .ok()
+                        .flatten()
                 };
             }
             let target_pid = resolved_window
@@ -4266,7 +4332,29 @@ impl ComputerUseLinux {
             }
         }
 
+        if observation.screenshot_error.is_some()
+            || observation.accessibility_error.is_some()
+            || observation.accessibility_tree_raw_count == Some(0)
+        {
+            self.diagnostics.invalidate();
+        }
         (observation, screenshot_capture, notes)
+    }
+
+    /// `structured_tool_result` for an action. A failed action can mean the
+    /// desktop changed under the cached diagnostics, such as a dropped portal
+    /// session or a window backend that stopped answering, so any failure marks
+    /// them stale without classifying its reason.
+    fn action_tool_result<T: Serialize>(
+        &self,
+        output: T,
+        screenshot: Option<ScreenshotCapture>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let result = structured_tool_result(output, screenshot)?;
+        if result.is_error == Some(true) {
+            self.diagnostics.invalidate();
+        }
+        Ok(result)
     }
 
     async fn finish_action_output(
@@ -4276,7 +4364,7 @@ impl ComputerUseLinux {
         target: Option<&WindowTarget>,
     ) -> Result<CallToolResult, ErrorData> {
         if !output.ok {
-            return structured_tool_result(
+            return self.action_tool_result(
                 ActionToolOutput {
                     action: output,
                     observation: PostActionObservation::default(),
@@ -4288,7 +4376,7 @@ impl ComputerUseLinux {
             .capture_post_action_observation(capture, target, None)
             .await;
         output = with_notes(output, notes);
-        structured_tool_result(
+        self.action_tool_result(
             ActionToolOutput {
                 action: output,
                 observation,
@@ -4304,7 +4392,7 @@ impl ComputerUseLinux {
         capture: &PostActionCaptureParams,
     ) -> Result<CallToolResult, ErrorData> {
         if !output.ok && verified != Some(false) {
-            return structured_tool_result(
+            return self.action_tool_result(
                 SetValueToolOutput {
                     action: output,
                     verified,
@@ -4317,7 +4405,7 @@ impl ComputerUseLinux {
             .capture_post_action_observation(capture, None, None)
             .await;
         output = with_notes(output, notes);
-        structured_tool_result(
+        self.action_tool_result(
             SetValueToolOutput {
                 action: output,
                 verified,
@@ -4334,7 +4422,7 @@ impl ComputerUseLinux {
         target: &WindowTarget,
     ) -> Result<CallToolResult, ErrorData> {
         if !output.ok {
-            return structured_tool_result(
+            return self.action_tool_result(
                 ActivateWindowToolOutput {
                     output,
                     message: None,
@@ -4352,7 +4440,7 @@ impl ComputerUseLinux {
             .capture_post_action_observation(capture, Some(target), fallback_window)
             .await;
         let message = (!notes.is_empty()).then(|| notes.join(" "));
-        structured_tool_result(
+        self.action_tool_result(
             ActivateWindowToolOutput {
                 output,
                 message,
@@ -4369,7 +4457,7 @@ impl ComputerUseLinux {
         target: &WindowTarget,
     ) -> Result<CallToolResult, ErrorData> {
         if !output.ok {
-            return structured_tool_result(
+            return self.action_tool_result(
                 WindowGeometryToolOutput {
                     output,
                     observation: PostActionObservation::default(),
@@ -4387,7 +4475,7 @@ impl ComputerUseLinux {
             }
             output.message.push_str(&note);
         }
-        structured_tool_result(
+        self.action_tool_result(
             WindowGeometryToolOutput {
                 output,
                 observation,
@@ -4869,11 +4957,15 @@ impl ComputerUseLinux {
             Ok(message) => {
                 // Re-query so the caller sees the compositor-final geometry
                 // (tiling constraints, minimum sizes, etc. may adjust it).
-                let window = list_windows().await.ok().and_then(|windows| {
-                    windows
-                        .into_iter()
-                        .find(|window| window.window_id == window_id)
-                });
+                let window = list_windows()
+                    .await
+                    .inspect_err(|_| self.diagnostics.invalidate())
+                    .ok()
+                    .and_then(|windows| {
+                        windows
+                            .into_iter()
+                            .find(|window| window.window_id == window_id)
+                    });
                 let mut message = message;
                 if let Some(bounds) = window.as_ref().and_then(|window| window.bounds.as_ref()) {
                     if let Some(note) = self.off_screen_note_for_bounds(bounds).await {
@@ -8923,6 +9015,221 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
         assert_eq!(
             result.structured_content.unwrap()["screenshot"],
             serde_json::Value::Null
+        );
+    }
+
+    /// A server whose diagnostics probe labels each report with its run number
+    /// in `recommended_next_step`, so a result shows which run it came from.
+    /// Each run reads `accessibility_enabled` for the report's accessibility.
+    pub(super) fn server_with_labelled_diagnostics(
+        accessibility_enabled: fn() -> bool,
+    ) -> (ComputerUseLinux, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&runs);
+        let probe = move || {
+            let run = counter.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut report =
+                crate::diagnostics_impl::tests::doctor_report_fixture(accessibility_enabled());
+            report.readiness.recommended_next_step = format!("probe run {run}");
+            report
+        };
+        let server = ComputerUseLinux {
+            diagnostics: Arc::new(DiagnosticsCache::new(
+                Arc::new(probe),
+                Duration::from_secs(3600),
+            )),
+            ..Default::default()
+        };
+        (server, runs)
+    }
+
+    async fn app_state_value(
+        server: &ComputerUseLinux,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let params: GetAppStateParams = serde_json::from_value(params).unwrap();
+        server
+            .app_state(params)
+            .await
+            .unwrap()
+            .structured_content
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn app_state_reads_cached_diagnostics_and_refreshes_after_a_failure() {
+        use std::sync::atomic::Ordering;
+        // AT-SPI is disabled in the fixture, so every call fails without
+        // touching the desktop, and each failure marks the report stale.
+        let (server, runs) = server_with_labelled_diagnostics(|| false);
+        server.diagnostics.report(false).await;
+        let params = serde_json::json!({"include_screenshot": false});
+
+        let first = app_state_value(&server, params.clone()).await;
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "served from the cache");
+        assert_eq!(first["readiness"]["recommended_next_step"], "probe run 1");
+        assert!(first["accessibility_error"].is_string());
+        assert!(first["diagnostics"].is_null());
+
+        let second = app_state_value(&server, params).await;
+        assert_eq!(runs.load(Ordering::SeqCst), 2, "the failure forced a probe");
+        assert_eq!(second["readiness"]["recommended_next_step"], "probe run 2");
+    }
+
+    #[tokio::test]
+    async fn a_failed_action_makes_the_next_app_state_probe_again() {
+        use std::sync::atomic::Ordering;
+        let (server, runs) = server_with_labelled_diagnostics(|| false);
+        server.diagnostics.report(false).await;
+
+        // No observation has cached a tree, so the index is stale and the
+        // action fails before it reaches the desktop.
+        let params = serde_json::from_value(serde_json::json!({"element_index": 3})).unwrap();
+        let result = server.perform_action(Parameters(params)).await.unwrap();
+        assert_eq!(result.is_error, Some(true));
+
+        let state =
+            app_state_value(&server, serde_json::json!({"include_screenshot": false})).await;
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "the failed action forced a probe"
+        );
+        assert_eq!(state["readiness"]["recommended_next_step"], "probe run 2");
+    }
+
+    #[tokio::test]
+    async fn verbose_app_state_always_probes_and_refreshes_the_cache() {
+        use std::sync::atomic::Ordering;
+        let (server, runs) = server_with_labelled_diagnostics(|| false);
+        server.diagnostics.report(false).await;
+
+        let verbose = app_state_value(
+            &server,
+            serde_json::json!({"include_screenshot": false, "verbose": true}),
+        )
+        .await;
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!(verbose["readiness"]["recommended_next_step"], "probe run 2");
+        assert_eq!(
+            verbose["diagnostics"]["readiness"]["recommended_next_step"],
+            "probe run 2"
+        );
+    }
+
+    #[test]
+    fn app_state_sees_accessibility_switched_off_within_the_ttl() {
+        let dir = std::env::temp_dir().join(format!(
+            "cul-a11y-switch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+
+        // busctl and gsettings answer the accessibility probes from
+        // CUL_A11Y_ENABLED; systemctl keeps session discovery off the desktop.
+        for program in ["busctl", "gsettings", "systemctl"] {
+            let path = dir.join(program);
+            std::fs::write(
+                &path,
+                r#"#!/bin/sh
+case "${0##*/} $*" in
+  systemctl*) exit 1 ;;
+  *GetAddress) echo "s \"unix:path=$HOME/no-a11y-bus\"" ;;
+  *IsEnabled|*toolkit-accessibility) echo "$CUL_A11Y_ENABLED" ;;
+  *) echo false ;;
+esac
+"#,
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "server::tests::accessibility_switched_off_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PATH", &dir)
+            .env("HOME", &dir)
+            .env("XDG_RUNTIME_DIR", &dir)
+            .env("DISPLAY", ":9876")
+            .env("WAYLAND_DISPLAY", "")
+            .env("XDG_SESSION_TYPE", "x11")
+            .env("CUL_A11Y_CHILD", "1")
+            .env("CUL_A11Y_ENABLED", "true")
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}/no-bus", dir.display()),
+            );
+        for key in [
+            "DESKTOP_SESSION",
+            "HYPRLAND_INSTANCE_SIGNATURE",
+            "XAUTHORITY",
+            "XDG_SESSION_DESKTOP",
+            "XDG_CURRENT_DESKTOP",
+        ] {
+            command.env(key, "a11y-switch-test");
+        }
+
+        let output = crate::command_runner::output_blocking_with_timeout(
+            &mut command,
+            "accessibility switch child",
+            Duration::from_secs(15),
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+            "accessibility switch child must execute its assertions"
+        );
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated environment subprocess; invoked by app_state_sees_accessibility_switched_off_within_the_ttl"]
+    async fn accessibility_switched_off_child() {
+        use std::sync::atomic::Ordering;
+        assert_eq!(env::var("CUL_A11Y_CHILD").as_deref(), Ok("1"));
+        let (server, runs) = server_with_labelled_diagnostics(
+            crate::diagnostics_impl::can_build_accessibility_tree_now,
+        );
+        let cached = server.diagnostics.report(false).await;
+        assert!(cached.readiness.can_build_accessibility_tree);
+
+        env::set_var("CUL_A11Y_ENABLED", "false");
+        let state =
+            app_state_value(&server, serde_json::json!({"include_screenshot": false})).await;
+        assert_eq!(runs.load(Ordering::SeqCst), 2, "the switch forced a probe");
+        assert_eq!(state["readiness"]["recommended_next_step"], "probe run 2");
+        assert_eq!(state["readiness"]["can_build_accessibility_tree"], false);
+        assert!(
+            state["accessibility_error"]
+                .as_str()
+                .unwrap()
+                .contains("accessibility is disabled"),
+            "{}",
+            state["accessibility_error"]
         );
     }
 
@@ -13669,6 +13976,29 @@ mod node_target_scope_tests {
 mod post_action_capture_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    type ToolCall<'a> =
+        std::pin::Pin<Box<dyn Future<Output = Result<CallToolResult, ErrorData>> + 'a>>;
+
+    fn arguments<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Parameters<T> {
+        Parameters(serde_json::from_value(value).unwrap())
+    }
+
+    /// Runs `action` against a freshly cached report, then reads readiness the
+    /// way get_app_state does. Returns the action's result and whether that
+    /// read had to probe again.
+    async fn readiness_probed_after(
+        server: &ComputerUseLinux,
+        probes: &AtomicUsize,
+        action: impl Future<Output = Result<CallToolResult, ErrorData>>,
+    ) -> (CallToolResult, bool) {
+        server.diagnostics.report(false).await;
+        let cached = probes.load(Ordering::SeqCst);
+        let result = action.await.unwrap();
+        server.diagnostics.report(false).await;
+        (result, probes.load(Ordering::SeqCst) != cached)
+    }
 
     fn solid_png(width: u32, height: u32) -> Vec<u8> {
         let img = image::RgbaImage::from_pixel(width, height, image::Rgba([32, 128, 192, 255]));
@@ -13904,6 +14234,27 @@ exit 1
         std::fs::set_permissions(&gnome_screenshot, std::fs::Permissions::from_mode(0o700))
             .unwrap();
 
+        // wmctrl answers only while CUL_WMCTRL_STATE names a file. It lists
+        // window 7, applies a resize, and fails every listing after the one
+        // that verified the resize.
+        let wmctrl = dir.join("wmctrl");
+        std::fs::write(
+            &wmctrl,
+            r#"#!/bin/sh
+[ -n "$CUL_WMCTRL_STATE" ] || exit 1
+read -r state < "$CUL_WMCTRL_STATE"
+case "$1:$state" in
+  -l:verified) exit 1 ;;
+  -l:resized) echo verified > "$CUL_WMCTRL_STATE"; size="40 30" ;;
+  -l:*) size="32 24" ;;
+  *) case "$*" in *" -e "*) echo resized > "$CUL_WMCTRL_STATE" ;; esac; exit 0 ;;
+esac
+echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&wmctrl, std::fs::Permissions::from_mode(0o700)).unwrap();
+
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args([
@@ -13961,7 +14312,8 @@ exit 1
     async fn post_action_capture_child() {
         assert_eq!(std::env::var("CUL_POST_ACTION_CHILD").as_deref(), Ok("1"));
         let log_path = std::path::PathBuf::from(std::env::var("CUL_POST_ACTION_LOG").unwrap());
-        let server = ComputerUseLinux::default();
+        let (server, diagnostics_probes) = super::tests::server_with_labelled_diagnostics(|| false);
+        server.diagnostics.report(false).await;
 
         // 1. Successful click + post-action JPEG screenshot.
         let click_params: ClickParams = serde_json::from_value(serde_json::json!({
@@ -13999,6 +14351,12 @@ exit 1
             events, "xdotool\ngnome-screenshot\n",
             "action must execute strictly before post-action screenshot capture"
         );
+        server.diagnostics.report(false).await;
+        assert_eq!(
+            diagnostics_probes.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a successful post-action capture keeps the cached diagnostics"
+        );
 
         // 2. Screenshot failure after a successful action must keep ok=true.
         std::fs::write(&log_path, "").unwrap();
@@ -14024,6 +14382,12 @@ exit 1
             .as_str()
             .unwrap()
             .contains("Post-action screenshot failed:"));
+        server.diagnostics.report(false).await;
+        assert_eq!(
+            diagnostics_probes.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a failed post-action capture makes the next readiness read probe again"
+        );
 
         // 3. Failed action (relative coordinates without a target) must not capture.
         std::fs::write(&log_path, "").unwrap();
@@ -14076,6 +14440,156 @@ exit 1
             .unwrap()
             .contains("Post-action screenshot failed:"));
 
+        // 5. A window capture that falls back to the activated window when the
+        // window list fails still makes the next readiness read probe again.
+        server.diagnostics.report(false).await;
+        let probes = diagnostics_probes.load(std::sync::atomic::Ordering::SeqCst);
+        let window: WindowInfo = serde_json::from_value(serde_json::json!({
+            "window_id": 7,
+            "bounds": {"x": 8, "y": 8, "width": 32, "height": 24},
+            "focused": true,
+            "hidden": false,
+            "backend": "test"
+        }))
+        .unwrap();
+        let window_capture: PostActionCaptureParams =
+            serde_json::from_value(serde_json::json!({"screenshot_after": "window"})).unwrap();
+        let activate_result = server
+            .finish_activate_window_output(
+                ActivateWindowOutput {
+                    ok: true,
+                    implemented: true,
+                    backend: "test".to_string(),
+                    focus: Some(WindowFocusResult {
+                        requested_window: window.clone(),
+                        focused_window: Some(window),
+                        exact_window_focused: true,
+                        app_focused: true,
+                        backend: "test".to_string(),
+                        note: String::new(),
+                    }),
+                    error: None,
+                    permissions_hint: None,
+                    received: None,
+                },
+                &window_capture,
+                &WindowTarget {
+                    window_id: Some(7),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let activate_structured = activate_result
+            .structured_content
+            .expect("structured activate_window content");
+        assert!(activate_structured.get("screenshot_error").is_none());
+        assert_eq!(
+            activate_structured["screenshot"]["cropped_to_window"],
+            serde_json::json!(true)
+        );
+        server.diagnostics.report(false).await;
+        assert_eq!(
+            diagnostics_probes.load(std::sync::atomic::Ordering::SeqCst),
+            probes + 1,
+            "a failed window list makes the next readiness read probe again"
+        );
+
+        // 6. Every action that fails, whatever the reason, makes the next
+        // readiness read probe again. Input commands fail or are missing, no
+        // window backend answers, and no observation has cached an element
+        // index.
+        std::env::set_var("CUL_POST_ACTION_FAIL_INPUT", "9");
+        let failed_actions: Vec<(&str, ToolCall<'_>)> = vec![
+            (
+                "click",
+                Box::pin(server.click(arguments(serde_json::json!({"x": 120, "y": 240})))),
+            ),
+            (
+                "type_text",
+                Box::pin(server.type_text(arguments(serde_json::json!({"text": "a"})))),
+            ),
+            (
+                "press_key",
+                Box::pin(server.press_key(arguments(serde_json::json!({"key": "Escape"})))),
+            ),
+            (
+                "scroll",
+                Box::pin(server.scroll(arguments(
+                    serde_json::json!({"x": 120, "y": 240, "direction": "down"}),
+                ))),
+            ),
+            (
+                "drag",
+                Box::pin(server.drag(arguments(serde_json::json!({
+                    "start_x": 10, "start_y": 10, "end_x": 40, "end_y": 40
+                })))),
+            ),
+            (
+                "perform_action",
+                Box::pin(server.perform_action(arguments(serde_json::json!({"element_index": 3})))),
+            ),
+            (
+                "set_value",
+                Box::pin(server.set_value(arguments(
+                    serde_json::json!({"element_index": 3, "value": "x"}),
+                ))),
+            ),
+            (
+                "activate_window",
+                Box::pin(server.activate_window(arguments(serde_json::json!({"window_id": 7})))),
+            ),
+            (
+                "move_window",
+                Box::pin(server.move_window(arguments(
+                    serde_json::json!({"window_id": 7, "x": 0, "y": 0}),
+                ))),
+            ),
+            (
+                "resize_window",
+                Box::pin(server.resize_window(arguments(
+                    serde_json::json!({"window_id": 7, "width": 40, "height": 30}),
+                ))),
+            ),
+        ];
+        for (tool, action) in failed_actions {
+            let (result, probed) =
+                readiness_probed_after(&server, &diagnostics_probes, action).await;
+            assert_eq!(
+                result.is_error,
+                Some(true),
+                "{tool} must fail here: {:?}",
+                result.structured_content
+            );
+            assert!(
+                probed,
+                "a failed {tool} makes the next readiness read probe again"
+            );
+        }
+        std::env::remove_var("CUL_POST_ACTION_FAIL_INPUT");
+
+        // 7. A resize that lands but whose geometry re-query finds no window
+        // backend stays ok and still makes the next readiness read probe again.
+        let wmctrl_state = log_path.with_file_name("wmctrl.state");
+        std::fs::write(&wmctrl_state, "").unwrap();
+        std::env::set_var("CUL_WMCTRL_STATE", &wmctrl_state);
+        let (result, probed) = readiness_probed_after(
+            &server,
+            &diagnostics_probes,
+            server.resize_window(arguments(
+                serde_json::json!({"window_id": 7, "width": 40, "height": 30}),
+            )),
+        )
+        .await;
+        std::env::remove_var("CUL_WMCTRL_STATE");
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["ok"], true, "{structured}");
+        assert!(structured["window"].is_null(), "{structured}");
+        assert!(
+            probed,
+            "a failed geometry re-query makes the next readiness read probe again"
+        );
+
         // The fake display cannot monitor XKB. Preserve xdotool compatibility
         // and make the unavailable detection explicit, including after capture.
         std::fs::write(&log_path, "").unwrap();
@@ -14084,7 +14598,16 @@ exit 1
             "screenshot_after": true
         }))
         .unwrap();
-        let result = server.type_text(Parameters(params)).await.unwrap();
+        let (result, probed) = readiness_probed_after(
+            &server,
+            &diagnostics_probes,
+            server.type_text(Parameters(params)),
+        )
+        .await;
+        assert!(
+            !probed,
+            "a successful type_text keeps the cached diagnostics"
+        );
         let structured = result.structured_content.unwrap();
         assert_eq!(structured["ok"], true);
         assert!(structured.get("screenshot").is_some());
@@ -14099,8 +14622,16 @@ exit 1
         );
 
         // The text-specific risk does not apply to named key dispatch.
-        let params = serde_json::from_value(serde_json::json!({"key": "Escape"})).unwrap();
-        let result = server.press_key(Parameters(params)).await.unwrap();
+        let (result, probed) = readiness_probed_after(
+            &server,
+            &diagnostics_probes,
+            server.press_key(arguments(serde_json::json!({"key": "Escape"}))),
+        )
+        .await;
+        assert!(
+            !probed,
+            "a successful press_key keeps the cached diagnostics"
+        );
         assert_eq!(result.structured_content.as_ref().unwrap()["ok"], true);
         assert!(!result.structured_content.unwrap()["message"]
             .as_str()
