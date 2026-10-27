@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.28] - 2026-10-27
+
 ### Fixed
 
 - Report `backend: "unavailable"` when `focused_window`, `activate_window`, or `list_windows` fails, instead of claiming `gnome-shell-introspect`. On niri, KDE, Hyprland, and other non-GNOME sessions the old label pointed troubleshooting at GNOME Shell. The `windows` CLI command already used this value. When no window has focus, `focused_window` now names the backend that answered.
+
+Thanks @lihaoze123 for the fix and @luochen1990 for the report ([#301](https://github.com/agent-sh/computer-use-linux/pull/301), [downstream issue](https://github.com/lihaoze123/niri-computer-use/issues/2)).
 
 ## [0.7.27] - 2026-10-25
 
@@ -905,7 +909,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.27...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.28...HEAD
+[0.7.28]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.27...v0.7.28
 [0.7.27]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.26...v0.7.27
 [0.7.26]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.25...v0.7.26
 [0.7.25]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.24...v0.7.25
