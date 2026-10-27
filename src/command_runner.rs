@@ -1,8 +1,11 @@
 use anyhow::{anyhow, Context, Result};
 use std::{
     io::{self, Read},
-    os::{fd::AsRawFd, unix::process::CommandExt as _},
-    process::{Command as StdCommand, Output, Stdio},
+    os::{
+        fd::{AsRawFd, RawFd},
+        unix::process::CommandExt as _,
+    },
+    process::{Command as StdCommand, ExitStatus, Output, Stdio},
     thread,
     time::Instant as StdInstant,
 };
@@ -17,7 +20,8 @@ use tokio::{
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 const REAP_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_COMMAND_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
-const BLOCKING_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const EXIT_POLL_INITIAL_INTERVAL: Duration = Duration::from_micros(100);
+const EXIT_POLL_MAX_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_BLOCKING_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_BLOCKING_DRAIN_BYTES: usize = 64 * 1024;
 /// `exec` fails with ETXTBSY while any process holds a write handle on the
@@ -141,30 +145,39 @@ pub(crate) fn output_blocking_with_timeout(
             }
         }
         if stdout_eof && stderr_eof {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    return Ok(Output {
-                        status,
-                        stdout: stdout_bytes,
-                        stderr: stderr_bytes,
-                    });
+            return match wait_for_exit(&mut child, deadline) {
+                Ok(Some(status)) => Ok(Output {
+                    status,
+                    stdout: stdout_bytes,
+                    stderr: stderr_bytes,
+                }),
+                Ok(None) => {
+                    terminate_blocking_process(&mut child, pgid);
+                    Err(timeout_error(action, timeout))
                 }
-                Ok(None) => {}
                 Err(error) => {
                     terminate_blocking_process(&mut child, pgid);
-                    return Err(error).with_context(|| format!("failed to wait for {action}"));
+                    Err(error).with_context(|| format!("failed to wait for {action}"))
                 }
-            }
+            };
         }
-        if StdInstant::now() >= deadline {
+        let now = StdInstant::now();
+        if now >= deadline {
             terminate_blocking_process(&mut child, pgid);
             return Err(timeout_error(action, timeout));
         }
-        // Continue draining a busy producer without a fixed pause after every
+        // Continue draining a busy producer without waiting after every
         // chunk. Each drain is still capped and the deadline is checked above,
         // so continuous output cannot starve stderr or bypass the output limit.
         if stdout_bytes.len() + stderr_bytes.len() == previous_bytes {
-            thread::sleep(BLOCKING_POLL_INTERVAL);
+            let open_pipes = [
+                (!stdout_eof).then(|| stdout.as_raw_fd()),
+                (!stderr_eof).then(|| stderr.as_raw_fd()),
+            ];
+            if let Err(error) = wait_for_output(open_pipes, deadline - now) {
+                terminate_blocking_process(&mut child, pgid);
+                return Err(error).with_context(|| format!("failed to wait for {action} output"));
+            }
         }
     }
 }
@@ -408,19 +421,53 @@ fn drain_nonblocking(reader: &mut impl Read, output: &mut Vec<u8>) -> io::Result
     }
 }
 
+/// Blocks until an open pipe has data or hangs up, a signal arrives, or
+/// `timeout` passes. Pipes at EOF are left out because they stay readable.
+fn wait_for_output(open_pipes: [Option<RawFd>; 2], timeout: Duration) -> io::Result<()> {
+    // poll skips a negative descriptor.
+    let mut pollfds = open_pipes.map(|fd| libc::pollfd {
+        fd: fd.unwrap_or(-1),
+        events: libc::POLLIN,
+        revents: 0,
+    });
+    // Round up so a sub-millisecond remainder does not spin at a zero timeout.
+    let timeout_ms = i32::try_from(timeout.as_nanos().div_ceil(1_000_000)).unwrap_or(i32::MAX);
+    if unsafe { libc::poll(pollfds.as_mut_ptr(), 2, timeout_ms) } < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+/// Returns `None` if the process is still running at `deadline`. The exit
+/// status usually trails pipe EOF by microseconds, but a process can close its
+/// pipes long before it exits, so start with a short pause and back off.
+fn wait_for_exit(
+    child: &mut std::process::Child,
+    deadline: StdInstant,
+) -> io::Result<Option<ExitStatus>> {
+    let mut pause = EXIT_POLL_INITIAL_INTERVAL;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        let now = StdInstant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+        thread::sleep(pause.min(deadline - now));
+        pause = (pause * 2).min(EXIT_POLL_MAX_INTERVAL);
+    }
+}
+
 fn terminate_blocking_process(child: &mut std::process::Child, pgid: i32) {
     unsafe {
         libc::kill(-pgid, libc::SIGKILL);
     }
     let _ = child.kill();
-    let deadline = StdInstant::now() + REAP_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) | Err(_) => return,
-            Ok(None) if StdInstant::now() < deadline => thread::sleep(BLOCKING_POLL_INTERVAL),
-            Ok(None) => return,
-        }
-    }
+    let _ = wait_for_exit(child, StdInstant::now() + REAP_TIMEOUT);
 }
 
 async fn terminate_command(
@@ -753,6 +800,125 @@ mod tests {
         wait_for_process_exit(descendant).await;
         let _ = fs::remove_file(leader_path);
         let _ = fs::remove_file(descendant_path);
+    }
+
+    #[test]
+    fn blocking_output_returns_when_a_fast_command_exits() {
+        const RUNS: u32 = 100;
+        let started = Instant::now();
+        for _ in 0..RUNS {
+            let output = StdCommand::new("true").output().unwrap();
+            assert!(output.status.success());
+        }
+        let direct = started.elapsed();
+
+        let started = Instant::now();
+        for _ in 0..RUNS {
+            let output = output_blocking(&mut StdCommand::new("true"), "run true").unwrap();
+            assert!(output.status.success());
+        }
+        let blocking = started.elapsed();
+
+        // Both loops pay the same spawn cost, so compare only what the runner
+        // adds. Pausing 10 ms whenever a pass reads nothing would add over 1 s.
+        assert!(
+            blocking.saturating_sub(direct) < Duration::from_millis(500),
+            "{RUNS} runs of true took {blocking:?} through output_blocking and {direct:?} directly"
+        );
+    }
+
+    #[test]
+    fn blocking_output_drains_large_stdout_and_stderr() {
+        let mut command = StdCommand::new("sh");
+        command.args([
+            "-c",
+            "yes stdout | head -c 200000; yes stderr | head -c 200000 >&2",
+        ]);
+
+        let output = output_blocking_with_timeout(
+            &mut command,
+            "collect noisy output",
+            Duration::from_secs(5),
+        )
+        .expect("noisy command should complete");
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 200_000);
+        assert_eq!(output.stderr.len(), 200_000);
+    }
+
+    #[test]
+    fn blocking_output_sleeps_while_one_pipe_stays_open() {
+        let mut command = StdCommand::new("sh");
+        command.args(["-c", "exec >&-; sleep 0.2"]);
+        let cpu_before = thread_cpu_time();
+
+        output_blocking(&mut command, "wait on stderr").unwrap();
+
+        let cpu = thread_cpu_time() - cpu_before;
+        assert!(
+            cpu < Duration::from_millis(50),
+            "waiting 200 ms used {cpu:?} of CPU"
+        );
+    }
+
+    #[test]
+    fn blocking_output_waits_for_a_leader_that_closed_its_pipes() {
+        let mut command = StdCommand::new("sh");
+        command.args(["-c", "exec >&- 2>&-; sleep 0.2; exit 3"]);
+        let started = Instant::now();
+
+        let output = output_blocking_with_timeout(
+            &mut command,
+            "wait for quiet leader",
+            Duration::from_secs(5),
+        )
+        .expect("leader should exit before the timeout");
+
+        assert_eq!(output.status.code(), Some(3));
+        assert!(started.elapsed() >= Duration::from_millis(200));
+    }
+
+    #[tokio::test]
+    async fn blocking_timeout_kills_a_leader_that_closed_its_pipes() {
+        let leader_path = temporary_pid_path("closed-pipes-leader");
+        let mut command = StdCommand::new("sh");
+        command.args([
+            "-c",
+            &format!(
+                "exec >&- 2>&-; printf %s $$ > '{}'; exec sleep 60",
+                leader_path.display()
+            ),
+        ]);
+        let started = Instant::now();
+
+        let error = output_blocking_with_timeout(
+            &mut command,
+            "run quiet leader",
+            Duration::from_millis(100),
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("timed out after 100 ms while trying to run quiet leader"));
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert!(started.elapsed() < Duration::from_secs(4));
+        let leader = wait_for_pid(&leader_path).await;
+        wait_for_process_exit(leader).await;
+        let _ = fs::remove_file(leader_path);
+    }
+
+    fn thread_cpu_time() -> Duration {
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) },
+            0
+        );
+        Duration::new(time.tv_sec as u64, time.tv_nsec as u32)
     }
 
     fn temporary_pid_path(label: &str) -> PathBuf {

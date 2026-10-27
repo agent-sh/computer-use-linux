@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Return from short commands as soon as they finish, instead of polling their output every 10 ms. On KDE Plasma, `doctor` takes about 43 ms instead of 221 ms, and a `get_app_state` call that reuses cached diagnostics takes about 50 ms less.
+
 ## [0.7.29] - 2026-10-27
 
 ### Changed
