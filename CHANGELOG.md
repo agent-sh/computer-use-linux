@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Report `backend: "unavailable"` when `focused_window`, `activate_window`, or `list_windows` fails, instead of claiming `gnome-shell-introspect`. On niri, KDE, Hyprland, and other non-GNOME sessions the old label pointed troubleshooting at GNOME Shell. The `windows` CLI command already used this value. When no window has focus, `focused_window` now names the backend that answered.
+
 ## [0.7.27] - 2026-10-25
 
 ### Added

@@ -6,12 +6,13 @@ pub mod types;
 #[allow(unused_imports)]
 pub use registry::{
     COSMIC_WAYLAND_BACKEND, GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND,
-    HYPRLAND_BACKEND, I3_BACKEND, KWIN_BACKEND, NIRI_BACKEND, WINDOW_PERMISSION_HINT, X11_BACKEND,
+    HYPRLAND_BACKEND, I3_BACKEND, KWIN_BACKEND, NIRI_BACKEND, UNAVAILABLE_BACKEND,
+    WINDOW_PERMISSION_HINT, X11_BACKEND,
 };
 #[allow(unused_imports)]
 pub use target::{
-    focus_window_target, focused_window, list_windows, resolve_window_target,
-    window_permission_hint,
+    focus_window_target, focused_window, focused_window_with_backend, list_windows,
+    resolve_window_target, window_permission_hint,
 };
 #[allow(unused_imports)]
 pub(crate) use types::app_id_leaf;
@@ -27,7 +28,7 @@ mod tests {
         descriptors, list_note, COSMIC_WAYLAND_BACKEND, GNOME_SHELL_EXTENSION_BACKEND,
         GNOME_SHELL_INTROSPECT_BACKEND,
     };
-    use super::target::ensure_backend_can_focus_target;
+    use super::target::{ensure_backend_can_focus_target, focused_in};
     use super::*;
     use crate::terminal::{TerminalProcess, TerminalWindowContext};
     use std::collections::HashMap;
@@ -64,6 +65,25 @@ mod tests {
     fn registry_serves_backend_list_notes() {
         assert!(list_note(COSMIC_WAYLAND_BACKEND).contains("COSMIC Wayland helper"));
         assert!(list_note("missing-backend").contains("GNOME Shell Introspect"));
+    }
+
+    #[test]
+    fn focused_query_names_the_answering_backend_without_a_focused_window() {
+        let mut unfocused = window(1, "Editor", "editor", "editor");
+        unfocused.backend = NIRI_BACKEND.to_string();
+        let mut focused = unfocused.clone();
+        focused.window_id = 2;
+        focused.focused = true;
+
+        let (backend, window) = focused_in(vec![unfocused.clone()]);
+        assert_eq!(backend, NIRI_BACKEND);
+        assert!(window.is_none());
+
+        let (backend, window) = focused_in(vec![unfocused, focused]);
+        assert_eq!(backend, NIRI_BACKEND);
+        assert_eq!(window.map(|window| window.window_id), Some(2));
+
+        assert_eq!(focused_in(Vec::new()).0, UNAVAILABLE_BACKEND);
     }
 
     fn window(window_id: u64, title: &str, app_id: &str, wm_class: &str) -> WindowInfo {
