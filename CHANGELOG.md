@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.29] - 2026-10-27
+
 ### Changed
 
 - Reuse the desktop diagnostics behind the `get_app_state` readiness block for up to 30 seconds, so a repeat call on KDE Plasma takes about 140 ms less and starts 6 of the 26 diagnostic subprocesses. Those 6 recheck accessibility on every call, so switching it on or off takes effect at once. A call runs all the diagnostics before it answers when it passes `verbose: true`, when its screenshot, window lookup, or accessibility tree read fails, or when it finds a window that the cached diagnostics say no backend can list. The call after a failed observation, a failed action, or a setup tool runs them too, and `doctor` always runs them.
+
+Thanks @ofek29 for the performance improvement and regression coverage ([#305](https://github.com/agent-sh/computer-use-linux/pull/305)).
 
 ## [0.7.28] - 2026-10-27
 
@@ -913,7 +917,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.28...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.29...HEAD
+[0.7.29]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.28...v0.7.29
 [0.7.28]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.27...v0.7.28
 [0.7.27]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.26...v0.7.27
 [0.7.26]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.25...v0.7.26
