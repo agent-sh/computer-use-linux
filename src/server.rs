@@ -7,6 +7,7 @@ use crate::atspi_tree::{
 };
 use crate::diagnostics::{
     doctor_report, setup_accessibility_report, DoctorReport, ReadinessReport, SetupReport,
+    WindowingReport,
 };
 use crate::diagnostics_cache::DiagnosticsCache;
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
@@ -472,8 +473,13 @@ impl ComputerUseLinux {
                 probed = true;
             }
         }
-        let (window_context, window_error, window_permissions_hint, window_enumerated) =
-            self.resolve_window_context(&params).await;
+        let (
+            window_context,
+            window_error,
+            window_permissions_hint,
+            window_enumerated,
+            failed_window_backends,
+        ) = self.resolve_window_context(&params).await;
         let (max_nodes, max_depth) =
             crate::atspi_tree::snapshot_limits(params.max_nodes, params.max_depth);
         let include_screenshot = params.include_screenshot.unwrap_or(true);
@@ -581,9 +587,12 @@ impl ComputerUseLinux {
                 (Some(_), None) => WindowLookup::Resolved,
                 (None, None) => WindowLookup::NotRequested,
             },
+            failed_window_backends: &failed_window_backends,
             tree: tree_read,
         };
-        if let Some(contradiction) = readiness_contradiction(&diagnostics.readiness, observed) {
+        if let Some(contradiction) =
+            readiness_contradiction(&diagnostics.readiness, &diagnostics.windowing, observed)
+        {
             // Readiness is what explains this observation, so it must describe
             // the desktop as this call found it, not a cached report from
             // before.
@@ -3382,9 +3391,11 @@ const TREE_PAGE_RESERVE: usize = 500;
 /// What one get_app_state call found, in the terms its readiness block makes
 /// claims about.
 #[derive(Debug, Clone, Copy)]
-struct AppStateObservation {
+struct AppStateObservation<'a> {
     screenshot_failed: bool,
     window: WindowLookup,
+    /// Window backends that failed in a lookup another backend answered.
+    failed_window_backends: &'a [&'static str],
     tree: TreeRead,
 }
 
@@ -3420,13 +3431,23 @@ enum Contradiction {
 }
 
 /// Why a get_app_state call must refresh `readiness` before it reports it, or
-/// `None` when the readiness stands.
+/// `None` when the readiness stands. `windowing` comes from the same report.
 fn readiness_contradiction(
     readiness: &ReadinessReport,
+    windowing: &WindowingReport,
     observed: AppStateObservation,
 ) -> Option<Contradiction> {
+    // A backend the report already calls unhealthy fails as predicted. On KDE
+    // both GNOME backends fail before KWin answers, on every call.
+    let healthy_backend_failed = observed.failed_window_backends.iter().any(|backend| {
+        windowing
+            .backends
+            .get(*backend)
+            .is_some_and(|check| check.ok)
+    });
     if observed.screenshot_failed
         || observed.window == WindowLookup::Failed
+        || healthy_backend_failed
         || observed.tree == TreeRead::Failed
     {
         Some(Contradiction::Failure)
@@ -4089,21 +4110,30 @@ impl ComputerUseLinux {
     async fn resolve_window_context(
         &self,
         params: &GetAppStateParams,
-    ) -> (Option<WindowInfo>, Option<String>, Option<String>, bool) {
+    ) -> (
+        Option<WindowInfo>,
+        Option<String>,
+        Option<String>,
+        bool,
+        Vec<&'static str>,
+    ) {
         let target = params.window_target();
         if !target.has_target() {
-            return (None, None, None, false);
+            return (None, None, None, false, Vec::new());
         }
 
-        match list_windows().await {
-            Ok(windows) => match resolve_window_target(&windows, &target) {
-                Ok(window) => (Some(window.clone()), None, None, true),
-                Err(error) => (None, Some(format!("{error:#}")), None, true),
-            },
+        match registry::list_windows_with_failures().await {
+            Ok(listing) => {
+                let (window, error) = match resolve_window_target(&listing.windows, &target) {
+                    Ok(window) => (Some(window.clone()), None),
+                    Err(error) => (None, Some(format!("{error:#}"))),
+                };
+                (window, error, None, true, listing.failed_backends)
+            }
             Err(error) => {
                 let error = format!("{error:#}");
                 let hint = window_permission_hint(&error);
-                (None, Some(error), hint, false)
+                (None, Some(error), hint, false, Vec::new())
             }
         }
     }
@@ -5490,7 +5520,8 @@ impl ComputerUseLinux {
         scope: &AccessibilityRecoveryScope,
     ) -> Result<RefreshedAccessibilitySnapshot> {
         let params = &scope.params;
-        let (window_context, _, _, window_enumerated) = self.resolve_window_context(params).await;
+        let (window_context, _, _, window_enumerated, _) =
+            self.resolve_window_context(params).await;
         let app_filter = self
             .resolve_accessibility_app_filter(params, window_context.as_ref(), window_enumerated)
             .await;
@@ -9104,15 +9135,26 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
         accessibility_enabled: fn() -> bool,
         windows_available: fn() -> bool,
     ) -> (ComputerUseLinux, Arc<std::sync::atomic::AtomicUsize>) {
+        server_with_labelled_reports(accessibility_enabled, move || {
+            crate::diagnostics_impl::tests::doctor_report_fixture(
+                accessibility_enabled(),
+                windows_available(),
+            )
+        })
+    }
+
+    /// Like `server_with_labelled_diagnostics`, with each probe's report built
+    /// by `report`.
+    pub(super) fn server_with_labelled_reports(
+        accessibility_enabled: fn() -> bool,
+        report: impl Fn() -> DoctorReport + Send + Sync + 'static,
+    ) -> (ComputerUseLinux, Arc<std::sync::atomic::AtomicUsize>) {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let runs = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&runs);
         let probe = move || {
             let run = counter.fetch_add(1, Ordering::SeqCst) + 1;
-            let mut report = crate::diagnostics_impl::tests::doctor_report_fixture(
-                accessibility_enabled(),
-                windows_available(),
-            );
+            let mut report = report();
             report.readiness.recommended_next_step = format!("probe run {run}");
             report
         };
@@ -9142,53 +9184,75 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
 
     #[test]
     fn readiness_is_refreshed_only_when_an_observation_contradicts_it() {
+        use crate::windowing::registry::{
+            GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND, KWIN_BACKEND,
+        };
         use Contradiction::{Failure, Success};
-        let readiness = |can_build_accessibility_tree: bool, can_query_windows: bool| {
+        let cached = |can_build_accessibility_tree: bool, can_query_windows: bool| {
             crate::diagnostics_impl::tests::doctor_report_fixture(
                 can_build_accessibility_tree,
                 can_query_windows,
             )
-            .readiness
+        };
+        let backends = |health: &[(&str, bool)]| {
+            let mut report = cached(true, true);
+            for (backend, ok) in health {
+                report.windowing.backends.insert(
+                    backend.to_string(),
+                    crate::diagnostics::Check {
+                        ok: *ok,
+                        detail: String::new(),
+                    },
+                );
+            }
+            report
         };
         let observed = |screenshot_failed, window, tree| AppStateObservation {
             screenshot_failed,
             window,
+            failed_window_backends: &[],
             tree,
+        };
+        let resolved_after_failures = |failed_window_backends| AppStateObservation {
+            screenshot_failed: false,
+            window: WindowLookup::Resolved,
+            failed_window_backends,
+            tree: TreeRead::Nodes,
         };
         let cases = [
             (
                 "everything worked as the readiness says",
-                readiness(true, true),
+                cached(true, true),
                 observed(false, WindowLookup::Resolved, TreeRead::Nodes),
                 None,
             ),
             (
                 "a screenshot failed",
-                readiness(true, true),
+                cached(true, true),
                 observed(true, WindowLookup::NotRequested, TreeRead::Nodes),
                 Some(Failure),
             ),
             (
                 "a window lookup failed",
-                readiness(true, true),
+                cached(true, true),
                 observed(false, WindowLookup::Failed, TreeRead::Nodes),
                 Some(Failure),
             ),
             (
                 "a window lookup failed where the readiness says it would",
-                readiness(true, false),
+                cached(true, false),
                 observed(false, WindowLookup::Failed, TreeRead::Nodes),
                 Some(Failure),
             ),
             (
                 "the tree read failed or found no nodes",
-                readiness(true, true),
+                cached(true, true),
                 observed(false, WindowLookup::NotRequested, TreeRead::Failed),
                 Some(Failure),
             ),
             (
                 "the tree was skipped because this call found accessibility off",
-                readiness(false, true),
+                cached(false, true),
                 observed(
                     false,
                     WindowLookup::NotRequested,
@@ -9198,26 +9262,45 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             ),
             (
                 "a failure alongside the expected skip",
-                readiness(false, true),
+                cached(false, true),
                 observed(true, WindowLookup::NotRequested, TreeRead::AccessibilityOff),
                 Some(Failure),
             ),
             (
                 "a window resolved where the readiness says none can be listed",
-                readiness(false, false),
+                cached(false, false),
                 observed(false, WindowLookup::Resolved, TreeRead::AccessibilityOff),
                 Some(Success),
             ),
             (
                 "no window was requested where the readiness says none can be listed",
-                readiness(true, false),
+                cached(true, false),
                 observed(false, WindowLookup::NotRequested, TreeRead::Nodes),
                 None,
             ),
+            (
+                "a backend the cached report calls healthy failed before another answered",
+                backends(&[(GNOME_SHELL_EXTENSION_BACKEND, true)]),
+                resolved_after_failures(&[GNOME_SHELL_EXTENSION_BACKEND]),
+                Some(Failure),
+            ),
+            (
+                "backends the cached report calls unhealthy failed before KWin answered",
+                backends(&[
+                    (GNOME_SHELL_EXTENSION_BACKEND, false),
+                    (GNOME_SHELL_INTROSPECT_BACKEND, false),
+                    (KWIN_BACKEND, true),
+                ]),
+                resolved_after_failures(&[
+                    GNOME_SHELL_EXTENSION_BACKEND,
+                    GNOME_SHELL_INTROSPECT_BACKEND,
+                ]),
+                None,
+            ),
         ];
-        for (case, readiness, observed, expected) in cases {
+        for (case, cached, observed, expected) in cases {
             assert_eq!(
-                readiness_contradiction(&readiness, observed),
+                readiness_contradiction(&cached.readiness, &cached.windowing, observed),
                 expected,
                 "{case}"
             );
@@ -14898,6 +14981,58 @@ echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
             format!("probe run {}", probes + 1),
             "the refreshed report already shows the window backend"
         );
+
+        // 10. A window that wmctrl lists after the GNOME extension failed. A
+        // cached report that calls the extension healthy is refreshed for this
+        // call, and the next call probes again. One that calls it unhealthy,
+        // as on KDE, where it fails on every call, stays cached.
+        for (extension_ok, expected) in [
+            (true, ["probe run 2", "probe run 3"]),
+            (false, ["probe run 1", "probe run 1"]),
+        ] {
+            let (server, _) = super::tests::server_with_labelled_reports(
+                || false,
+                move || {
+                    let mut report =
+                        crate::diagnostics_impl::tests::doctor_report_fixture(false, true);
+                    report.windowing.backends.insert(
+                        GNOME_SHELL_EXTENSION_BACKEND.to_string(),
+                        crate::diagnostics::Check {
+                            ok: extension_ok,
+                            detail: String::new(),
+                        },
+                    );
+                    report
+                },
+            );
+            server.diagnostics.report(false).await;
+            std::fs::write(&wmctrl_state, "").unwrap();
+            std::env::set_var("CUL_WMCTRL_STATE", &wmctrl_state);
+            let state = super::tests::app_state_value(
+                &server,
+                serde_json::json!({"window_id": 7, "include_screenshot": false}),
+            )
+            .await;
+            std::env::remove_var("CUL_WMCTRL_STATE");
+            assert_eq!(
+                state["window_context"]["backend"],
+                crate::windows::X11_BACKEND,
+                "{state}"
+            );
+            let next = super::tests::app_state_value(
+                &server,
+                serde_json::json!({"include_screenshot": false}),
+            )
+            .await;
+            assert_eq!(
+                [
+                    &state["readiness"]["recommended_next_step"],
+                    &next["readiness"]["recommended_next_step"],
+                ],
+                expected,
+                "cached report calls the failed GNOME extension healthy: {extension_ok}"
+            );
+        }
 
         // The fake display cannot monitor XKB. Preserve xdotool compatibility
         // and make the unavailable detection explicit, including after capture.
