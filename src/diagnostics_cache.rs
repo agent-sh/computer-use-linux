@@ -3,9 +3,8 @@
 //! `doctor_report` runs about two dozen probes (busctl, gsettings, window
 //! backend probes) on every call. `get_app_state` reports only its compact
 //! readiness block, so it reads this cache and probes again only when a call
-//! needs a fresh report: `verbose: true`, a failed observation or action, a
-//! setup tool, a live accessibility check that finds tree reading switched
-//! off, or an expired TTL.
+//! needs a fresh report: `verbose: true`, a failed action, a setup tool, an
+//! observation that contradicts the cached report, or an expired TTL.
 
 use crate::diagnostics::{doctor_report, DoctorReport};
 use std::{

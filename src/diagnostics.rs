@@ -1641,14 +1641,17 @@ pub(crate) mod tests {
 
     /// A complete report for tests outside this module. With accessibility
     /// disabled, get_app_state skips the tree and touches no desktop service.
-    pub(crate) fn doctor_report_fixture(accessibility_enabled: bool) -> DoctorReport {
+    pub(crate) fn doctor_report_fixture(
+        accessibility_enabled: bool,
+        windows_available: bool,
+    ) -> DoctorReport {
         let platform = platform_report();
         let portals = portal_report(Check::fail("missing"));
         let accessibility = accessibility_report(
             Check::ok("bus"),
             Check::ok(accessibility_enabled.to_string()),
         );
-        let windowing = windowing_report(true, true);
+        let windowing = windowing_report(windows_available, windows_available);
         let input = input_report(true);
         DoctorReport {
             readiness: readiness_report(&platform, &portals, &accessibility, &windowing, &input),

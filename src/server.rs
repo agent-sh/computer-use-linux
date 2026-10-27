@@ -5,7 +5,9 @@ use crate::atspi_tree::{
     AccessibilityNode, AccessibleAppSummary, Bounds, EditableTextSetOutcome, FocusProbe,
     FocusedElementSummary, ValueSetInvocation,
 };
-use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
+use crate::diagnostics::{
+    doctor_report, setup_accessibility_report, DoctorReport, ReadinessReport, SetupReport,
+};
 use crate::diagnostics_cache::DiagnosticsCache;
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
 use crate::remote_desktop::{
@@ -123,6 +125,19 @@ pub struct ComputerUseLinux {
     /// failed actions, and setup tools invalidate it; the doctor tool bypasses
     /// it.
     diagnostics: Arc<DiagnosticsCache<DoctorReport>>,
+    accessibility_check: AccessibilityCheck,
+}
+
+/// The live check get_app_state compares a cached report's
+/// `can_build_accessibility_tree` against. Tests swap it to agree with their
+/// fixture report instead of reading the desktop running them.
+#[derive(Clone, Copy)]
+struct AccessibilityCheck(fn() -> bool);
+
+impl Default for AccessibilityCheck {
+    fn default() -> Self {
+        Self(crate::diagnostics_impl::can_build_accessibility_tree_now)
+    }
 }
 
 fn sanitize_unsigned_integer_formats(value: &mut serde_json::Value) {
@@ -445,20 +460,17 @@ impl ComputerUseLinux {
         let verbose = params.verbose.unwrap_or(false);
         // A clone: this call's screenshot result is recorded on it, not on the
         // cached report.
-        let (mut diagnostics, probed) = self.diagnostics.report_and_probed(verbose).await;
-        // The tree gate below must see accessibility switched off within the
-        // TTL. A report this call just probed is already current, and a cached
-        // "disabled" skips the tree and its error invalidates the cache, so
-        // only a cached "enabled" needs the live check.
-        if !probed
-            && diagnostics.readiness.can_build_accessibility_tree
-            && !tokio::task::spawn_blocking(
-                crate::diagnostics_impl::can_build_accessibility_tree_now,
-            )
-            .await
-            .unwrap_or(false)
-        {
-            diagnostics = self.diagnostics.report(true).await;
+        let (mut diagnostics, mut probed) = self.diagnostics.report_and_probed(verbose).await;
+        // The tree gate below must see accessibility switched on or off within
+        // the TTL.
+        if !probed {
+            let can_build_now = tokio::task::spawn_blocking(self.accessibility_check.0)
+                .await
+                .unwrap_or(false);
+            if can_build_now != diagnostics.readiness.can_build_accessibility_tree {
+                diagnostics = self.diagnostics.report(true).await;
+                probed = true;
+            }
         }
         let (window_context, window_error, window_permissions_hint, window_enumerated) =
             self.resolve_window_context(&params).await;
@@ -478,6 +490,7 @@ impl ComputerUseLinux {
         let app_filter = self
             .resolve_accessibility_app_filter(&params, window_context.as_ref(), window_enumerated)
             .await;
+        let mut screenshot_captured = None;
         let (screenshot, screenshot_error) = if include_screenshot {
             let result: Result<ScreenshotCapture> = async {
                 let _pipeline = crate::screenshot_impl::screenshot_pipeline_permit().await?;
@@ -485,7 +498,7 @@ impl ComputerUseLinux {
                     let _hold = self.indicator.hold_for_capture().await?;
                     capture_screenshot_raw().await
                 };
-                diagnostics.readiness.record_screenshot_result(raw.is_ok());
+                screenshot_captured = Some(raw.is_ok());
                 let raw = raw?;
                 self.cache_desktop_size(raw.width, raw.height);
                 let crop = if let Some(window) = window_context.as_ref() {
@@ -516,7 +529,7 @@ impl ComputerUseLinux {
         let mut tree_root_pid = None;
         let mut accessibility_tree_truncated = false;
         let mut shell_only_note = None;
-        let (accessibility_tree, accessibility_tree_raw_count, accessibility_error) =
+        let (accessibility_tree, accessibility_tree_raw_count, accessibility_error, tree_read) =
             if diagnostics.readiness.can_build_accessibility_tree {
                 let target_pid = accessibility_snapshot_target_pid(
                     app_filter.as_deref(),
@@ -541,9 +554,14 @@ impl ComputerUseLinux {
                             accessibility_tree_truncated,
                         );
                         shell_only_note = note;
-                        (nodes, raw_count, None)
+                        let read = if raw_count == 0 {
+                            TreeRead::Failed
+                        } else {
+                            TreeRead::Nodes
+                        };
+                        (nodes, raw_count, None, read)
                     }
-                    Err(error) => (Vec::new(), 0, Some(format!("{error:#}"))),
+                    Err(error) => (Vec::new(), 0, Some(format!("{error:#}")), TreeRead::Failed),
                 }
             } else {
                 (
@@ -553,15 +571,32 @@ impl ComputerUseLinux {
                         "GNOME accessibility is disabled; call setup_accessibility first."
                             .to_string(),
                     ),
+                    TreeRead::AccessibilityOff,
                 )
             };
-        if observation_failed(
-            screenshot_error.as_deref(),
-            window_error.as_deref(),
-            accessibility_error.as_deref(),
-            accessibility_tree_raw_count,
-        ) {
-            self.diagnostics.invalidate();
+        let observed = AppStateObservation {
+            screenshot_failed: screenshot_error.is_some(),
+            window: match (&window_context, &window_error) {
+                (_, Some(_)) => WindowLookup::Failed,
+                (Some(_), None) => WindowLookup::Resolved,
+                (None, None) => WindowLookup::NotRequested,
+            },
+            tree: tree_read,
+        };
+        if let Some(contradiction) = readiness_contradiction(&diagnostics.readiness, observed) {
+            // Readiness is what explains this observation, so it must describe
+            // the desktop as this call found it, not a cached report from
+            // before.
+            if !probed {
+                diagnostics = self.diagnostics.report(true).await;
+            }
+            if contradiction == Contradiction::Failure {
+                // After the refresh, so the next call probes again.
+                self.diagnostics.invalidate();
+            }
+        }
+        if let Some(captured) = screenshot_captured {
+            diagnostics.readiness.record_screenshot_result(captured);
         }
         if accessibility_error.is_none() {
             // Record a pid only when the tree's roots were matched by it. A pid
@@ -3344,19 +3379,62 @@ fn tree_page(nodes: &[AccessibilityNode], offset: usize) -> GetTreePageOutput {
 /// Bytes kept for a tree page's other fields.
 const TREE_PAGE_RESERVE: usize = 500;
 
-/// Whether get_app_state hit a failure that can mean the desktop changed under
-/// the cached diagnostics. A tree with no nodes counts, as it does for the
-/// post-action observation.
-fn observation_failed(
-    screenshot_error: Option<&str>,
-    window_error: Option<&str>,
-    accessibility_error: Option<&str>,
-    accessibility_tree_raw_count: usize,
-) -> bool {
-    screenshot_error.is_some()
-        || window_error.is_some()
-        || accessibility_error.is_some()
-        || accessibility_tree_raw_count == 0
+/// What one get_app_state call found, in the terms its readiness block makes
+/// claims about.
+#[derive(Debug, Clone, Copy)]
+struct AppStateObservation {
+    screenshot_failed: bool,
+    window: WindowLookup,
+    tree: TreeRead,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowLookup {
+    NotRequested,
+    Resolved,
+    /// The window list failed, or listed no window matching the target.
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TreeRead {
+    Nodes,
+    /// The read failed or returned no nodes, as the post-action observation
+    /// also counts it.
+    Failed,
+    /// Not read, because this call found accessibility off, either in a probe
+    /// it ran or in the live check that agreed with the cached report.
+    AccessibilityOff,
+}
+
+/// How an observation disagrees with the readiness the call would report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Contradiction {
+    /// Something failed. The desktop may still be changing, so the next call
+    /// probes again as well, to see a recovery.
+    Failure,
+    /// Something worked that the readiness says cannot. The refreshed report
+    /// postdates that success, so the next call can reuse it. If the
+    /// contradiction persists, that call refreshes again.
+    Success,
+}
+
+/// Why a get_app_state call must refresh `readiness` before it reports it, or
+/// `None` when the readiness stands.
+fn readiness_contradiction(
+    readiness: &ReadinessReport,
+    observed: AppStateObservation,
+) -> Option<Contradiction> {
+    if observed.screenshot_failed
+        || observed.window == WindowLookup::Failed
+        || observed.tree == TreeRead::Failed
+    {
+        Some(Contradiction::Failure)
+    } else if observed.window == WindowLookup::Resolved && !readiness.can_query_windows {
+        Some(Contradiction::Success)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -9020,17 +9098,21 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
 
     /// A server whose diagnostics probe labels each report with its run number
     /// in `recommended_next_step`, so a result shows which run it came from.
-    /// Each run reads `accessibility_enabled` for the report's accessibility.
+    /// Each run, and the live accessibility check, read `accessibility_enabled`.
+    /// Each run reads `windows_available` for whether a window backend answers.
     pub(super) fn server_with_labelled_diagnostics(
         accessibility_enabled: fn() -> bool,
+        windows_available: fn() -> bool,
     ) -> (ComputerUseLinux, Arc<std::sync::atomic::AtomicUsize>) {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let runs = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&runs);
         let probe = move || {
             let run = counter.fetch_add(1, Ordering::SeqCst) + 1;
-            let mut report =
-                crate::diagnostics_impl::tests::doctor_report_fixture(accessibility_enabled());
+            let mut report = crate::diagnostics_impl::tests::doctor_report_fixture(
+                accessibility_enabled(),
+                windows_available(),
+            );
             report.readiness.recommended_next_step = format!("probe run {run}");
             report
         };
@@ -9039,12 +9121,13 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
                 Arc::new(probe),
                 Duration::from_secs(3600),
             )),
+            accessibility_check: AccessibilityCheck(accessibility_enabled),
             ..Default::default()
         };
         (server, runs)
     }
 
-    async fn app_state_value(
+    pub(super) async fn app_state_value(
         server: &ComputerUseLinux,
         params: serde_json::Value,
     ) -> serde_json::Value {
@@ -9057,30 +9140,121 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             .unwrap()
     }
 
+    #[test]
+    fn readiness_is_refreshed_only_when_an_observation_contradicts_it() {
+        use Contradiction::{Failure, Success};
+        let readiness = |can_build_accessibility_tree: bool, can_query_windows: bool| {
+            crate::diagnostics_impl::tests::doctor_report_fixture(
+                can_build_accessibility_tree,
+                can_query_windows,
+            )
+            .readiness
+        };
+        let observed = |screenshot_failed, window, tree| AppStateObservation {
+            screenshot_failed,
+            window,
+            tree,
+        };
+        let cases = [
+            (
+                "everything worked as the readiness says",
+                readiness(true, true),
+                observed(false, WindowLookup::Resolved, TreeRead::Nodes),
+                None,
+            ),
+            (
+                "a screenshot failed",
+                readiness(true, true),
+                observed(true, WindowLookup::NotRequested, TreeRead::Nodes),
+                Some(Failure),
+            ),
+            (
+                "a window lookup failed",
+                readiness(true, true),
+                observed(false, WindowLookup::Failed, TreeRead::Nodes),
+                Some(Failure),
+            ),
+            (
+                "a window lookup failed where the readiness says it would",
+                readiness(true, false),
+                observed(false, WindowLookup::Failed, TreeRead::Nodes),
+                Some(Failure),
+            ),
+            (
+                "the tree read failed or found no nodes",
+                readiness(true, true),
+                observed(false, WindowLookup::NotRequested, TreeRead::Failed),
+                Some(Failure),
+            ),
+            (
+                "the tree was skipped because this call found accessibility off",
+                readiness(false, true),
+                observed(
+                    false,
+                    WindowLookup::NotRequested,
+                    TreeRead::AccessibilityOff,
+                ),
+                None,
+            ),
+            (
+                "a failure alongside the expected skip",
+                readiness(false, true),
+                observed(true, WindowLookup::NotRequested, TreeRead::AccessibilityOff),
+                Some(Failure),
+            ),
+            (
+                "a window resolved where the readiness says none can be listed",
+                readiness(false, false),
+                observed(false, WindowLookup::Resolved, TreeRead::AccessibilityOff),
+                Some(Success),
+            ),
+            (
+                "no window was requested where the readiness says none can be listed",
+                readiness(true, false),
+                observed(false, WindowLookup::NotRequested, TreeRead::Nodes),
+                None,
+            ),
+        ];
+        for (case, readiness, observed, expected) in cases {
+            assert_eq!(
+                readiness_contradiction(&readiness, observed),
+                expected,
+                "{case}"
+            );
+        }
+    }
+
     #[tokio::test]
-    async fn app_state_reads_cached_diagnostics_and_refreshes_after_a_failure() {
+    async fn app_state_calls_that_find_what_the_cache_predicts_reuse_one_report() {
         use std::sync::atomic::Ordering;
-        // AT-SPI is disabled in the fixture, so every call fails without
-        // touching the desktop, and each failure marks the report stale.
-        let (server, runs) = server_with_labelled_diagnostics(|| false);
-        server.diagnostics.report(false).await;
-        let params = serde_json::json!({"include_screenshot": false});
-
-        let first = app_state_value(&server, params.clone()).await;
-        assert_eq!(runs.load(Ordering::SeqCst), 1, "served from the cache");
-        assert_eq!(first["readiness"]["recommended_next_step"], "probe run 1");
-        assert!(first["accessibility_error"].is_string());
-        assert!(first["diagnostics"].is_null());
-
-        let second = app_state_value(&server, params).await;
-        assert_eq!(runs.load(Ordering::SeqCst), 2, "the failure forced a probe");
-        assert_eq!(second["readiness"]["recommended_next_step"], "probe run 2");
+        // Accessibility is off in the fixture and in the live check, so every
+        // call skips the tree, as the cached report predicts, without touching
+        // the desktop.
+        let (server, runs) = server_with_labelled_diagnostics(|| false, || true);
+        for call in 1..=3 {
+            let state =
+                app_state_value(&server, serde_json::json!({"include_screenshot": false})).await;
+            assert!(
+                state["accessibility_error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("accessibility is disabled"),
+                "{state}"
+            );
+            assert_eq!(
+                state["readiness"]["recommended_next_step"], "probe run 1",
+                "call {call} reports the first call's report"
+            );
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "only the first call probed");
     }
 
     #[tokio::test]
     async fn a_failed_action_makes_the_next_app_state_probe_again() {
         use std::sync::atomic::Ordering;
-        let (server, runs) = server_with_labelled_diagnostics(|| false);
+        // Accessibility is off as the cached report says, so the observation
+        // itself never asks for a probe.
+        let (server, runs) = server_with_labelled_diagnostics(|| false, || true);
         server.diagnostics.report(false).await;
 
         // No observation has cached a tree, so the index is stale and the
@@ -9102,7 +9276,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
     #[tokio::test]
     async fn verbose_app_state_always_probes_and_refreshes_the_cache() {
         use std::sync::atomic::Ordering;
-        let (server, runs) = server_with_labelled_diagnostics(|| false);
+        let (server, runs) = server_with_labelled_diagnostics(|| false, || true);
         server.diagnostics.report(false).await;
 
         let verbose = app_state_value(
@@ -9116,12 +9290,21 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             verbose["diagnostics"]["readiness"]["recommended_next_step"],
             "probe run 2"
         );
+
+        let next = app_state_value(&server, serde_json::json!({"include_screenshot": false})).await;
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            next["readiness"]["recommended_next_step"], "probe run 2",
+            "the next call reuses the verbose call's report"
+        );
     }
 
-    #[test]
-    fn app_state_sees_accessibility_switched_off_within_the_ttl() {
+    /// Runs `child` in a process whose busctl and gsettings answer the
+    /// accessibility probes from CUL_A11Y_ENABLED, which starts as true. The
+    /// AT-SPI bus they name has no socket, so every tree read fails.
+    fn run_accessibility_child(child: &str) {
         let dir = std::env::temp_dir().join(format!(
-            "cul-a11y-switch-{}-{}",
+            "cul-a11y-{child}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -9138,8 +9321,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
         }
         let _cleanup = Cleanup(dir.clone());
 
-        // busctl and gsettings answer the accessibility probes from
-        // CUL_A11Y_ENABLED; systemctl keeps session discovery off the desktop.
+        // systemctl keeps session discovery off the desktop.
         for program in ["busctl", "gsettings", "systemctl"] {
             let path = dir.join(program);
             std::fs::write(
@@ -9161,7 +9343,7 @@ esac
         command
             .args([
                 "--exact",
-                "server::tests::accessibility_switched_off_child",
+                &format!("server::tests::{child}"),
                 "--ignored",
                 "--nocapture",
             ])
@@ -9185,18 +9367,18 @@ esac
             "XDG_SESSION_DESKTOP",
             "XDG_CURRENT_DESKTOP",
         ] {
-            command.env(key, "a11y-switch-test");
+            command.env(key, "a11y-child-test");
         }
 
         let output = crate::command_runner::output_blocking_with_timeout(
             &mut command,
-            "accessibility switch child",
+            child,
             Duration::from_secs(15),
         )
         .unwrap();
         assert!(
             String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
-            "accessibility switch child must execute its assertions"
+            "{child} must execute its assertions"
         );
         assert!(
             output.status.success(),
@@ -9206,30 +9388,103 @@ esac
         );
     }
 
+    #[test]
+    fn a_failed_app_state_reports_fresh_readiness_and_the_next_call_probes_again() {
+        run_accessibility_child("failed_app_state_child");
+    }
+
     #[tokio::test]
-    #[ignore = "isolated environment subprocess; invoked by app_state_sees_accessibility_switched_off_within_the_ttl"]
-    async fn accessibility_switched_off_child() {
+    #[ignore = "isolated environment subprocess; invoked by a_failed_app_state_reports_fresh_readiness_and_the_next_call_probes_again"]
+    async fn failed_app_state_child() {
         use std::sync::atomic::Ordering;
         assert_eq!(env::var("CUL_A11Y_CHILD").as_deref(), Ok("1"));
         let (server, runs) = server_with_labelled_diagnostics(
             crate::diagnostics_impl::can_build_accessibility_tree_now,
+            || true,
         );
+        server.diagnostics.report(false).await;
+
+        let state =
+            app_state_value(&server, serde_json::json!({"include_screenshot": false})).await;
+        let error = state["accessibility_error"].as_str().unwrap();
+        assert!(error.contains("failed to connect to AT-SPI bus"), "{error}");
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "the failed call probed once"
+        );
+        assert_eq!(state["readiness"]["recommended_next_step"], "probe run 2");
+        assert!(state["diagnostics"].is_null());
+
+        // Every tree read fails here, so a second call would probe on its
+        // failure either way. Read what its start would read instead.
+        let (_, probed) = server.diagnostics.report_and_probed(false).await;
+        assert!(probed, "the next call probes again to see a recovery");
+    }
+
+    #[test]
+    fn app_state_sees_accessibility_switched_off_and_on_within_the_ttl() {
+        run_accessibility_child("accessibility_switch_child");
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated environment subprocess; invoked by app_state_sees_accessibility_switched_off_and_on_within_the_ttl"]
+    async fn accessibility_switch_child() {
+        use std::sync::atomic::Ordering;
+        assert_eq!(env::var("CUL_A11Y_CHILD").as_deref(), Ok("1"));
+        let (server, runs) = server_with_labelled_diagnostics(
+            crate::diagnostics_impl::can_build_accessibility_tree_now,
+            || true,
+        );
+        let params = serde_json::json!({"include_screenshot": false});
         let cached = server.diagnostics.report(false).await;
         assert!(cached.readiness.can_build_accessibility_tree);
 
         env::set_var("CUL_A11Y_ENABLED", "false");
-        let state =
-            app_state_value(&server, serde_json::json!({"include_screenshot": false})).await;
-        assert_eq!(runs.load(Ordering::SeqCst), 2, "the switch forced a probe");
-        assert_eq!(state["readiness"]["recommended_next_step"], "probe run 2");
-        assert_eq!(state["readiness"]["can_build_accessibility_tree"], false);
+        let off = app_state_value(&server, params.clone()).await;
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "switching off forced a probe"
+        );
+        assert_eq!(off["readiness"]["recommended_next_step"], "probe run 2");
+        assert_eq!(off["readiness"]["can_build_accessibility_tree"], false);
         assert!(
-            state["accessibility_error"]
+            off["accessibility_error"]
                 .as_str()
                 .unwrap()
                 .contains("accessibility is disabled"),
             "{}",
-            state["accessibility_error"]
+            off["accessibility_error"]
+        );
+
+        let still_off = app_state_value(&server, params.clone()).await;
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "a call that finds accessibility off, as cached, keeps the cache"
+        );
+        assert_eq!(
+            still_off["readiness"]["recommended_next_step"],
+            "probe run 2"
+        );
+
+        env::set_var("CUL_A11Y_ENABLED", "true");
+        let on = app_state_value(&server, params).await;
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            3,
+            "switching on forced a probe"
+        );
+        assert_eq!(on["readiness"]["recommended_next_step"], "probe run 3");
+        assert_eq!(on["readiness"]["can_build_accessibility_tree"], true);
+        assert!(
+            !on["accessibility_error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("accessibility is disabled"),
+            "the tree read must run: {}",
+            on["accessibility_error"]
         );
     }
 
@@ -14312,7 +14567,11 @@ echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
     async fn post_action_capture_child() {
         assert_eq!(std::env::var("CUL_POST_ACTION_CHILD").as_deref(), Ok("1"));
         let log_path = std::path::PathBuf::from(std::env::var("CUL_POST_ACTION_LOG").unwrap());
-        let (server, diagnostics_probes) = super::tests::server_with_labelled_diagnostics(|| false);
+        // The fake desktop has a window backend exactly while wmctrl answers.
+        let (server, diagnostics_probes) = super::tests::server_with_labelled_diagnostics(
+            || false,
+            || std::env::var_os("CUL_WMCTRL_STATE").is_some(),
+        );
         server.diagnostics.report(false).await;
 
         // 1. Successful click + post-action JPEG screenshot.
@@ -14588,6 +14847,56 @@ echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
         assert!(
             probed,
             "a failed geometry re-query makes the next readiness read probe again"
+        );
+
+        // 8. A get_app_state whose window lookup fails reports readiness from a
+        // probe it ran itself, that report carries the call's own screenshot
+        // result, and the next call probes again. The raw capture succeeds
+        // before the unresolved target refuses the crop.
+        server.diagnostics.report(false).await;
+        let probes = diagnostics_probes.load(Ordering::SeqCst);
+        let state =
+            super::tests::app_state_value(&server, serde_json::json!({"window_id": 7})).await;
+        assert!(state["window_error"].is_string(), "{state}");
+        assert_eq!(
+            state["readiness"]["recommended_next_step"],
+            format!("probe run {}", probes + 1)
+        );
+        assert_eq!(state["readiness"]["screenshot_capture_status"], "verified");
+        let next = super::tests::app_state_value(
+            &server,
+            serde_json::json!({"include_screenshot": false}),
+        )
+        .await;
+        assert_eq!(
+            next["readiness"]["recommended_next_step"],
+            format!("probe run {}", probes + 2),
+            "the call after a failed one probes again"
+        );
+
+        // 9. A get_app_state that resolves a window the cached report says no
+        // backend can list reports refreshed readiness, and the next call
+        // reuses that report.
+        let cached = server.diagnostics.report(false).await;
+        assert!(!cached.readiness.can_query_windows);
+        std::fs::write(&wmctrl_state, "").unwrap();
+        std::env::set_var("CUL_WMCTRL_STATE", &wmctrl_state);
+        let probes = diagnostics_probes.load(Ordering::SeqCst);
+        let window_7 = serde_json::json!({"window_id": 7, "include_screenshot": false});
+        let state = super::tests::app_state_value(&server, window_7.clone()).await;
+        assert_eq!(state["window_context"]["window_id"], 7, "{state}");
+        assert_eq!(state["readiness"]["can_query_windows"], true, "{state}");
+        assert_eq!(
+            state["readiness"]["recommended_next_step"],
+            format!("probe run {}", probes + 1)
+        );
+        let next = super::tests::app_state_value(&server, window_7).await;
+        std::env::remove_var("CUL_WMCTRL_STATE");
+        assert_eq!(next["window_context"]["window_id"], 7, "{next}");
+        assert_eq!(
+            next["readiness"]["recommended_next_step"],
+            format!("probe run {}", probes + 1),
+            "the refreshed report already shows the window backend"
         );
 
         // The fake display cannot monitor XKB. Preserve xdotool compatibility
