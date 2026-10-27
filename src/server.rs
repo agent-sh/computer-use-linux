@@ -23,8 +23,8 @@ use crate::windowing::backends::kwin::{
 };
 use crate::windowing::registry;
 use crate::windows::{
-    focus_window_target, focused_window, list_windows, resolve_window_target,
-    window_permission_hint, WindowFocusResult, WindowInfo, WindowTarget,
+    focus_window_target, focused_window, focused_window_with_backend, list_windows,
+    resolve_window_target, window_permission_hint, WindowFocusResult, WindowInfo, WindowTarget,
     GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND, KWIN_BACKEND,
     UNAVAILABLE_BACKEND,
 };
@@ -321,9 +321,8 @@ impl ComputerUseLinux {
         )
     )]
     async fn focused_window(&self) -> Json<FocusedWindowOutput> {
-        match focused_window().await {
-            Ok(window) => {
-                let backend = window_backend(window.as_ref().into_iter());
+        match focused_window_with_backend().await {
+            Ok((backend, window)) => {
                 Json(FocusedWindowOutput {
                     backend,
                     focused_window: window,
