@@ -97,7 +97,7 @@ pub(crate) async fn run_from_env() -> Result<()> {
                     let backend = windows
                         .first()
                         .map(|window| window.backend.as_str())
-                        .unwrap_or(windows::GNOME_SHELL_INTROSPECT_BACKEND);
+                        .unwrap_or(windows::UNAVAILABLE_BACKEND);
                     serde_json::json!({
                         "backend": backend,
                         "windows": windows,
@@ -108,7 +108,7 @@ pub(crate) async fn run_from_env() -> Result<()> {
                 Err(error) => {
                     let error = format!("{error:#}");
                     serde_json::json!({
-                        "backend": "unavailable",
+                        "backend": windows::UNAVAILABLE_BACKEND,
                         "windows": [],
                         "error": error,
                         "permissions_hint": windows::window_permission_hint(&error),

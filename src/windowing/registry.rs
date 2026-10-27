@@ -10,6 +10,9 @@ pub use kwin::KWIN_BACKEND;
 pub use niri::NIRI_BACKEND;
 pub use x11::X11_BACKEND;
 
+/// Reported when no window backend answered, so no backend can be named.
+pub const UNAVAILABLE_BACKEND: &str = "unavailable";
+
 pub const WINDOW_PERMISSION_HINT: &str = "Computer Use could not access a supported window list backend. Targeted window input requires session-bus access plus GNOME Shell Introspect, the computer-use-linux GNOME Shell extension, the COSMIC Wayland helper, KWin/Plasma DBus scripting, Hyprland hyprctl, the niri IPC socket, or i3-msg. On GNOME, run setup_window_targeting to install the extension backend.";
 
 #[derive(Debug, Clone, Copy)]

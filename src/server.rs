@@ -26,6 +26,7 @@ use crate::windows::{
     focus_window_target, focused_window, list_windows, resolve_window_target,
     window_permission_hint, WindowFocusResult, WindowInfo, WindowTarget,
     GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND, KWIN_BACKEND,
+    UNAVAILABLE_BACKEND,
 };
 use crate::ydotool;
 use anyhow::{Context, Result};
@@ -336,7 +337,7 @@ impl ComputerUseLinux {
             Err(error) => {
                 let error = format!("{error:#}");
                 Json(FocusedWindowOutput {
-                    backend: GNOME_SHELL_INTROSPECT_BACKEND.to_string(),
+                    backend: UNAVAILABLE_BACKEND.to_string(),
                     focused_window: None,
                     permissions_hint: window_permission_hint(&error),
                     error: Some(error),
@@ -393,7 +394,7 @@ impl ComputerUseLinux {
                 Json(ActivateWindowOutput {
                     ok: false,
                     implemented: true,
-                    backend: GNOME_SHELL_INTROSPECT_BACKEND.to_string(),
+                    backend: UNAVAILABLE_BACKEND.to_string(),
                     focus: None,
                     permissions_hint: window_permission_hint(&error),
                     error: Some(error),
@@ -6896,7 +6897,7 @@ async fn window_list_output() -> ListWindowsOutput {
         Err(error) => {
             let error = format!("{error:#}");
             ListWindowsOutput {
-                backend: GNOME_SHELL_INTROSPECT_BACKEND.to_string(),
+                backend: UNAVAILABLE_BACKEND.to_string(),
                 windows: Vec::new(),
                 permissions_hint: window_permission_hint(&error),
                 error: Some(error),
@@ -6911,7 +6912,7 @@ fn window_backend<'a>(windows: impl Iterator<Item = &'a WindowInfo>) -> String {
     windows
         .map(|window| window.backend.clone())
         .next()
-        .unwrap_or_else(|| GNOME_SHELL_INTROSPECT_BACKEND.to_string())
+        .unwrap_or_else(|| UNAVAILABLE_BACKEND.to_string())
 }
 
 fn absolute_mousemove_args(x: i32, y: i32) -> Vec<String> {
@@ -8214,7 +8215,7 @@ fn looks_like_desktop_app(name: &str, command: &str) -> bool {
 mod tests {
     use super::*;
     use crate::atspi_tree::{AccessibilityAction, Bounds};
-    use crate::windows::{WindowBounds, GNOME_SHELL_EXTENSION_BACKEND};
+    use crate::windows::{WindowBounds, GNOME_SHELL_EXTENSION_BACKEND, NIRI_BACKEND};
     use std::os::unix::fs::PermissionsExt;
 
     /// Restores an environment variable when a test ends, including on panic.
@@ -9181,6 +9182,14 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             backend: GNOME_SHELL_EXTENSION_BACKEND.to_string(),
             terminal: None,
         }
+    }
+
+    #[test]
+    fn window_backend_names_the_backend_that_answered() {
+        let mut window = window_info(1, Some("Editor"), None, None, None);
+        window.backend = NIRI_BACKEND.to_string();
+        assert_eq!(window_backend(std::iter::once(&window)), NIRI_BACKEND);
+        assert_eq!(window_backend(std::iter::empty()), UNAVAILABLE_BACKEND);
     }
 
     #[test]
