@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.30] - 2026-10-28
+
 ### Changed
 
 - Return from short commands as soon as they finish, instead of polling their output every 10 ms. On KDE Plasma, `doctor` takes about 43 ms instead of 221 ms, and a `get_app_state` call that reuses cached diagnostics takes about 50 ms less.
+
+Thanks @ofek29 for the performance improvement and regression coverage ([#308](https://github.com/agent-sh/computer-use-linux/pull/308)).
 
 ## [0.7.29] - 2026-10-27
 
@@ -921,7 +925,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.29...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.30...HEAD
+[0.7.30]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.29...v0.7.30
 [0.7.29]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.28...v0.7.29
 [0.7.28]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.27...v0.7.28
 [0.7.27]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.26...v0.7.27
