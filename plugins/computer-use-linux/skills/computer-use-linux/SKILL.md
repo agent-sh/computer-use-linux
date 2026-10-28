@@ -215,7 +215,7 @@ directly to a window-relative click.
 - When ydotool is selected, `ydotoold` should run as a per-user service with its socket under `/run/user/$UID`, not as a system-wide service.
 - The optional ydotool backend requires version 1.0.3 or newer; `doctor` rejects older or semantically incompatible CLIs even when `ydotoold` is running.
 - On COSMIC, the standard npm, Cargo, and install-script paths install the `computer-use-linux-cosmic` helper automatically. Manual binary installs must copy it too. COSMIC coordinate input uses per-monitor RemoteDesktop portal streams; approve its consent dialog. Window bounds support targeted screenshots and relative input. PID is optional because the protocol does not expose it.
-- Portal keyboard input preserves the receiving window or app target before consent and verifies its focus again afterward. Untargeted portal typing and key chords require working window introspection; a failed focus check sends no input.
+- Portal keyboard input preserves the receiving window or app target before consent and verifies its focus again afterward. Untargeted portal typing and key chords require working window introspection; a failed focus check sends no input. GNOME Introspect can only verify current app focus; use the Shell extension to activate windows.
 - An on-screen indicator shows the user each action: a cursor glides to pointer targets and keycaps or typed text appear for keyboard input. Pointer actions wait about 350 ms so the cursor lands first. The indicator is hidden before screenshots and is never part of captured images.
 
 ## Verification

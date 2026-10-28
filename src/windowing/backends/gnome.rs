@@ -51,17 +51,11 @@ pub fn probe_introspect() -> BackendProbe {
         "org.gnome.Shell.Introspect.GetWindows",
         &[],
     );
-    let focus_apps = gdbus_introspect_contains(
-        "org.gnome.Shell",
-        "/org/gnome/Shell",
-        "org.gnome.Shell",
-        "FocusApp",
-    );
     BackendProbe {
         id: GNOME_SHELL_INTROSPECT_BACKEND,
         ok: list.ok,
         can_list_windows: list.ok,
-        can_focus_apps: focus_apps.ok,
+        can_focus_apps: false,
         can_focus_windows: false,
         detail: list.detail,
     }
@@ -105,25 +99,6 @@ pub async fn list_extension_windows() -> Result<Vec<WindowInfo>> {
     windows.sort_by_key(|window| window.window_id);
     enrich_terminal_windows(&mut windows);
     Ok(windows)
-}
-
-pub(crate) async fn focus_app(app_id: &str) -> Result<()> {
-    let connection = zbus::Connection::session()
-        .await
-        .context("failed to connect to session bus")?;
-    let proxy = Proxy::new(
-        &connection,
-        "org.gnome.Shell",
-        "/org/gnome/Shell",
-        "org.gnome.Shell",
-    )
-    .await
-    .context("failed to create GNOME Shell proxy")?;
-    let _: () = proxy
-        .call("FocusApp", &(app_id))
-        .await
-        .with_context(|| format!("GNOME Shell FocusApp failed for app_id {app_id}"))?;
-    Ok(())
 }
 
 async fn call_extension_json(method: &str) -> Result<String> {
@@ -403,38 +378,6 @@ fn gdbus_call_check(
     ]);
     command.args(args);
     run_probe_command(command)
-}
-
-fn gdbus_introspect_contains(
-    destination: &str,
-    object_path: &str,
-    interface: &str,
-    member: &str,
-) -> ProbeCheck {
-    let check = run_probe_command({
-        let mut command = Command::new("gdbus");
-        command.args([
-            "introspect",
-            "--session",
-            "--dest",
-            destination,
-            "--object-path",
-            object_path,
-        ]);
-        command
-    });
-    if !check.ok {
-        return check;
-    }
-    let needle = format!("{interface}.{member}");
-    ProbeCheck {
-        ok: check.detail.contains(&needle) || check.detail.contains(member),
-        detail: if check.detail.contains(&needle) || check.detail.contains(member) {
-            format!("{interface}.{member} is present")
-        } else {
-            format!("{interface}.{member} not found")
-        },
-    }
 }
 
 fn run_probe_command(mut command: Command) -> ProbeCheck {

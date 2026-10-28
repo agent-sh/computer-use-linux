@@ -252,19 +252,9 @@ async fn list_windows_for(backend: BackendKind) -> Result<Vec<WindowInfo>> {
 pub async fn activate_window(window: &WindowInfo) -> Result<()> {
     match window.backend.as_str() {
         GNOME_SHELL_EXTENSION_BACKEND => gnome::activate_extension_window(window.window_id).await,
-        GNOME_SHELL_INTROSPECT_BACKEND => {
-            let app_id = window
-                .app_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    anyhow!(
-                        "GNOME Shell can only focus by app_id; the matched window has no app_id"
-                    )
-                })?;
-            gnome::focus_app(app_id).await
-        }
+        GNOME_SHELL_INTROSPECT_BACKEND => Err(anyhow!(
+            "GNOME Introspect cannot activate windows. Focus the app manually or install the GNOME Shell extension."
+        )),
         COSMIC_WAYLAND_BACKEND => cosmic::activate_window(window.window_id).await,
         KWIN_BACKEND => kwin::activate_window(window.window_id).await,
         HYPRLAND_BACKEND => hyprland::activate_window(window.window_id).await,

@@ -92,6 +92,7 @@ def run_private(directory):
     helper.chmod(0o700)
     log = []
     introspect = False
+    overview = False
     connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     connection.call_sync('org.freedesktop.DBus', '/org/freedesktop/DBus',
                          'org.freedesktop.DBus', 'RequestName',
@@ -110,7 +111,8 @@ def run_private(directory):
         if name == 'CreateSession':
             results['session_handle'] = GLib.Variant('s', '/org/freedesktop/portal/desktop/session/fixture/session')
         if name == 'Start':
-            state.write_text('2')  # Simulate consent landing on the other monitor.
+            if os.environ.get('CUL_TEST_KEEP_FOCUS') != '1':
+                state.write_text('2')  # Simulate consent landing on the other monitor.
             if os.environ.get('CUL_TEST_DENY_FOCUS') == '1':
                 refuse.touch()
             results['devices'] = GLib.Variant('u', 3)
@@ -131,9 +133,10 @@ def run_private(directory):
                          GLib.Variant('(su)', ('org.gnome.Shell', 0)),
                          None, Gio.DBusCallFlags.NONE, 5000, None)
     def gnome_method(conn, sender, path, interface, name, parameters, invocation):
+        nonlocal overview
         if name == 'FocusApp':
-            if not refuse.exists():
-                state.write_text('1')
+            overview = True
+            log.append(('FocusApp', 'overview', ()))
             invocation.return_value(None)
         else:
             windows = {}
@@ -141,7 +144,7 @@ def run_private(directory):
                 for i in (1, 2):
                     windows[i] = {'title': GLib.Variant('s', 'Editor' if i == 1 else 'Other'),
                         'app-id': GLib.Variant('s', 'fixture.editor' if i == 1 else 'fixture.other'),
-                        'has-focus': GLib.Variant('b', state.read_text() == str(i)),
+                        'has-focus': GLib.Variant('b', not overview and state.read_text() == str(i)),
                         'x': GLib.Variant('i', 2660), 'y': GLib.Variant('i', 440),
                         'width': GLib.Variant('u', 800), 'height': GLib.Variant('u', 600)}
             invocation.return_value(GLib.Variant('(a{ta{sv}})', (windows,)))
@@ -198,13 +201,17 @@ def run_private(directory):
                      ('scroll', {'x': 3820, 'y': 710, 'direction': 'down', 'window_id': 1}, True),
                      ('click', {'x': 10, 'y': 20, 'relative': True, 'window_id': 1}, False),
                      ('drag', {'start_x': 100, 'start_y': 100, 'end_x': 3820, 'end_y': 710}, False),
-                     ('type_text', {'text': 'implicit app focus', '_introspect': True}, False),
-                     ('type_text', {'text': 'app focus', 'app_id': 'fixture.editor', '_introspect': True}, False),
-                     ('press_key', {'key': 'Enter', '_introspect': True}, False),
-                     ('click', {'x': 3820, 'y': 710, 'app_id': 'fixture.editor', '_introspect': True}, False),
-                     ('scroll', {'x': 3820, 'y': 710, 'direction': 'down', 'app_id': 'fixture.editor', '_introspect': True}, False)]
+                     ('type_text', {'text': 'implicit app focus', '_introspect': True, '_keep_focus': True}, False),
+                     ('type_text', {'text': 'app focus', 'app_id': 'fixture.editor', '_introspect': True, '_keep_focus': True}, False),
+                     ('press_key', {'key': 'Enter', '_introspect': True, '_keep_focus': True}, False),
+                     ('click', {'x': 3820, 'y': 710, 'app_id': 'fixture.editor', '_introspect': True, '_keep_focus': True}, False),
+                     ('scroll', {'x': 3820, 'y': 710, 'direction': 'down', 'app_id': 'fixture.editor', '_introspect': True, '_keep_focus': True}, False),
+                     ('type_text', {'text': 'changed focus', '_introspect': True}, 'changed'),
+                     ('press_key', {'key': 'Enter', '_introspect': True}, 'changed')]
         for name, arguments, denied in scenarios:
             introspect = arguments.pop('_introspect', False)
+            overview = False
+            os.environ['CUL_TEST_KEEP_FOCUS'] = '1' if arguments.pop('_keep_focus', False) else '0'
             env['CUL_TEST_INTROSPECT'] = '1' if introspect else '0'
             state.write_text('1')
             refuse.unlink(missing_ok=True)
