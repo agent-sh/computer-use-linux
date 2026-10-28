@@ -391,6 +391,7 @@ dependencies = [
  "image",
  "libc",
  "mimalloc",
+ "reis",
  "rmcp",
  "schemars",
  "serde",
@@ -1222,6 +1223,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "reis"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b967ec6489a42067a20724f11987bb96178ea796873cbe1afd25fb93ee6f85f"
+dependencies = [
+ "enumflags2",
+ "futures-util",
+ "log",
+ "rustix",
+ "tokio",
 ]
 
 [[package]]

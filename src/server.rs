@@ -841,7 +841,8 @@ impl ComputerUseLinux {
     /// used by click/scroll/drag, independently of logical monitor scaling.
     /// Explicit backend overrides skip this device, including a cached one.
     async fn ensure_abs_pointer(&self) -> bool {
-        if env_flag_enabled("CU_DISABLE_ABS_POINTER")
+        if self.is_cosmic_wayland_session()
+            || env_flag_enabled("CU_DISABLE_ABS_POINTER")
             || env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER")
             || (env_flag_enabled("COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER")
                 && self.is_wayland_session())
@@ -881,7 +882,8 @@ impl ComputerUseLinux {
         width: u32,
         height: u32,
     ) -> std::result::Result<bool, String> {
-        if env_flag_enabled("CU_DISABLE_ABS_POINTER")
+        if self.is_cosmic_wayland_session()
+            || env_flag_enabled("CU_DISABLE_ABS_POINTER")
             || env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER")
             || (env_flag_enabled("COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER")
                 && self.is_wayland_session())
@@ -994,7 +996,7 @@ impl ComputerUseLinux {
         }
         // Raise the target window first (if specified) so the click lands on the
         // intended app rather than whatever is stacked on top at that pixel.
-        let window_target = params.window_target();
+        let mut window_target = params.window_target();
         if params.relative == Some(true) && window_target.is_none() {
             return Json(ActionOutput {
                 ok: false,
@@ -1004,8 +1006,8 @@ impl ComputerUseLinux {
                 received,
             });
         }
-        if let Some(target) = window_target {
-            let focus = match self.focus_target_for_input(&target).await {
+        if let Some(target) = window_target.as_ref() {
+            let focus = match self.focus_target_for_input(target).await {
                 Ok(focus) => focus,
                 Err(message) => {
                     return Json(ActionOutput {
@@ -1060,6 +1062,9 @@ impl ComputerUseLinux {
                     .x
                     .zip(params.y)
                     .and_then(|(x, y)| coordinate_map.portal_point(x, y));
+            }
+            if let Some(focus) = focus.as_ref() {
+                window_target = Some(portal_focus_target(target, &focus.requested_window));
             }
             input_focus = focus;
         }
@@ -1283,6 +1288,11 @@ impl ComputerUseLinux {
         } else if self.should_prefer_portal_pointer_backend().await {
             match self.ensure_portal_pointer_session().await {
                 Ok(Some(session)) => {
+                    if let Some(target) = window_target.as_ref() {
+                        if let Err(message) = self.focus_target_for_input(target).await {
+                            return Json(action_result("click", Err(message), received));
+                        }
+                    }
                     let Some((portal_x, portal_y)) =
                         portal_target_point.or_else(|| self.logical_portal_point(&session, x, y))
                     else {
@@ -1526,7 +1536,7 @@ impl ComputerUseLinux {
         let mut target_pid = params.pid;
         // Raise/focus the target window first (parity with click) so wheel
         // events land on the intended app.
-        let window_target = params.window_target();
+        let mut window_target = params.window_target();
         if params.relative == Some(true) && window_target.is_none() {
             return Json(ActionOutput {
                 ok: false,
@@ -1536,8 +1546,8 @@ impl ComputerUseLinux {
                 received,
             });
         }
-        if let Some(target) = window_target {
-            let focus = match self.focus_target_for_input(&target).await {
+        if let Some(target) = window_target.as_ref() {
+            let focus = match self.focus_target_for_input(target).await {
                 Ok(focus) => focus,
                 Err(message) => {
                     return Json(ActionOutput {
@@ -1633,6 +1643,9 @@ impl ComputerUseLinux {
                     .x
                     .zip(params.y)
                     .and_then(|(x, y)| coordinate_map.portal_point(x, y));
+            }
+            if let Some(focus) = focus.as_ref() {
+                window_target = Some(portal_focus_target(target, &focus.requested_window));
             }
         }
         if params.x.is_none() && params.y.is_none() {
@@ -1756,6 +1769,11 @@ impl ComputerUseLinux {
         } else if self.should_prefer_portal_pointer_backend().await {
             match self.ensure_portal_pointer_session().await {
                 Ok(Some(session)) => {
+                    if let Some(target) = window_target.as_ref() {
+                        if let Err(message) = self.focus_target_for_input(target).await {
+                            return Json(action_result("scroll", Err(message), received));
+                        }
+                    }
                     let mapped_target = match (portal_target_point, target_point) {
                         (Some(point), _) => Some(Some(point)),
                         (None, Some((x, y))) => self.logical_portal_point(&session, x, y).map(Some),
@@ -2032,8 +2050,28 @@ impl ComputerUseLinux {
         let secret = self.typing_into_secret(focus.as_ref()).await;
         self.indicator.keys(&params.key, secret).await;
         if self.should_prefer_portal_keyboard_for_chords().await {
+            let portal_target = match self
+                .portal_keyboard_target(&params.window_target(), focus.as_ref())
+                .await
+            {
+                Ok(target) => target,
+                Err(error) => {
+                    return Json(action_result_with_focus(
+                        "press_key",
+                        Err(format!("{error:#}")),
+                        received,
+                        focus,
+                    ))
+                }
+            };
             match self.ensure_portal_keyboard_session().await {
                 Ok(Some(session)) => {
+                    let focus = match self.focus_target_for_input(&portal_target).await {
+                        Ok(focus) => focus,
+                        Err(message) => {
+                            return Json(action_result("press_key", Err(message), received))
+                        }
+                    };
                     // KDE keeps physical keycodes: its keysym path is untested
                     // here, and #191 was reported against mutter.
                     let (modifiers, key) = portal_key_chord(&params.key)
@@ -2070,7 +2108,7 @@ impl ComputerUseLinux {
                     }
                 }
                 Ok(None) => {}
-                Err(_) => {}
+                Err(error) => return Json(portal_start_error("press_key", error, received)),
             }
         }
         let Some(key_events) = key_sequence(&params.key) else {
@@ -2226,23 +2264,27 @@ impl ComputerUseLinux {
         }
         self.indicator.text("type_text", &params.text, secret).await;
         if self.should_prefer_kde_clipboard_text_backend() {
+            let portal_target = match self
+                .portal_keyboard_target(&window_target, focus.as_ref())
+                .await
+            {
+                Ok(target) => target,
+                Err(error) => {
+                    return Json(action_result_with_focus(
+                        "type_text",
+                        Err(format!("{error:#}")),
+                        received,
+                        focus,
+                    ))
+                }
+            };
             match self.ensure_portal_keyboard_session().await {
                 Ok(Some(session)) => {
-                    let kde_focus = if window_target.has_target() {
-                        match self.focus_target_for_input(&window_target).await {
-                            Ok(focus) => focus,
-                            Err(message) => {
-                                return Json(ActionOutput {
-                                    ok: false,
-                                    implemented: true,
-                                    action: "type_text".to_string(),
-                                    message,
-                                    received,
-                                });
-                            }
+                    let kde_focus = match self.focus_target_for_input(&portal_target).await {
+                        Ok(focus) => focus,
+                        Err(message) => {
+                            return Json(action_result("type_text", Err(message), received))
                         }
-                    } else {
-                        focus.clone()
                     };
                     let paste_shortcut =
                         kde_clipboard_paste_shortcut(&window_target, kde_focus.as_ref()).await;
@@ -2277,11 +2319,16 @@ impl ComputerUseLinux {
                     }
                 }
                 Ok(None) => {}
-                Err(_) => {}
+                Err(error) => return Json(portal_start_error("type_text", error, received)),
             }
         }
         if self.should_prefer_portal_text_backend() {
+            let mut focus = focus;
             let result = async {
+                let portal_target = self
+                    .portal_keyboard_target(&window_target, focus.as_ref())
+                    .await
+                    .map_err(|error| format!("{error:#}"))?;
                 let keysyms = keysyms_for_text(&params.text)
                     .map_err(|error| format!("Literal text was not sent: {error:#}"))?;
                 if self.is_gnome_wayland_session() {
@@ -2296,6 +2343,7 @@ impl ComputerUseLinux {
                     .ok_or_else(|| {
                         "Portal keyboard input is unavailable; no text was sent.".to_string()
                     })?;
+                focus = self.focus_target_for_input(&portal_target).await?;
                 type_text_with_keysyms(&session, &keysyms)
                     .await
                     .map_err(|error| {
@@ -3903,6 +3951,11 @@ impl ComputerUseLinux {
         if env_flag_enabled("COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER") {
             return self.is_wayland_session();
         }
+        // COSMIC maps uinput absolute axes to the active output, not the
+        // desktop bounding box. Portal streams address each output directly.
+        if self.is_cosmic_wayland_session() {
+            return true;
+        }
         should_prefer_portal_backend_by_default(
             self.is_wayland_session(),
             ydotool_backend_available().await,
@@ -4009,6 +4062,13 @@ impl ComputerUseLinux {
         )
     }
 
+    fn is_cosmic_wayland_session(&self) -> bool {
+        self.is_wayland_session()
+            && (env_contains("XDG_CURRENT_DESKTOP", "cosmic")
+                || env_contains("XDG_SESSION_DESKTOP", "cosmic")
+                || env_contains("DESKTOP_SESSION", "cosmic"))
+    }
+
     fn is_gnome_wayland_session(&self) -> bool {
         self.is_wayland_session()
             && (env_contains("XDG_CURRENT_DESKTOP", "gnome")
@@ -4079,10 +4139,37 @@ impl ComputerUseLinux {
         }
 
         let session = start_portal_pointer_session().await?;
+        self.capture_space_rect().await;
         if let Ok(mut cached) = self.portal_pointer_session.lock() {
             *cached = Some(session.clone());
         }
         Ok(Some(session))
+    }
+
+    async fn portal_keyboard_target(
+        &self,
+        target: &WindowTarget,
+        focus: Option<&WindowFocusResult>,
+    ) -> Result<WindowTarget> {
+        // Preserve the receiving target across consent. Pin the selected
+        // window when its backend supports exact focus; otherwise keep app focus.
+        if let Some(focus) = focus {
+            return Ok(portal_focus_target(target, &focus.requested_window));
+        }
+        if target.has_target() {
+            anyhow::bail!(
+                "Portal keyboard input requires verified target-window focus. No input was sent."
+            );
+        }
+        let window = focused_window().await?
+            .context("Portal keyboard input requires a focused window before consent; pass a window target. No input was sent.")?;
+        let target = portal_focus_target(target, &window);
+        if !target.has_target() {
+            anyhow::bail!(
+                "Portal keyboard input could not preserve the receiving app. No input was sent."
+            );
+        }
+        Ok(target)
     }
 
     async fn ensure_portal_keyboard_session(&self) -> Result<Option<PortalKeyboardSession>> {
@@ -4652,6 +4739,14 @@ impl ComputerUseLinux {
                         .map(|monitor| (monitor.x, monitor.y, monitor.width, monitor.height))
                         .collect()
                 })
+        } else if window.backend == crate::windowing::backends::cosmic::COSMIC_WAYLAND_BACKEND {
+            Some(
+                crate::cosmic_helper::monitor_layout()
+                    .await?
+                    .into_iter()
+                    .map(|monitor| (monitor.x, monitor.y, monitor.width, monitor.height))
+                    .collect(),
+            )
         } else if window.backend == KWIN_BACKEND {
             Some(vec![
                 crate::windowing::backends::kwin::logical_desktop_rect()
@@ -4689,7 +4784,10 @@ impl ComputerUseLinux {
             .unwrap_or(&focus.requested_window);
         if !matches!(
             window.backend.as_str(),
-            GNOME_SHELL_EXTENSION_BACKEND | GNOME_SHELL_INTROSPECT_BACKEND | KWIN_BACKEND
+            GNOME_SHELL_EXTENSION_BACKEND
+                | GNOME_SHELL_INTROSPECT_BACKEND
+                | KWIN_BACKEND
+                | crate::windowing::backends::cosmic::COSMIC_WAYLAND_BACKEND
         ) {
             let full_capture_rect = window
                 .bounds
@@ -7071,6 +7169,24 @@ fn abs_pointer_clamp_note(landing: crate::abs_pointer::PointerLanding) -> Option
             landing.requested.0, landing.requested.1, landing.emitted.0, landing.emitted.1
         )
     })
+}
+
+fn portal_focus_target(target: &WindowTarget, window: &WindowInfo) -> WindowTarget {
+    if registry::backend_can_exact_focus(&window.backend) {
+        WindowTarget {
+            window_id: Some(window.window_id),
+            ..Default::default()
+        }
+    } else if target.has_target() {
+        // GNOME Introspect can activate an app, but cannot activate a specific
+        // window. Preserve the caller's app-level focus contract there.
+        target.clone()
+    } else {
+        WindowTarget {
+            app_id: window.app_id.clone(),
+            ..Default::default()
+        }
+    }
 }
 
 fn focus_satisfies_target(focus: &WindowFocusResult, target: &WindowTarget) -> bool {

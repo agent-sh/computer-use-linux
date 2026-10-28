@@ -17,6 +17,7 @@ import time
 import unittest
 
 BINARY = str(Path(sys.argv.pop(1)).resolve())
+OUTPUT = 0xFE000001
 FOREIGN = 0xFF000000
 HEAD = FOREIGN + 1
 MODE = FOREIGN + 2
@@ -43,14 +44,14 @@ def window_id():
     value = 0xCBF29CE484222325
     for byte in b"fixture-window":
         value = ((value ^ byte) * 0x100000001B3) & ((1 << 64) - 1)
-    return value
+    return max(1, value & ((1 << 53) - 1))
 
 
 class Peer:
     """Minimal server for the interfaces the helper uses; never touches a desktop."""
 
     def __init__(self, connection, *, state_delay=0.1, focused=True,
-                 activation_delay=0.1, close=False, output_delay=None, windows=True):
+                 activation_delay=0.1, close=False, output_delay=None, windows=True, geometry=False, geometry_delay=0):
         self.connection = connection
         self.state_delay = state_delay
         self.focused = focused
@@ -58,6 +59,10 @@ class Peer:
         self.close = close
         self.windows = windows
         self.output_delay = output_delay
+        self.geometry = geometry
+        self.geometry_delay = geometry_delay
+        self.output_id = None
+        self.info_id = None
         self.objects = {1: "wl_display"}
         self.pending = []
         self.sequence = 0
@@ -68,6 +73,8 @@ class Peer:
             ("ext_foreign_toplevel_list_v1", 1),
             ("wl_seat", 1),
         ]
+        if geometry:
+            self.globals.extend([("zxdg_output_manager_v1", 3), ("wl_output", 4)])
         if output_delay is not None:
             self.globals.append(("zwlr_output_manager_v1", 4))
 
@@ -91,7 +98,11 @@ class Peer:
             version, new_id = struct.unpack("=II", payload[-8:])
             iface, _ = self.globals[name - 1]
             self.objects[new_id] = iface
-            if iface == "zcosmic_toplevel_manager_v1":
+            if iface == "zcosmic_toplevel_info_v1":
+                self.info_id = new_id
+            elif iface == "wl_output":
+                self.output_id = new_id
+            elif iface == "zcosmic_toplevel_manager_v1":
                 self.send(event(new_id, 0, array(2)))
             elif iface == "ext_foreign_toplevel_list_v1" and self.windows:
                 self.send(event(new_id, 0, uint(FOREIGN)))
@@ -109,6 +120,13 @@ class Peer:
                                  (6, uint(0, 0)), (7, uint(0)), (8, uint(256))]:
                     self.send(event(HEAD, op, data), delay)
                 self.send(event(new_id, 1, uint(1)), delay)
+        elif interface == "zxdg_output_manager_v1" and opcode == 1:
+            new_id, output_id = struct.unpack("=II", payload)
+            self.objects[new_id] = "zxdg_output_v1"
+            # Right display, with vertical offset. Geometry is output-relative.
+            self.send(event(new_id, 0, uint(2560, 390)), self.geometry_delay)
+            self.send(event(new_id, 1, uint(1680, 1050)), self.geometry_delay)
+            self.send(event(output_id, 2), self.geometry_delay)
         elif interface == "zcosmic_toplevel_info_v1" and opcode == 1:
             new_id, _ = struct.unpack("=II", payload)
             self.objects[new_id] = "zcosmic_toplevel_handle_v1"
@@ -117,7 +135,10 @@ class Peer:
             elif self.state_delay is not None:
                 states = array(2) if self.focused else array()
                 self.send(event(new_id, 8, states), self.state_delay)
-                self.send(event(FOREIGN, 1), self.state_delay)
+                if self.geometry and self.output_id:
+                    self.send(event(new_id, 9, uint(self.output_id, 100, 50, 800, 600)), self.state_delay + 0.03)
+                self.send(event(self.info_id, 2), self.state_delay + 0.03)
+                self.send(event(FOREIGN, 1), self.state_delay + 0.03)
         elif interface == "zcosmic_toplevel_manager_v1" and opcode == 2:
             target, _ = struct.unpack("=II", payload)
             if self.activation_delay is not None:
@@ -190,6 +211,26 @@ class FocusTests(unittest.TestCase):
         code, output, error = self.run_helper(["focused-window"])
         self.assertEqual(code, 0, error)
         self.assertTrue(json.loads(output)["focused"])
+
+    def test_window_ids_survive_json_double_roundtrip(self):
+        code, output, error = self.run_helper(["list-windows"])
+        self.assertEqual(code, 0, error)
+        value = json.loads(output)[0]["window_id"]
+        self.assertLessEqual(value, (1 << 53) - 1)
+        self.assertEqual(int(float(value)), value)
+
+    def test_window_geometry_uses_output_logical_origin(self):
+        code, output, error = self.run_helper(["list-windows"], geometry=True)
+        self.assertEqual(code, 0, error)
+        self.assertEqual(json.loads(output)[0]["bounds"],
+                         {"x": 2660, "y": 440, "width": 800, "height": 600})
+
+    def test_geometry_waits_for_independent_output_snapshot(self):
+        code, output, error = self.run_helper(["list-windows"], geometry=True,
+                                              state_delay=0.01, geometry_delay=0.3)
+        self.assertEqual(code, 0, error)
+        self.assertEqual(json.loads(output)[0]["bounds"],
+                         {"x": 2660, "y": 440, "width": 800, "height": 600})
 
     def test_empty_desktop_is_a_valid_snapshot(self):
         code, output, error = self.run_helper(["list-windows"], windows=False)

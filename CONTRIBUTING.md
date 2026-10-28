@@ -46,6 +46,15 @@ cargo publish --dry-run --locked
 npm pack --dry-run
 ```
 
+The COSMIC protocol and portal regressions use private fixture peers and send no
+input to the host desktop. The portal fixture needs PyGObject (`python3-gi`) and
+`dbus-run-session`:
+
+```bash
+python3 scripts/cosmic_focus_test.py "$CARGO_TARGET_DIR/debug/computer-use-linux-cosmic"
+/usr/bin/python3 scripts/cosmic_input_test.py "$CARGO_TARGET_DIR/debug/computer-use-linux"
+```
+
 ## PR Guidelines
 
 - Keep changes focused and explain the desktop/session you tested on.

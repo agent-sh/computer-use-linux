@@ -1,4 +1,8 @@
-use crate::{command_runner, diagnostics::hydrate_session_bus_env};
+use crate::{
+    command_runner,
+    diagnostics::hydrate_session_bus_env,
+    ei_input::{DeviceKind, EiInput, Input},
+};
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use std::{
@@ -58,6 +62,7 @@ const BTN_BACK: i32 = 0x116;
 
 #[derive(Clone)]
 pub struct PortalPointerSession {
+    ei: Option<EiInput>,
     connection: Connection,
     session_handle: OwnedObjectPath,
     streams: Vec<PortalStream>,
@@ -68,6 +73,7 @@ pub struct PortalPointerSession {
 
 #[derive(Clone)]
 pub struct PortalKeyboardSession {
+    ei: Option<EiInput>,
     connection: Connection,
     session_handle: OwnedObjectPath,
     input_lock: Arc<AsyncMutex<()>>,
@@ -102,6 +108,7 @@ pub enum PortalKey {
 }
 
 struct PointerReleaseGuard {
+    ei: Option<EiInput>,
     connection: Connection,
     session_handle: OwnedObjectPath,
     button: Option<i32>,
@@ -110,6 +117,7 @@ struct PointerReleaseGuard {
 }
 
 struct KeyboardReleaseGuard {
+    ei: Option<EiInput>,
     connection: Connection,
     session_handle: OwnedObjectPath,
     pressed: Vec<PortalKey>,
@@ -178,9 +186,25 @@ pub async fn start_portal_pointer_session() -> Result<PortalPointerSession> {
     {
         assign_stream_pixel_scales(&mut streams, desktop_layout.as_deref());
     }
+    let ei = cosmic_eis_input(&connection, &session_handle, DeviceKind::Pointer).await?;
+    if ei.is_some() {
+        // COSMIC video stream sizes are physical, while EIS takes global
+        // logical coordinates. These streams now select outputs only.
+        for stream in &mut streams {
+            if let Some(monitor) = desktop_layout.as_ref().and_then(|layout| {
+                layout
+                    .iter()
+                    .find(|monitor| stream.position == Some((monitor.x, monitor.y)))
+            }) {
+                stream.size = Some((monitor.width, monitor.height));
+                stream.pixel_scale = 1.0;
+            }
+        }
+    }
     cleanup.disarm();
 
     Ok(PortalPointerSession {
+        ei,
         connection,
         session_handle,
         streams,
@@ -209,9 +233,11 @@ pub async fn start_portal_keyboard_session() -> Result<PortalKeyboardSession> {
     if devices & DEVICE_KEYBOARD == 0 {
         bail!("remote desktop portal session started without keyboard access");
     }
+    let ei = cosmic_eis_input(&connection, &session_handle, DeviceKind::Keyboard).await?;
     cleanup.disarm();
 
     Ok(PortalKeyboardSession {
+        ei,
         connection,
         session_handle,
         input_lock: portal_input_lock(),
@@ -529,7 +555,12 @@ pub async fn click(
 ) -> Result<()> {
     let input_guard = Arc::clone(&session.input_lock).lock_owned().await;
     session.ensure_current_layout().await?;
-    let proxy = remote_desktop_proxy(&session.connection).await?;
+    let proxy = input_proxy(
+        &session.connection,
+        session.ei.clone(),
+        session.streams.clone(),
+    )
+    .await?;
     let mut release_guard = PointerReleaseGuard::new(session, input_guard);
     let (stream_id, x, y) = session.map_absolute_point(x, y)?;
     notify_pointer_motion_absolute(&proxy, &session.session_handle, stream_id, x, y).await?;
@@ -567,7 +598,12 @@ pub async fn scroll(
     } else {
         session.ensure_valid()?;
     }
-    let proxy = remote_desktop_proxy(&session.connection).await?;
+    let proxy = input_proxy(
+        &session.connection,
+        session.ei.clone(),
+        session.streams.clone(),
+    )
+    .await?;
     if let Some((x, y)) = target_point {
         let (stream_id, x, y) = session.map_absolute_point(x, y)?;
         notify_pointer_motion_absolute(&proxy, &session.session_handle, stream_id, x, y).await?;
@@ -652,7 +688,12 @@ pub async fn drag(
 ) -> Result<()> {
     let input_guard = Arc::clone(&session.input_lock).lock_owned().await;
     session.ensure_current_layout().await?;
-    let proxy = remote_desktop_proxy(&session.connection).await?;
+    let proxy = input_proxy(
+        &session.connection,
+        session.ei.clone(),
+        session.streams.clone(),
+    )
+    .await?;
     let mut release_guard = PointerReleaseGuard::new(session, input_guard);
     let (start_stream, start_x, start_y) = session.map_absolute_point(start_x, start_y)?;
     let (end_stream, end_x, end_y) = session.map_absolute_point(end_x, end_y)?;
@@ -693,7 +734,7 @@ pub async fn type_text_with_keysyms(
 ) -> Result<()> {
     let input_guard = Arc::clone(&session.input_lock).lock_owned().await;
     session.ensure_valid()?;
-    let proxy = remote_desktop_proxy(&session.connection).await?;
+    let proxy = input_proxy(&session.connection, session.ei.clone(), Vec::new()).await?;
     let mut release_guard = KeyboardReleaseGuard::new(session, input_guard);
     for keysym in keysyms {
         release_guard.push(PortalKey::Keysym(*keysym));
@@ -725,7 +766,7 @@ pub async fn press_key_chord(
 ) -> Result<()> {
     let input_guard = Arc::clone(&session.input_lock).lock_owned().await;
     session.ensure_valid()?;
-    let proxy = remote_desktop_proxy(&session.connection).await?;
+    let proxy = input_proxy(&session.connection, session.ei.clone(), Vec::new()).await?;
     let mut release_guard = KeyboardReleaseGuard::new(session, input_guard);
     for modifier in modifiers {
         release_guard.push(*modifier);
@@ -746,6 +787,7 @@ pub async fn press_key_chord(
 impl PointerReleaseGuard {
     fn new(session: &PortalPointerSession, input_guard: OwnedMutexGuard<()>) -> Self {
         Self {
+            ei: session.ei.clone(),
             connection: session.connection.clone(),
             session_handle: session.session_handle.clone(),
             button: None,
@@ -771,11 +813,12 @@ impl Drop for PointerReleaseGuard {
         };
         self.valid.store(false, Ordering::Release);
         let connection = self.connection.clone();
+        let ei = self.ei.clone();
         let session_handle = self.session_handle.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
                 let _ = tokio::time::timeout(RELEASE_TIMEOUT, async {
-                    if let Ok(proxy) = remote_desktop_proxy(&connection).await {
+                    if let Ok(proxy) = input_proxy(&connection, ei, Vec::new()).await {
                         let _ = notify_pointer_button(
                             &proxy,
                             &session_handle,
@@ -800,6 +843,7 @@ impl Drop for PointerReleaseGuard {
 impl KeyboardReleaseGuard {
     fn new(session: &PortalKeyboardSession, input_guard: OwnedMutexGuard<()>) -> Self {
         Self {
+            ei: session.ei.clone(),
             connection: session.connection.clone(),
             session_handle: session.session_handle.clone(),
             pressed: Vec::new(),
@@ -858,12 +902,13 @@ impl Drop for KeyboardReleaseGuard {
         }
         self.valid.store(false, Ordering::Release);
         let connection = self.connection.clone();
+        let ei = self.ei.clone();
         let session_handle = self.session_handle.clone();
         let pressed = std::mem::take(&mut self.pressed);
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
                 let _ = tokio::time::timeout(RELEASE_TIMEOUT, async {
-                    if let Ok(proxy) = remote_desktop_proxy(&connection).await {
+                    if let Ok(proxy) = input_proxy(&connection, ei, Vec::new()).await {
                         for key in pressed.into_iter().rev() {
                             let _ = notify_keyboard_key(&proxy, &session_handle, key, KEY_RELEASED)
                                 .await;
@@ -1789,13 +1834,88 @@ async fn start_remote_desktop_session(
     Ok((devices, streams, parse_restore_token(&results)))
 }
 
+struct InputProxy<'a> {
+    portal: Proxy<'a>,
+    ei: Option<EiInput>,
+    streams: Vec<PortalStream>,
+}
+impl<'a> std::ops::Deref for InputProxy<'a> {
+    type Target = Proxy<'a>;
+    fn deref(&self) -> &Self::Target {
+        &self.portal
+    }
+}
+async fn input_proxy(
+    connection: &Connection,
+    ei: Option<EiInput>,
+    streams: Vec<PortalStream>,
+) -> Result<InputProxy<'_>> {
+    Ok(InputProxy {
+        portal: remote_desktop_proxy(connection).await?,
+        ei,
+        streams,
+    })
+}
+
+async fn cosmic_eis_input(
+    connection: &Connection,
+    session: &OwnedObjectPath,
+    kind: DeviceKind,
+) -> Result<Option<EiInput>> {
+    if !env_token_contains("XDG_CURRENT_DESKTOP", "cosmic") {
+        return Ok(None);
+    }
+    let proxy = remote_desktop_proxy(connection).await?;
+    let options: HashMap<&str, Value<'_>> = HashMap::new();
+    let fd: zbus::zvariant::OwnedFd = match tokio::time::timeout(
+        PORTAL_CALL_TIMEOUT,
+        proxy.call("ConnectToEIS", &(session, options)),
+    )
+    .await
+    .context("RemoteDesktop ConnectToEIS timed out")?
+    {
+        Ok(fd) => fd,
+        Err(zbus::Error::MethodError(name, _, _))
+            if matches!(
+                name.as_str(),
+                "org.freedesktop.DBus.Error.UnknownMethod"
+                    | "org.freedesktop.portal.Error.NotSupported"
+            ) =>
+        {
+            return Ok(None)
+        }
+        Err(error) => {
+            return Err(error).context("RemoteDesktop ConnectToEIS failed; no input was sent")
+        }
+    };
+    let fd: std::os::fd::OwnedFd = fd.into();
+    let input = EiInput::connect(std::os::unix::net::UnixStream::from(fd), kind).await?;
+    Ok(Some(input))
+}
+
 async fn notify_pointer_motion_absolute(
-    proxy: &Proxy<'_>,
+    proxy: &InputProxy<'_>,
     session: &OwnedObjectPath,
     stream_id: u32,
     x: f64,
     y: f64,
 ) -> Result<()> {
+    if let Some(ei) = proxy.ei.as_ref() {
+        let stream = proxy
+            .streams
+            .iter()
+            .find(|entry| entry.node_id == stream_id)
+            .context("EIS pointer stream disappeared")?;
+        let (ox, oy) = stream
+            .position
+            .context("EIS pointer stream has no global position")?;
+        return ei
+            .send(Input::Motion(
+                ox as f64 + x / stream.pixel_scale,
+                oy as f64 + y / stream.pixel_scale,
+            ))
+            .await;
+    }
     let options: HashMap<&str, Value<'_>> = HashMap::new();
     let _: () = tokio::time::timeout(
         INPUT_TIMEOUT,
@@ -1811,11 +1931,14 @@ async fn notify_pointer_motion_absolute(
 }
 
 async fn notify_pointer_button(
-    proxy: &Proxy<'_>,
+    proxy: &InputProxy<'_>,
     session: &OwnedObjectPath,
     button: i32,
     state: u32,
 ) -> Result<()> {
+    if let Some(ei) = proxy.ei.as_ref() {
+        return ei.send(Input::Button(button, state)).await;
+    }
     let options: HashMap<&str, Value<'_>> = HashMap::new();
     let _: () = tokio::time::timeout(
         INPUT_TIMEOUT,
@@ -1828,11 +1951,14 @@ async fn notify_pointer_button(
 }
 
 async fn notify_pointer_axis_discrete(
-    proxy: &Proxy<'_>,
+    proxy: &InputProxy<'_>,
     session: &OwnedObjectPath,
     axis: u32,
     steps: i32,
 ) -> Result<()> {
+    if let Some(ei) = proxy.ei.as_ref() {
+        return ei.send(Input::Scroll(axis, steps)).await;
+    }
     let options: HashMap<&str, Value<'_>> = HashMap::new();
     let _: () = tokio::time::timeout(
         INPUT_TIMEOUT,
@@ -1848,7 +1974,7 @@ async fn notify_pointer_axis_discrete(
 }
 
 async fn notify_keyboard_key(
-    proxy: &Proxy<'_>,
+    proxy: &InputProxy<'_>,
     session: &OwnedObjectPath,
     key: PortalKey,
     state: u32,
@@ -1862,11 +1988,14 @@ async fn notify_keyboard_key(
 }
 
 async fn notify_keyboard_keysym(
-    proxy: &Proxy<'_>,
+    proxy: &InputProxy<'_>,
     session: &OwnedObjectPath,
     keysym: i32,
     state: u32,
 ) -> Result<()> {
+    if let Some(ei) = proxy.ei.as_ref() {
+        return ei.send(Input::Keysym(keysym, state)).await;
+    }
     let options: HashMap<&str, Value<'_>> = HashMap::new();
     let _: () = tokio::time::timeout(
         INPUT_TIMEOUT,
@@ -1879,11 +2008,14 @@ async fn notify_keyboard_keysym(
 }
 
 async fn notify_keyboard_keycode(
-    proxy: &Proxy<'_>,
+    proxy: &InputProxy<'_>,
     session: &OwnedObjectPath,
     keycode: i32,
     state: u32,
 ) -> Result<()> {
+    if let Some(ei) = proxy.ei.as_ref() {
+        return ei.send(Input::Keycode(keycode, state)).await;
+    }
     let options: HashMap<&str, Value<'_>> = HashMap::new();
     let _: () = tokio::time::timeout(
         INPUT_TIMEOUT,
