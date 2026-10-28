@@ -1064,10 +1064,7 @@ impl ComputerUseLinux {
                     .and_then(|(x, y)| coordinate_map.portal_point(x, y));
             }
             if let Some(focus) = focus.as_ref() {
-                window_target = Some(WindowTarget {
-                    window_id: Some(focus.requested_window.window_id),
-                    ..Default::default()
-                });
+                window_target = Some(portal_focus_target(target, &focus.requested_window));
             }
             input_focus = focus;
         }
@@ -1648,10 +1645,7 @@ impl ComputerUseLinux {
                     .and_then(|(x, y)| coordinate_map.portal_point(x, y));
             }
             if let Some(focus) = focus.as_ref() {
-                window_target = Some(WindowTarget {
-                    window_id: Some(focus.requested_window.window_id),
-                    ..Default::default()
-                });
+                window_target = Some(portal_focus_target(target, &focus.requested_window));
             }
         }
         if params.x.is_none() && params.y.is_none() {
@@ -4157,13 +4151,10 @@ impl ComputerUseLinux {
         target: &WindowTarget,
         focus: Option<&WindowFocusResult>,
     ) -> Result<WindowTarget> {
-        // Pin the exact window selected before consent, even for an app selector
-        // that could resolve to a different window after the dialog closes.
+        // Preserve the receiving target across consent. Pin the selected
+        // window when its backend supports exact focus; otherwise keep app focus.
         if let Some(focus) = focus {
-            return Ok(WindowTarget {
-                window_id: Some(focus.requested_window.window_id),
-                ..Default::default()
-            });
+            return Ok(portal_focus_target(target, &focus.requested_window));
         }
         if target.has_target() {
             anyhow::bail!(
@@ -4172,10 +4163,13 @@ impl ComputerUseLinux {
         }
         let window = focused_window().await?
             .context("Portal keyboard input requires a focused window before consent; pass a window target. No input was sent.")?;
-        Ok(WindowTarget {
-            window_id: Some(window.window_id),
-            ..Default::default()
-        })
+        let target = portal_focus_target(target, &window);
+        if !target.has_target() {
+            anyhow::bail!(
+                "Portal keyboard input could not preserve the receiving app. No input was sent."
+            );
+        }
+        Ok(target)
     }
 
     async fn ensure_portal_keyboard_session(&self) -> Result<Option<PortalKeyboardSession>> {
@@ -7175,6 +7169,24 @@ fn abs_pointer_clamp_note(landing: crate::abs_pointer::PointerLanding) -> Option
             landing.requested.0, landing.requested.1, landing.emitted.0, landing.emitted.1
         )
     })
+}
+
+fn portal_focus_target(target: &WindowTarget, window: &WindowInfo) -> WindowTarget {
+    if registry::backend_can_exact_focus(&window.backend) {
+        WindowTarget {
+            window_id: Some(window.window_id),
+            ..Default::default()
+        }
+    } else if target.has_target() {
+        // GNOME Introspect can activate an app, but cannot activate a specific
+        // window. Preserve the caller's app-level focus contract there.
+        target.clone()
+    } else {
+        WindowTarget {
+            app_id: window.app_id.clone(),
+            ..Default::default()
+        }
+    }
 }
 
 fn focus_satisfies_target(focus: &WindowFocusResult, target: &WindowTarget) -> bool {

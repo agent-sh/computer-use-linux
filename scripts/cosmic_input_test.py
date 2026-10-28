@@ -32,8 +32,8 @@ def window(i):
 cmd = sys.argv[1]
 if cmd == 'probe':
     out = dict(ok=True,can_list_windows=True,can_activate_windows=True,detail='fixture')
-elif cmd == 'list-windows': out = [window(1), window(2)]
-elif cmd == 'focused-window': out = window(int(current))
+elif cmd == 'list-windows': out = [] if os.environ.get('CUL_TEST_INTROSPECT') == '1' else [window(1), window(2)]
+elif cmd == 'focused-window': out = None if os.environ.get('CUL_TEST_INTROSPECT') == '1' else window(int(current))
 elif cmd == 'monitor-layout':
     out = [dict(x=0,y=0,width=2560,height=1440,scale=1.0),dict(x=2560,y=390,width=1680,height=1050,scale=1.0)]
 elif cmd == 'activate-window':
@@ -91,6 +91,7 @@ def run_private(directory):
     helper.write_text(HELPER)
     helper.chmod(0o700)
     log = []
+    introspect = False
     connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     connection.call_sync('org.freedesktop.DBus', '/org/freedesktop/DBus',
                          'org.freedesktop.DBus', 'RequestName',
@@ -123,6 +124,32 @@ def run_private(directory):
             return False
         GLib.idle_add(respond)
 
+    # Exercise the app-only focus backend too. The absence of the Shell
+    # extension is intentional: it must not turn app input into exact targeting.
+    connection.call_sync('org.freedesktop.DBus', '/org/freedesktop/DBus',
+                         'org.freedesktop.DBus', 'RequestName',
+                         GLib.Variant('(su)', ('org.gnome.Shell', 0)),
+                         None, Gio.DBusCallFlags.NONE, 5000, None)
+    def gnome_method(conn, sender, path, interface, name, parameters, invocation):
+        if name == 'FocusApp':
+            if not refuse.exists():
+                state.write_text('1')
+            invocation.return_value(None)
+        else:
+            windows = {}
+            if introspect:
+                for i in (1, 2):
+                    windows[i] = {'title': GLib.Variant('s', 'Editor' if i == 1 else 'Other'),
+                        'app-id': GLib.Variant('s', 'fixture.editor' if i == 1 else 'fixture.other'),
+                        'has-focus': GLib.Variant('b', state.read_text() == str(i)),
+                        'x': GLib.Variant('i', 2660), 'y': GLib.Variant('i', 440),
+                        'width': GLib.Variant('u', 800), 'height': GLib.Variant('u', 600)}
+            invocation.return_value(GLib.Variant('(a{ta{sv}})', (windows,)))
+    gnome_xml = '<node><interface name="org.gnome.Shell.Introspect"><method name="GetWindows"><arg type="a{ta{sv}}" direction="out"/></method></interface><interface name="org.gnome.Shell"><method name="FocusApp"><arg type="s" direction="in"/></method></interface></node>'
+    gnome_info = Gio.DBusNodeInfo.new_for_xml(gnome_xml)
+    for interface in gnome_info.interfaces:
+        path = '/org/gnome/Shell/Introspect' if interface.name.endswith('Introspect') else '/org/gnome/Shell'
+        connection.register_object(path, interface, gnome_method, None, None)
     info = Gio.DBusNodeInfo.new_for_xml(XML)
     for interface in info.interfaces:
         connection.register_object('/org/freedesktop/portal/desktop', interface, method,
@@ -170,8 +197,15 @@ def run_private(directory):
                      ('click', {'x': 3820, 'y': 710, 'window_id': 1}, True),
                      ('scroll', {'x': 3820, 'y': 710, 'direction': 'down', 'window_id': 1}, True),
                      ('click', {'x': 10, 'y': 20, 'relative': True, 'window_id': 1}, False),
-                     ('drag', {'start_x': 100, 'start_y': 100, 'end_x': 3820, 'end_y': 710}, False)]
+                     ('drag', {'start_x': 100, 'start_y': 100, 'end_x': 3820, 'end_y': 710}, False),
+                     ('type_text', {'text': 'implicit app focus', '_introspect': True}, False),
+                     ('type_text', {'text': 'app focus', 'app_id': 'fixture.editor', '_introspect': True}, False),
+                     ('press_key', {'key': 'Enter', '_introspect': True}, False),
+                     ('click', {'x': 3820, 'y': 710, 'app_id': 'fixture.editor', '_introspect': True}, False),
+                     ('scroll', {'x': 3820, 'y': 710, 'direction': 'down', 'app_id': 'fixture.editor', '_introspect': True}, False)]
         for name, arguments, denied in scenarios:
+            introspect = arguments.pop('_introspect', False)
+            env['CUL_TEST_INTROSPECT'] = '1' if introspect else '0'
             state.write_text('1')
             refuse.unlink(missing_ok=True)
             log.clear()
@@ -203,7 +237,7 @@ def run_private(directory):
                     if arguments.get('relative'):
                         crop = payload(rpc(proc, 3, 'tools/call', dict(name='screenshot', arguments={'window_id': 1})))
                         assert crop['coordinate_width'] == 800 and crop['coordinate_height'] == 600, crop
-                    print(json.dumps(dict(tool=name,arguments=arguments,denied=denied,events=log)), flush=True)
+                    print(json.dumps(dict(tool=name,arguments=arguments,denied=denied,introspect=introspect,events=log)), flush=True)
                 finally:
                     proc.terminate()
                     try:
