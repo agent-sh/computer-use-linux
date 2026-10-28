@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.31] - 2026-10-28
+
+### Fixed
+
+- Use per-monitor RemoteDesktop portal streams for COSMIC pointer coordinates. Its uinput absolute pointer maps onto the active monitor, which could send clicks to the wrong window on mixed-size displays.
+- Use COSMIC's EIS connection when available and wait for its input devices to resume before sending the first event, preventing text prefixes and clicks from being lost during portal startup.
+- Preserve the receiving window or app target across portal consent and verify its focus again before typing, key chords, and targeted pointer input. Cancelled portal keyboard startup and failed focus verification send no input.
+- Verify existing GNOME Introspect app focus without calling Shell FocusApp, which opens the overview. Window activation requires the GNOME Shell extension.
+- Read COSMIC window geometry and logical output origins for targeted screenshots and relative input. Wait for both snapshots and keep window IDs within JavaScript's exact integer range. PID remains optional because the protocol does not expose it.
+
+Thanks @madnix007 for the report ([#312](https://github.com/agent-sh/computer-use-linux/issues/312), [#313](https://github.com/agent-sh/computer-use-linux/pull/313)).
+
 ## [0.7.30] - 2026-10-28
 
 ### Changed
@@ -925,7 +937,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.30...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.31...HEAD
+[0.7.31]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.30...v0.7.31
 [0.7.30]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.29...v0.7.30
 [0.7.29]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.28...v0.7.29
 [0.7.28]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.27...v0.7.28
