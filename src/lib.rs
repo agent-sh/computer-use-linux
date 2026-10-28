@@ -8,6 +8,7 @@ mod cosmic_helper;
 mod diagnostics_cache;
 #[path = "diagnostics.rs"]
 mod diagnostics_impl;
+mod ei_input;
 mod gnome_extension;
 mod identity;
 pub mod indicator;
