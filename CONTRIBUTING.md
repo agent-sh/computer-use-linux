@@ -64,6 +64,19 @@ To run them directly:
 /usr/bin/python3 scripts/gnome_indicator_test.py target/debug/computer-use-linux target/debug/computer-use-linux-indicator
 ```
 
+The real MCP/GTK X11 pointer regression runs in CI's MCP safety contract job,
+which also gates release artifacts. To run it locally after building the binary:
+
+```bash
+/usr/bin/python3 scripts/x11_pointer_test.py target/debug/computer-use-linux
+```
+
+The X11 fixture requires Xvfb, xdotool, bubblewrap, strace, `dbus-run-session`
+and GTK 3 PyGObject (`python3-gi` and `gir1.2-gtk-3.0` on Debian/Ubuntu).
+It uses two private displays and a private D-Bus session, hides uinput, and
+denies global-input helpers. It checks repeated clicks, GTK drag payloads,
+release after failure, missing xdotool, and isolation from the other display.
+
 ## PR Guidelines
 
 - Keep changes focused and explain the desktop/session you tested on.
@@ -76,15 +89,3 @@ To run them directly:
 ## Security
 
 Do not open public issues for vulnerabilities. See [SECURITY.md](SECURITY.md).
-
-For native X11 pointer changes, run the opt-in real MCP/GTK regression:
-
-```bash
-/usr/bin/python3 scripts/x11_pointer_test.py target/debug/computer-use-linux
-/usr/bin/python3 scripts/cosmic_input_test.py target/debug/computer-use-linux
-```
-
-The X11 fixture requires Xvfb, xdotool, bubblewrap, strace and GTK 3 PyGObject.
-It uses two private displays and a private D-Bus session, hides uinput, and
-denies global-input helpers. It checks repeated clicks, GTK drag payloads,
-release after failure, missing xdotool, and isolation from the other display.

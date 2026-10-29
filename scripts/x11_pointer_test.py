@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Opt-in real MCP/XTEST and GTK drag checks on two private Xvfb displays.
+"""Real MCP/XTEST and GTK drag checks on two private Xvfb displays.
 
 Requires Xvfb, xdotool, bwrap, strace, dbus-run-session and GTK 3 PyGObject.
 The MCP server has a private /dev without uinput, a private bus without desktop
