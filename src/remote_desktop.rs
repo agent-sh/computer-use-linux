@@ -67,6 +67,8 @@ pub struct PortalPointerSession {
     session_handle: OwnedObjectPath,
     streams: Vec<PortalStream>,
     desktop_layout: Option<Vec<LogicalMonitor>>,
+    /// Revalidate against KWin only, so a transient KWin failure cannot swap in kscreen.
+    layout_from_kwin: bool,
     input_lock: Arc<AsyncMutex<()>>,
     valid: Arc<AtomicBool>,
 }
@@ -92,13 +94,13 @@ struct PortalStream {
     pixel_scale: f64,
 }
 
-#[derive(Debug, Clone)]
-struct LogicalMonitor {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    scale: f64,
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LogicalMonitor {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) width: i32,
+    pub(crate) height: i32,
+    pub(crate) scale: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,7 +181,12 @@ pub async fn start_portal_pointer_session() -> Result<PortalPointerSession> {
         bail!("remote desktop portal session started without any monitor streams");
     }
 
-    let desktop_layout = logical_desktop_layout().await;
+    let kwin_layout = kwin_desktop_layout().await;
+    let layout_from_kwin = kwin_layout.is_some();
+    let desktop_layout = match kwin_layout {
+        Some(layout) => Some(layout),
+        None => logical_desktop_layout().await,
+    };
     let mut streams = streams;
     if env_token_contains("XDG_CURRENT_DESKTOP", "gnome")
         && mutter_stage_views_scaled(&connection).await
@@ -209,6 +216,7 @@ pub async fn start_portal_pointer_session() -> Result<PortalPointerSession> {
         session_handle,
         streams,
         desktop_layout,
+        layout_from_kwin,
         input_lock: portal_input_lock(),
         valid: Arc::new(AtomicBool::new(true)),
     })
@@ -248,6 +256,15 @@ pub async fn start_portal_keyboard_session() -> Result<PortalKeyboardSession> {
 fn portal_input_lock() -> Arc<AsyncMutex<()>> {
     static INPUT_LOCK: OnceLock<Arc<AsyncMutex<()>>> = OnceLock::new();
     Arc::clone(INPUT_LOCK.get_or_init(|| Arc::new(AsyncMutex::new(()))))
+}
+
+async fn kwin_desktop_layout() -> Option<Vec<LogicalMonitor>> {
+    if !env_token_contains("XDG_CURRENT_DESKTOP", "kde")
+        && !env_token_contains("XDG_CURRENT_DESKTOP", "plasma")
+    {
+        return None;
+    }
+    crate::windowing::backends::kwin::output_layout().await.ok()
 }
 
 async fn logical_desktop_layout() -> Option<Vec<LogicalMonitor>> {
@@ -953,9 +970,12 @@ impl PortalPointerSession {
             .desktop_layout
             .as_deref()
             .context("remote desktop portal session has no authoritative monitor layout")?;
-        let current = logical_desktop_layout()
-            .await
-            .context("could not revalidate the current monitor layout")?;
+        let current = if self.layout_from_kwin {
+            kwin_desktop_layout().await
+        } else {
+            logical_desktop_layout().await
+        }
+        .context("could not revalidate the current monitor layout")?;
         if !same_monitor_layout(expected, &current) {
             self.invalidate_and_close();
             bail!("desktop monitor layout changed after the remote desktop portal session started");
@@ -2551,6 +2571,37 @@ mod tests {
         assert_eq!(
             map_capture_point_to_stream_layout(&streams, &layout, 1280, 800, 2560, 1600),
             Some((960, 600))
+        );
+    }
+
+    #[test]
+    fn kwin_layout_maps_nested_scale_two_capture() {
+        // Recorded in the alpine-kde webtop at SELKIES_SCALING_DPI=192: kscreen-doctor
+        // reports 2128x1152 at scale 1, while KWin and the portal stream are 1064x576.
+        let streams = [PortalStream {
+            node_id: 46,
+            position: Some((0, 0)),
+            size: Some((1064, 576)),
+            pixel_scale: 1.0,
+        }];
+        let layout = crate::windowing::backends::kwin::kwin_output_layout(
+            r#"{"desktopGeometry":{"x":0,"y":0,"width":1064,"height":576},"outputs":[{"name":"WL-0","geometry":{"x":0,"y":0,"width":1064,"height":576},"devicePixelRatio":2}],"windows":[]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            map_capture_point_to_stream_layout(&streams, &layout, 386, 1092, 2128, 1152),
+            Some((193, 546))
+        );
+
+        // The kscreen view of the same session cannot be mapped: this is why KWin is preferred.
+        let kscreen = parse_kscreen_monitor_layout(
+            br#"{"outputs":[{"name":"WL-0","pos":{"x":0,"y":0},"size":{"height":1152,"width":2128},"scale":1,"connected":true,"enabled":true,"replicationSource":0}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            map_capture_point_to_stream_layout(&streams, &kscreen, 386, 1092, 2128, 1152),
+            None
         );
     }
 
