@@ -55,6 +55,15 @@ python3 scripts/cosmic_focus_test.py "$CARGO_TARGET_DIR/debug/computer-use-linux
 /usr/bin/python3 scripts/cosmic_input_test.py "$CARGO_TARGET_DIR/debug/computer-use-linux"
 ```
 
+The GNOME indicator regressions also use PyGObject and `dbus-run-session` and
+run automatically with `cargo test`. They exercise the real MCP server and
+indicator on a private D-Bus session with fixture input and screenshot commands.
+To run them directly:
+
+```bash
+/usr/bin/python3 scripts/gnome_indicator_test.py target/debug/computer-use-linux target/debug/computer-use-linux-indicator
+```
+
 ## PR Guidelines
 
 - Keep changes focused and explain the desktop/session you tested on.

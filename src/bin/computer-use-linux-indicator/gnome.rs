@@ -69,8 +69,12 @@ pub fn run() -> Result<()> {
                 }
             }
             let mut blocked = held(&capture);
+            // Reuse a confirmed hide throughout this batch, until an action
+            // shows the indicator again. Keep `shown` so every capture still
+            // waits for the compositor when an overlay was recently visible.
+            let mut hidden = None;
             if blocked && !suspended {
-                hide_gnome_indicator(&connection).await?;
+                hidden = Some(hide_gnome_indicator(&connection).await?);
             }
             if !blocked && suspended {
                 if let Some(event) = &last {
@@ -98,7 +102,14 @@ pub fn run() -> Result<()> {
                 };
                 match event.capture {
                     Some(Capture::Begin) => {
-                        let shown = hide_gnome_indicator(&connection).await?;
+                        let shown = match hidden {
+                            Some(shown) => shown,
+                            None => {
+                                let shown = hide_gnome_indicator(&connection).await?;
+                                hidden = Some(shown);
+                                shown
+                            }
+                        };
                         suspended = true;
                         let _ = socket.get_ref().send_to_addr(
                             if shown {
@@ -115,6 +126,7 @@ pub fn run() -> Result<()> {
                         action_at = Instant::now();
                         if !blocked {
                             show_gnome_indicator(&connection, &event, 0).await?;
+                            hidden = None;
                         }
                         last = Some(event);
                         suspended = blocked;
