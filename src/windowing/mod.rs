@@ -2,6 +2,7 @@ pub mod backends;
 pub mod registry;
 pub mod target;
 pub mod types;
+pub(crate) mod wayland_session;
 
 #[allow(unused_imports)]
 pub use registry::{

@@ -132,6 +132,7 @@ pub struct AccessibilityReport {
     pub toolkit_accessibility: Check,
     pub at_spi_enabled: Check,
     pub screen_reader_enabled: Check,
+    pub forced_toolkit_bridge: bool,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -859,6 +860,7 @@ fn accessibility_report() -> AccessibilityReport {
         ),
         at_spi_enabled: at_spi_enabled_check(),
         screen_reader_enabled: screen_reader_enabled_check(),
+        forced_toolkit_bridge: toolkit_bridge_forced(),
     }
 }
 
@@ -995,7 +997,9 @@ fn readiness_report_with_portal_keyboard(
     let can_send_development_input =
         can_send_development_input(platform, remote_desktop_keyboard, input);
 
-    if let Some(blocker) = atspi_disabled_blocker(accessibility, toolkit_bridge_forced()) {
+    if let Some(blocker) =
+        atspi_disabled_blocker(accessibility, accessibility.forced_toolkit_bridge)
+    {
         blockers.push(blocker);
     }
 
@@ -1117,7 +1121,7 @@ pub(crate) fn can_build_accessibility_tree_now() -> bool {
 }
 
 fn can_build_accessibility_tree(accessibility: &AccessibilityReport) -> bool {
-    accessibility_tree_ready(accessibility, toolkit_bridge_forced())
+    accessibility_tree_ready(accessibility, accessibility.forced_toolkit_bridge)
 }
 
 fn accessibility_tree_ready(accessibility: &AccessibilityReport, forced_bridge: bool) -> bool {
@@ -1142,6 +1146,9 @@ fn atspi_disabled_blocker(
 }
 
 fn toolkit_bridge_forced() -> bool {
+    if toolkit_bridge_forced_by_env(env_var) {
+        return true;
+    }
     let compositor = compositor_environ();
     toolkit_bridge_forced_by_env(|key| {
         env_var(key).or_else(|| compositor.as_ref().and_then(|vars| vars.get(key).cloned()))
@@ -1154,44 +1161,10 @@ fn toolkit_bridge_forced_by_env(vars: impl Fn(&str) -> Option<String>) -> bool {
 }
 
 fn compositor_environ() -> Option<HashMap<String, String>> {
-    const NAMES: &[&str] = &[
-        "labwc",
-        "kwin_wayland",
-        "gnome-shell",
-        "Hyprland",
-        "niri",
-        "cosmic-comp",
-    ];
-    let entries = fs::read_dir("/proc").ok()?;
-    for entry in entries.flatten() {
-        let pid = entry.file_name();
-        if !pid
-            .to_string_lossy()
-            .bytes()
-            .all(|byte| byte.is_ascii_digit())
-        {
-            continue;
-        }
-        let comm = fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
-        if !NAMES.contains(&comm.trim()) {
-            continue;
-        }
-        let Ok(bytes) = fs::read(entry.path().join("environ")) else {
-            continue;
-        };
-        let mut vars = HashMap::new();
-        for item in bytes.split(|byte| *byte == 0) {
-            let Ok(item) = std::str::from_utf8(item) else {
-                continue;
-            };
-            let Some((key, value)) = item.split_once('=') else {
-                continue;
-            };
-            vars.insert(key.to_string(), value.to_string());
-        }
-        return Some(vars);
-    }
-    None
+    // Read only the process proven to own the selected Wayland connection.
+    // Another desktop or nested compositor must not enable this session's tree.
+    let pid = crate::windowing::wayland_session::compositor_pid()?;
+    read_process_environ(pid)
 }
 
 fn check_detail_contains_true(check: &Check) -> bool {
@@ -1884,6 +1857,7 @@ pub(crate) mod tests {
             toolkit_accessibility,
             at_spi_enabled: Check::fail("(<false>,)"),
             screen_reader_enabled: Check::fail("(<false>,)"),
+            forced_toolkit_bridge: false,
         }
     }
     #[test]
