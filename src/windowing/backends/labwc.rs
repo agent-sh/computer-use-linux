@@ -110,7 +110,8 @@ fn to_window(window: LabwcWindow) -> WindowInfo {
 
 pub fn probe() -> BackendProbe {
     let path = socket_path();
-    let expected = crate::windowing::wayland_session::compositor_pid();
+    let expected = crate::windowing::wayland_session::display_path()
+        .and_then(|_| crate::windowing::wayland_session::compositor_pid());
     let actual = path
         .as_deref()
         .and_then(crate::windowing::wayland_session::peer_pid_at);
@@ -218,20 +219,8 @@ async fn connect_wayland() -> Result<UnixStream> {
         .ok()
         .map(|fd| peer_pid(fd.parse().context("invalid WAYLAND_SOCKET")?))
         .transpose()?;
-    let display = match std::env::var_os("WAYLAND_DISPLAY") {
-        Some(display) => display,
-        None if inherited.is_some() => {
-            bail!("labwc needs WAYLAND_DISPLAY for an independent activation connection")
-        }
-        None => "wayland-0".into(),
-    };
-    let path = PathBuf::from(display);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is unset")?)
-            .join(path)
-    };
+    let path = crate::windowing::wayland_session::display_path()
+        .context("labwc requires explicit WAYLAND_DISPLAY for an independent connection")?;
     let stream = UnixStream::connect(path)
         .await
         .context("could not connect to selected Wayland compositor")?;

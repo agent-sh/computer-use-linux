@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub(crate) fn peer_pid(fd: RawFd) -> Result<u32> {
     // SAFETY: zero is a valid initial value for the plain credentials structure.
@@ -32,14 +32,27 @@ pub(crate) fn compositor_pid() -> Option<u32> {
     if let Ok(fd) = std::env::var("WAYLAND_SOCKET") {
         return peer_pid(fd.parse().ok()?).ok();
     }
-    let display = std::env::var_os("WAYLAND_DISPLAY").unwrap_or_else(|| "wayland-0".into());
-    let display = Path::new(&display);
-    let path = if display.is_absolute() {
-        display.to_path_buf()
+    peer_pid_at(&display_path()?)
+}
+
+pub(crate) fn display_path() -> Option<PathBuf> {
+    display_path_from(
+        std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+        std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
+    )
+}
+
+fn display_path_from(
+    display: Option<&std::ffi::OsStr>,
+    runtime: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    let display = display.filter(|value| !value.is_empty())?;
+    let display = Path::new(display);
+    if display.is_absolute() {
+        Some(display.to_path_buf())
     } else {
-        Path::new(&std::env::var_os("XDG_RUNTIME_DIR")?).join(display)
-    };
-    peer_pid_at(&path)
+        Some(Path::new(runtime?).join(display))
+    }
 }
 
 pub(crate) fn peer_pid_at(path: &Path) -> Option<u32> {
@@ -85,6 +98,22 @@ pub(crate) fn peer_pid_at(path: &Path) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_selection_requires_an_explicit_display() {
+        use std::ffi::OsStr;
+        assert!(display_path_from(None, Some(OsStr::new("/run/user/1000"))).is_none());
+        assert!(
+            display_path_from(Some(OsStr::new("")), Some(OsStr::new("/run/user/1000"))).is_none()
+        );
+        assert_eq!(
+            display_path_from(
+                Some(OsStr::new("nested")),
+                Some(OsStr::new("/run/user/1000"))
+            ),
+            Some(PathBuf::from("/run/user/1000/nested"))
+        );
+    }
 
     #[test]
     fn identifies_the_connected_peer_without_environment_guessing() {
