@@ -104,10 +104,24 @@ jobs:
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           shared-key: host-dev
-      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Install MCP fixture dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libdbus-1-dev pkg-config dbus-daemon python3-gi gir1.2-gtk-3.0 \
+            xvfb xdotool bubblewrap strace
       - run: cargo build --locked
       - run: scripts/mcp_safety_check.py --binary target/debug/computer-use-linux
       - run: scripts/check_plugins.sh --binary target/debug/computer-use-linux
+      - name: Allow private test namespaces on the hosted runner
+        run: |
+          # Ubuntu's AppArmor policy can deny unprivileged Bubblewrap namespaces.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Test native X11 pointer input on private displays
+        timeout-minutes: 2
+        run: /usr/bin/python3 scripts/x11_pointer_test.py target/debug/computer-use-linux
 
   agent-config:
     name: agnix

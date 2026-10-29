@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Opt-in real MCP/XTEST and GTK drag checks on two private Xvfb displays.
+"""Real MCP/XTEST and GTK drag checks on two private Xvfb displays.
 
 Requires Xvfb, xdotool, bwrap, strace, dbus-run-session and GTK 3 PyGObject.
 The MCP server has a private /dev without uinput, a private bus without desktop
@@ -217,7 +217,9 @@ def run(binary, root):
 
 def main():
     binary = str(Path(sys.argv[1]).resolve())
-    with tempfile.TemporaryDirectory(prefix='cul-xptr-', dir=Path.home() / '.cache') as directory:
+    cache = Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache'))
+    cache.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='cul-xptr-', dir=cache) as directory:
         root = Path(directory)
         runtime = root / 'run'
         runtime.mkdir(mode=0o700)
