@@ -217,7 +217,9 @@ def run(binary, root):
 
 def main():
     binary = str(Path(sys.argv[1]).resolve())
-    with tempfile.TemporaryDirectory(prefix='cul-xptr-', dir=Path.home() / '.cache') as directory:
+    cache = Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache'))
+    cache.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='cul-xptr-', dir=cache) as directory:
         root = Path(directory)
         runtime = root / 'run'
         runtime.mkdir(mode=0o700)
