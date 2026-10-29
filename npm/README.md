@@ -14,6 +14,8 @@ Provides:
 > `ToolAnnotations` so hosts can distinguish read-only observation from mutating
 > desktop actions.
 
+On labwc, window targeting requires the Selkies IPC patch and its `labwc.sock`; stock labwc does not expose this socket. Activation requires a unique app-id/title match. Window IDs include the title and must be refreshed after it changes. Ambiguous windows are rejected. Window bounds and relative coordinate targeting are unavailable until output scaling can be verified.
+
 ## Quick start
 
 ### 1. CLI & MCP server

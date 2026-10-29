@@ -1,4 +1,4 @@
-use crate::windowing::backends::{cosmic, gnome, hyprland, i3, kwin, niri, x11};
+use crate::windowing::backends::{cosmic, gnome, hyprland, i3, kwin, labwc, niri, x11};
 use crate::windowing::types::WindowInfo;
 use anyhow::{anyhow, Result};
 use std::future::Future;
@@ -8,13 +8,14 @@ pub use gnome::{GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND};
 pub use hyprland::HYPRLAND_BACKEND;
 pub use i3::I3_BACKEND;
 pub use kwin::KWIN_BACKEND;
+pub use labwc::LABWC_BACKEND;
 pub use niri::NIRI_BACKEND;
 pub use x11::X11_BACKEND;
 
 /// Reported when no window backend answered, so no backend can be named.
 pub const UNAVAILABLE_BACKEND: &str = "unavailable";
 
-pub const WINDOW_PERMISSION_HINT: &str = "Computer Use could not access a supported window list backend. Targeted window input requires session-bus access plus GNOME Shell Introspect, the computer-use-linux GNOME Shell extension, the COSMIC Wayland helper, KWin/Plasma DBus scripting, Hyprland hyprctl, the niri IPC socket, or i3-msg. On GNOME, run setup_window_targeting to install the extension backend.";
+pub const WINDOW_PERMISSION_HINT: &str = "Computer Use could not access a supported window list backend. Targeted window input requires session-bus access plus GNOME Shell Introspect, the computer-use-linux GNOME Shell extension, the COSMIC Wayland helper, KWin/Plasma DBus scripting, Hyprland hyprctl, the niri IPC socket, labwc.sock, or i3-msg. On GNOME, run setup_window_targeting to install the extension backend.";
 
 #[derive(Debug, Clone, Copy)]
 pub struct BackendDescriptor {
@@ -44,6 +45,7 @@ enum BackendKind {
     Hyprland,
     Niri,
     I3,
+    Labwc,
     X11,
 }
 
@@ -55,6 +57,7 @@ const BACKEND_ORDER: &[BackendKind] = &[
     BackendKind::Hyprland,
     BackendKind::Niri,
     BackendKind::I3,
+    BackendKind::Labwc,
     // Generic X11/EWMH: last, so a session-native backend always wins first.
     BackendKind::X11,
 ];
@@ -107,6 +110,13 @@ const DESCRIPTORS: &[BackendDescriptor] = &[
         failure_label: "i3",
         list_note: "Window list came from i3-msg. Terminal windows may include best-effort PTY and active-process context when xprop and the process tree are readable.",
         missing_hint: "On i3, ensure i3-msg can reach the active i3 IPC socket.",
+        can_exact_focus: true,
+    },
+    BackendDescriptor {
+        id: LABWC_BACKEND,
+        failure_label: "labwc",
+        list_note: "Window list came from the labwc IPC socket. Terminal windows may include best-effort PTY and active-process context when the process tree is readable.",
+        missing_hint: "On labwc, the session socket labwc.sock lists windows. Activation uses wlr-foreign-toplevel-management.",
         can_exact_focus: true,
     },
     BackendDescriptor {
@@ -245,6 +255,7 @@ async fn list_windows_for(backend: BackendKind) -> Result<Vec<WindowInfo>> {
         BackendKind::Hyprland => hyprland::list_windows().await,
         BackendKind::Niri => niri::list_windows().await,
         BackendKind::I3 => i3::list_windows().await,
+        BackendKind::Labwc => labwc::list_windows().await,
         BackendKind::X11 => x11::list_windows().await,
     }
 }
@@ -260,6 +271,7 @@ pub async fn activate_window(window: &WindowInfo) -> Result<()> {
         HYPRLAND_BACKEND => hyprland::activate_window(window.window_id).await,
         NIRI_BACKEND => niri::activate_window(window.window_id).await,
         I3_BACKEND => i3::activate_window(window.window_id).await,
+        LABWC_BACKEND => labwc::activate(window).await,
         X11_BACKEND => x11::activate_window(window.window_id).await,
         backend => Err(anyhow!(
             "Unsupported window backend for activation: {backend}"
@@ -276,6 +288,7 @@ pub async fn focused_window_for_backend(backend: &str) -> Result<Option<WindowIn
         HYPRLAND_BACKEND => hyprland::list_windows().await?,
         NIRI_BACKEND => niri::list_windows().await?,
         I3_BACKEND => i3::list_windows().await?,
+        LABWC_BACKEND => return labwc::focused_window().await,
         X11_BACKEND => x11::list_windows_for_exact_focus().await?,
         backend => {
             return Err(anyhow!(
@@ -323,6 +336,7 @@ pub fn probe_backends() -> Vec<BackendProbe> {
         hyprland::probe(),
         niri::probe(),
         i3::probe(),
+        labwc::probe(),
         x11::probe(),
     ]
 }
@@ -337,6 +351,7 @@ impl BackendKind {
             BackendKind::Hyprland => HYPRLAND_BACKEND,
             BackendKind::Niri => NIRI_BACKEND,
             BackendKind::I3 => I3_BACKEND,
+            BackendKind::Labwc => LABWC_BACKEND,
             BackendKind::X11 => X11_BACKEND,
         }
     }

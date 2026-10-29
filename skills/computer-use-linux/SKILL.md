@@ -11,6 +11,8 @@ compatibility: "Native Pi tools require Pi 0.84.4+ and Node.js 22.19+; the stand
 
 Use `computer-use-linux` when an agent needs to observe or operate a local Linux desktop: inspect the accessibility tree, list/focus windows, take screenshots, click, scroll, type, press keys, or invoke AT-SPI actions.
 
+On labwc, window targeting requires the Selkies IPC patch and its `labwc.sock`; stock labwc does not expose this socket. Activation requires a unique app-id/title match. Window IDs include the title and must be refreshed after it changes. Ambiguous windows are rejected. Window bounds and relative coordinate targeting are unavailable until output scaling can be verified.
+
 ## When to Use
 
 Use this skill when:
