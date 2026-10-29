@@ -153,16 +153,22 @@ impl AbsPointer {
         // values explicitly so their intentional omission stays visible.
         let _start_landing = self.move_to(start.0, start.1)?;
         sleep(Duration::from_millis(30));
-        self.device
-            .emit(&[InputEvent::new_now(EventType::KEY.0, code, 1)])?;
-        sleep(Duration::from_millis(40));
-        let end_landing = self.move_to(end.0, end.1);
-        sleep(Duration::from_millis(40));
-        // Always try to release after a press, even if endpoint motion failed.
+        let motion = (|| -> Result<()> {
+            self.device
+                .emit(&[InputEvent::new_now(EventType::KEY.0, code, 1)])?;
+            sleep(Duration::from_millis(40));
+            for (x, y) in crate::pointer_path::drag_points(start, end) {
+                let _landing = self.move_to(x, y)?;
+                sleep(crate::pointer_path::DRAG_STEP_DELAY);
+            }
+            Ok(())
+        })();
+        // A failed press emission may have written an event. Attempt release
+        // after either a press or motion failure.
         let released = self
             .device
             .emit(&[InputEvent::new_now(EventType::KEY.0, code, 0)]);
-        let _end_landing = end_landing?;
+        motion?;
         released?;
         Ok(())
     }

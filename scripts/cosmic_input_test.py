@@ -201,6 +201,7 @@ def run_private(directory):
                      ('scroll', {'x': 3820, 'y': 710, 'direction': 'down', 'window_id': 1}, True),
                      ('click', {'x': 10, 'y': 20, 'relative': True, 'window_id': 1}, False),
                      ('drag', {'start_x': 100, 'start_y': 100, 'end_x': 3820, 'end_y': 710}, False),
+                     ('drag', {'start_x': 100, 'start_y': 50, 'end_x': 3820, 'end_y': 410}, False),
                      ('type_text', {'text': 'implicit app focus', '_introspect': True, '_keep_focus': True}, False),
                      ('type_text', {'text': 'app focus', 'app_id': 'fixture.editor', '_introspect': True, '_keep_focus': True}, False),
                      ('press_key', {'key': 'Enter', '_introspect': True, '_keep_focus': True}, False),
@@ -240,7 +241,11 @@ def run_private(directory):
                         if name in ('click', 'drag', 'scroll'):
                             motions = [item[2] for item in log if item[0] == 'NotifyPointerMotionAbsolute']
                             expected = (20, 1260.0, 320.0) if not arguments.get('relative') else (20, 110.0, 70.0)
+                            if name == 'drag':
+                                expected = (20, arguments['end_x'] - 2560.0, arguments['end_y'] - 390.0)
                             assert motions[-1] == expected, motions
+                            if name == 'drag':
+                                assert len(motions) > 2, 'drag must emit intermediate motion while pressed: ' + repr(motions)
                     if arguments.get('relative'):
                         crop = payload(rpc(proc, 3, 'tools/call', dict(name='screenshot', arguments={'window_id': 1})))
                         assert crop['coordinate_width'] == 800 and crop['coordinate_height'] == 600, crop

@@ -76,3 +76,15 @@ To run them directly:
 ## Security
 
 Do not open public issues for vulnerabilities. See [SECURITY.md](SECURITY.md).
+
+For native X11 pointer changes, run the opt-in real MCP/GTK regression:
+
+```bash
+/usr/bin/python3 scripts/x11_pointer_test.py target/debug/computer-use-linux
+/usr/bin/python3 scripts/cosmic_input_test.py target/debug/computer-use-linux
+```
+
+The X11 fixture requires Xvfb, xdotool, bubblewrap, strace and GTK 3 PyGObject.
+It uses two private displays and a private D-Bus session, hides uinput, and
+denies global-input helpers. It checks repeated clicks, GTK drag payloads,
+release after failure, missing xdotool, and isolation from the other display.
