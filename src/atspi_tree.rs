@@ -491,6 +491,18 @@ pub struct FocusedElementSummary {
     pub is_terminal: bool,
 }
 
+impl FocusedElementSummary {
+    /// A field that takes typed text: editable, or a text-entry role.
+    pub(crate) fn accepts_text(&self) -> bool {
+        self.editable
+            || self.states.iter().any(|state| state == "editable")
+            || matches!(
+                self.role.as_str(),
+                "text" | "entry" | "password text" | "combo box"
+            )
+    }
+}
+
 const FOCUS_PROBE_MAX_NODES: usize = 400;
 const FOCUS_PROBE_MAX_DEPTH: u32 = 16;
 
