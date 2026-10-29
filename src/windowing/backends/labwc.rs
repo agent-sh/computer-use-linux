@@ -196,7 +196,13 @@ async fn query_at(path: &std::path::Path, command: &str, expected_pid: u32) -> R
             bail!("labwc reply exceeded 4 MiB");
         }
     }
-    let text = String::from_utf8(buf).context("labwc reply was not UTF-8")?;
+    decode_reply(&buf)
+}
+
+fn decode_reply(buf: &[u8]) -> Result<String> {
+    // Selkies can cut a multibyte title at its byte buffer limit. Repair that
+    // string exactly as ipc_string_with_char does, preserving the other windows.
+    let text = String::from_utf8_lossy(buf).into_owned();
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
         if let Some(error) = value.get("error").and_then(|item| item.as_str()) {
             return Err(anyhow!(error.to_string()));
@@ -762,6 +768,25 @@ mod tests {
         assert_eq!(ipc_string(&"x".repeat(600)).len(), 510);
         assert_eq!(ipc_string(&"\"".repeat(600)).len(), 255);
         assert_eq!(ipc_string("quotes \" and \\"), "quotes \" and \\");
+    }
+
+    #[test]
+    fn byte_truncated_multibyte_title_does_not_break_other_windows() {
+        let title = format!("Ab - {}", "日本語のニュース記事".repeat(20));
+        let mut reply =
+            br#"[{"pid":511,"app_id":"chrome","minimized":false,"focused":false,"title":""#
+                .to_vec();
+        reply.extend_from_slice(&title.as_bytes()[..510]);
+        reply.extend_from_slice(br#""},"#);
+        reply.extend_from_slice(&FIXTURE.as_bytes()[1..]);
+        let windows = parse_windows(&decode_reply(&reply).unwrap()).unwrap();
+        assert_eq!(windows.len(), 2);
+        assert_eq!(
+            windows[0].title.as_deref(),
+            Some(ipc_string(&title).as_str())
+        );
+        assert!(ipc_matches(Some(&title), windows[0].title.as_deref()));
+        assert_eq!(windows[1].title.as_deref(), Some("New Tab - Google Chrome"));
     }
 
     #[test]
