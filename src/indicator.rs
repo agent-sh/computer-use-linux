@@ -55,7 +55,8 @@ pub const GLIDE: Duration = Duration::from_millis(350);
 /// Time for the compositor to drop overlay surfaces before a capture.
 pub const HIDE_SETTLE: Duration = Duration::from_millis(120);
 /// How long to wait for the overlay to answer `capture: begin`.
-const CAPTURE_REPLY_WAIT: Duration = Duration::from_millis(100);
+/// Allow short compositor stalls without capturing an unconfirmed overlay.
+const CAPTURE_REPLY_WAIT: Duration = Duration::from_millis(300);
 const SPAWN_WAIT: Duration = Duration::from_secs(1);
 const TEXT_LIMIT: usize = 64;
 
