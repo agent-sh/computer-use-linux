@@ -7507,16 +7507,11 @@ async fn run_ydotool_drag(
     sleep(Duration::from_millis(35)).await;
 
     if first_error.is_none() {
-        for (x, y) in crate::pointer_path::drag_points((start_x, start_y), (end_x, end_y)) {
-            match run_ydotool(&absolute_mousemove_args(x, y)).await {
-                Ok(output) => outputs.push(output),
-                Err(error) => {
-                    first_error = Some(error);
-                    break;
-                }
-            }
-            sleep(crate::pointer_path::DRAG_STEP_DELAY).await;
+        match run_ydotool(&absolute_mousemove_args(end_x, end_y)).await {
+            Ok(output) => outputs.push(output),
+            Err(error) => first_error = Some(error),
         }
+        sleep(Duration::from_millis(35)).await;
     }
 
     let release = run_ydotool(&["click".to_string(), "0x80".to_string()]).await;

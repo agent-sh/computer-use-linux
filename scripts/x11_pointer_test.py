@@ -56,14 +56,17 @@ def app(root):
         fixed.put(widget, x, y)
         return widget
     click = box('Click target', 50, 20, 200, 80)
-    click.connect('button-press-event', lambda _, event: record({'click': [event.x_root, event.y_root]}))
+    click.connect('button-press-event', lambda _, event: record({'click': [event.x_root, event.y_root]}) if event.type == Gdk.EventType.BUTTON_PRESS else False)
     source = box('Drag this payload', 50, 160, 200, 200)
     target = box('Drop here', 450, 160, 200, 200)
     entries = [Gtk.TargetEntry.new('text/plain', 0, 0)]
     source.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, entries, Gdk.DragAction.COPY)
     source.connect('drag-data-get', lambda _, context, data, info, stamp: data.set_text('cul-drag-payload', -1))
     target.drag_dest_set(Gtk.DestDefaults.ALL, entries, Gdk.DragAction.COPY)
-    target.connect('drag-data-received', lambda _, context, x, y, data, info, stamp: record({'drop': data.get_text()}))
+    def received(_, context, x, y, data, info, stamp):
+        record({'drop': data.get_text()})
+        target.get_child().set_text('Received: ' + data.get_text())
+    target.connect('drag-data-received', received)
     window.show_all()
     GLib.idle_add(lambda: (root / 'ready').touch() or False)
     Gtk.main()

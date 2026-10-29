@@ -714,9 +714,14 @@ pub async fn drag(
     let mut release_guard = PointerReleaseGuard::new(session, input_guard);
     let start = (start_x, start_y);
     let (start_stream, start_x, start_y) = session.map_absolute_point(start_x, start_y)?;
-    // Preflight every point before pressing, including monitor gaps.
+    // Endpoints must be shared. Intermediate motion may cross a monitor gap;
+    // project it onto the nearest shared stream instead of cancelling consent.
+    session.map_absolute_point(end_x, end_y)?;
     let points = crate::pointer_path::drag_points(start, (end_x, end_y))
-        .map(|(x, y)| session.map_absolute_point(x, y))
+        .map(|point| {
+            drag_point_on_shared_stream(&session.streams, point)
+                .context("remote desktop portal has no usable stream for drag motion")
+        })
         .collect::<Result<Vec<_>>>()?;
     notify_pointer_motion_absolute(
         &proxy,
@@ -1159,6 +1164,33 @@ fn map_capture_axis(value: i32, capture_size: u32, target_origin: i64, target_si
         .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
+fn drag_point_on_shared_stream(
+    streams: &[PortalStream],
+    point: (i32, i32),
+) -> Option<(u32, f64, f64)> {
+    streams
+        .iter()
+        .filter_map(|stream| {
+            let (x, y) = stream.position?;
+            let (width, height) = stream.size?;
+            if width <= 0 || height <= 0 {
+                return None;
+            }
+            let projected = (
+                i64::from(point.0).clamp(i64::from(x), i64::from(x) + i64::from(width) - 1) as i32,
+                i64::from(point.1).clamp(i64::from(y), i64::from(y) + i64::from(height) - 1) as i32,
+            );
+            let dx = i128::from(point.0) - i128::from(projected.0);
+            let dy = i128::from(point.1) - i128::from(projected.1);
+            Some((
+                dx * dx + dy * dy,
+                stream.relative_point(projected.0, projected.1),
+            ))
+        })
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, point)| point)
+}
+
 impl PortalStream {
     fn contains_global_point(&self, x: i32, y: i32) -> bool {
         let Some((stream_x, stream_y)) = self.position else {
@@ -1167,7 +1199,12 @@ impl PortalStream {
         let Some((width, height)) = self.size else {
             return false;
         };
-        x >= stream_x && y >= stream_y && x < stream_x + width && y < stream_y + height
+        width > 0
+            && height > 0
+            && x >= stream_x
+            && y >= stream_y
+            && i64::from(x) < i64::from(stream_x) + i64::from(width)
+            && i64::from(y) < i64::from(stream_y) + i64::from(height)
     }
 
     fn relative_point(&self, x: i32, y: i32) -> (u32, f64, f64) {
@@ -2577,6 +2614,35 @@ mod tests {
             map_capture_point_to_stream_layout(&streams, &layout, 1280, 800, 2560, 1600),
             Some((960, 600))
         );
+    }
+
+    #[test]
+    fn drag_motion_crosses_monitor_gaps_without_leaving_shared_streams() {
+        let streams = [
+            PortalStream {
+                node_id: 1,
+                position: Some((0, 0)),
+                size: Some((1920, 1080)),
+                pixel_scale: 1.0,
+            },
+            PortalStream {
+                node_id: 2,
+                position: Some((1920, 0)),
+                size: Some((2560, 1440)),
+                pixel_scale: 1.0,
+            },
+        ];
+        let points: Vec<_> = crate::pointer_path::drag_points((100, 1000), (3000, 1400))
+            .map(|point| drag_point_on_shared_stream(&streams, point).unwrap())
+            .collect();
+        assert_eq!(points.last(), Some(&(2, 1080.0, 1400.0)));
+        assert!(points.iter().any(|(id, _, y)| *id == 1 && *y == 1079.0));
+        for (id, x, y) in points {
+            let stream = streams.iter().find(|stream| stream.node_id == id).unwrap();
+            let (width, height) = stream.size.unwrap();
+            assert!(x >= 0.0 && x < f64::from(width));
+            assert!(y >= 0.0 && y < f64::from(height));
+        }
     }
 
     #[test]
