@@ -241,6 +241,8 @@ def run_private(directory):
                             motions = [item[2] for item in log if item[0] == 'NotifyPointerMotionAbsolute']
                             expected = (20, 1260.0, 320.0) if not arguments.get('relative') else (20, 110.0, 70.0)
                             assert motions[-1] == expected, motions
+                            if name == 'drag':
+                                assert len(motions) > 2, 'drag must emit intermediate motion while pressed: ' + repr(motions)
                     if arguments.get('relative'):
                         crop = payload(rpc(proc, 3, 'tools/call', dict(name='screenshot', arguments={'window_id': 1})))
                         assert crop['coordinate_width'] == 800 and crop['coordinate_height'] == 600, crop

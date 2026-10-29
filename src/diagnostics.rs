@@ -332,7 +332,7 @@ fn capability_map_with_portal_keyboard(
 ) -> CapabilityMap {
     let mut input_backends = Vec::new();
     // Absolute uinput pointer: accurate, non-blocking of coordinates; preferred.
-    if input.uinput.ok && !is_cosmic_wayland_platform(platform) {
+    if input.uinput.ok && platform_is_wayland(platform) && !is_cosmic_wayland_platform(platform) {
         input_backends.push("abs_pointer".to_string());
     }
     let force_ydotool = env_flag_enabled_any(FORCE_YDOTOOL_KEYBOARD_ENV_KEYS);

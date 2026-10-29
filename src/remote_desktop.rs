@@ -712,8 +712,12 @@ pub async fn drag(
     )
     .await?;
     let mut release_guard = PointerReleaseGuard::new(session, input_guard);
+    let start = (start_x, start_y);
     let (start_stream, start_x, start_y) = session.map_absolute_point(start_x, start_y)?;
-    let (end_stream, end_x, end_y) = session.map_absolute_point(end_x, end_y)?;
+    // Preflight every point before pressing, including monitor gaps.
+    let points = crate::pointer_path::drag_points(start, (end_x, end_y))
+        .map(|(x, y)| session.map_absolute_point(x, y))
+        .collect::<Result<Vec<_>>>()?;
     notify_pointer_motion_absolute(
         &proxy,
         &session.session_handle,
@@ -731,9 +735,10 @@ pub async fn drag(
     )
     .await?;
     tokio::time::sleep(Duration::from_millis(35)).await;
-    notify_pointer_motion_absolute(&proxy, &session.session_handle, end_stream, end_x, end_y)
-        .await?;
-    tokio::time::sleep(Duration::from_millis(35)).await;
+    for (stream, x, y) in points {
+        notify_pointer_motion_absolute(&proxy, &session.session_handle, stream, x, y).await?;
+        tokio::time::sleep(crate::pointer_path::DRAG_STEP_DELAY).await;
+    }
     notify_pointer_button(
         &proxy,
         &session.session_handle,

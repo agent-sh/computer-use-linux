@@ -842,6 +842,10 @@ impl ComputerUseLinux {
     /// Explicit backend overrides skip this device, including a cached one.
     async fn ensure_abs_pointer(&self) -> bool {
         if self.is_cosmic_wayland_session()
+            || (native_x11_xdotool_pointer_session(
+                env::var("XDG_SESSION_TYPE").ok().as_deref(),
+                env::var("WAYLAND_DISPLAY").ok().as_deref(),
+            ) && env_var_non_empty("DISPLAY"))
             || env_flag_enabled("CU_DISABLE_ABS_POINTER")
             || env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER")
             || (env_flag_enabled("COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER")
@@ -883,6 +887,10 @@ impl ComputerUseLinux {
         height: u32,
     ) -> std::result::Result<bool, String> {
         if self.is_cosmic_wayland_session()
+            || (native_x11_xdotool_pointer_session(
+                env::var("XDG_SESSION_TYPE").ok().as_deref(),
+                env::var("WAYLAND_DISPLAY").ok().as_deref(),
+            ) && env_var_non_empty("DISPLAY"))
             || env_flag_enabled("CU_DISABLE_ABS_POINTER")
             || env_flag_enabled("COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER")
             || (env_flag_enabled("COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER")
@@ -1193,6 +1201,40 @@ impl ComputerUseLinux {
             .await;
         let button = mouse_button_code(params.button.as_deref());
         let click_count = params.click_count.unwrap_or(1).clamp(1, 10).to_string();
+        if self.should_prefer_xdotool_pointer() {
+            let off_screen_note = self.off_screen_note_for_point(x, y).await;
+            if let Some(xdotool_args) = xdotool_pointer_click_args(
+                x,
+                y,
+                params.click_count.unwrap_or(1).clamp(1, 10),
+                params.button.as_deref(),
+            ) {
+                let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
+                    run_xdotool_pointer_or_fallback(Path::new("xdotool"), &xdotool_args, || async {
+                        Err("Native X11 pointer input requires xdotool; no system-wide input fallback was used.".to_string())
+                    })
+                    .await
+                })
+                .await;
+                let _input_guard = input_guard;
+                let used_xdotool = result
+                    .as_ref()
+                    .is_ok_and(|result| result.backend == KeyboardCommandBackend::Xdotool);
+                let mut output =
+                    action_result("click", result.map(|result| result.outputs), received);
+                if output.ok && used_xdotool {
+                    output.message = "Action sent through xdotool (X11 XTEST).".to_string();
+                }
+                return Json(with_notes(output, off_screen_note));
+            }
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "click".to_string(),
+                message: "X11 click supports left, middle and right buttons.".to_string(),
+                received,
+            });
+        }
         // Preferred backend: the uinput absolute pointer. Unlike ydotool's
         // relative-only device (faked `--absolute` via pin-to-corner + relative
         // move, which acceleration + fractional scaling distort) and unlike the
@@ -1343,41 +1385,6 @@ impl ComputerUseLinux {
         }
         if self.is_wayland_session() {
             return Json(unsafe_pointer_fallback("click", received));
-        }
-        if self.should_prefer_xdotool_pointer() {
-            if let Some(xdotool_args) = xdotool_pointer_click_args(
-                x,
-                y,
-                params.click_count.unwrap_or(1).clamp(1, 10),
-                params.button.as_deref(),
-            ) {
-                let ydotool_commands = vec![
-                    absolute_mousemove_args(x, y),
-                    vec![
-                        "click".to_string(),
-                        "--repeat".to_string(),
-                        click_count.clone(),
-                        button.clone(),
-                    ],
-                ];
-                let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
-                    run_xdotool_pointer_or_fallback(Path::new("xdotool"), &xdotool_args, || async {
-                        run_ydotool_sequence(&ydotool_commands).await
-                    })
-                    .await
-                })
-                .await;
-                let _input_guard = input_guard;
-                let used_xdotool = result
-                    .as_ref()
-                    .is_ok_and(|result| result.backend == KeyboardCommandBackend::Xdotool);
-                let mut output =
-                    action_result("click", result.map(|result| result.outputs), received);
-                if output.ok && used_xdotool {
-                    output.message = "Action sent through xdotool (X11 XTEST).".to_string();
-                }
-                return Json(with_notes(output, off_screen_note));
-            }
         }
         let commands = vec![
             absolute_mousemove_args(x, y),
@@ -1708,6 +1715,34 @@ impl ComputerUseLinux {
             ScrollDirection::Left => (units, 0),
             ScrollDirection::Right => (-units, 0),
         };
+        let off_screen_note = match target_point {
+            Some((x, y)) => self.off_screen_note_for_point(x, y).await,
+            None => None,
+        };
+        if self.should_prefer_xdotool_pointer() {
+            let repeat = u32::try_from(units.max(1)).unwrap_or(1);
+            let xdotool_args = xdotool_pointer_scroll_args(target_point, repeat, direction);
+            let command_timeout = xdotool_scroll_timeout(repeat, XDOTOOL_SCROLL_CLICK_DELAY_MS);
+            let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
+                run_xdotool_pointer_or_fallback_with_timeout(
+                    Path::new("xdotool"),
+                    &xdotool_args,
+                    command_timeout,
+                    || async { Err("Native X11 pointer input requires xdotool; no system-wide input fallback was used.".to_string()) },
+                )
+                .await
+            })
+            .await;
+            let _input_guard = input_guard;
+            let used_xdotool = result
+                .as_ref()
+                .is_ok_and(|result| result.backend == KeyboardCommandBackend::Xdotool);
+            let mut output = action_result("scroll", result.map(|result| result.outputs), received);
+            if output.ok && used_xdotool {
+                output.message = "Action sent through xdotool (X11 XTEST).".to_string();
+            }
+            return Json(with_notes(output, off_screen_note));
+        }
         // Coordinate scroll needs the same accurate positioning as click. Keep
         // the move and wheel event under one cancellation-safe input guard.
         if let Some((x, y)) = target_point {
@@ -1728,10 +1763,6 @@ impl ComputerUseLinux {
                 return Json(abs_pointer_result("scroll", result, received));
             }
         }
-        let off_screen_note = match target_point {
-            Some((x, y)) => self.off_screen_note_for_point(x, y).await,
-            None => None,
-        };
         if let Some(session) = self.cached_portal_pointer_session() {
             let mapped_target = match (portal_target_point, target_point) {
                 (Some(point), _) => Some(Some(point)),
@@ -1832,30 +1863,6 @@ impl ComputerUseLinux {
         // enter, and the one wheel event only re-baselines them (delta 0).
         // The call reported success while the window did not move (#184).
         // XTEST wheel buttons have no valuators, so GTK takes the button path.
-        if self.should_prefer_xdotool_pointer() {
-            let repeat = u32::try_from(units.max(1)).unwrap_or(1);
-            let xdotool_args = xdotool_pointer_scroll_args(target_point, repeat, direction);
-            let command_timeout = xdotool_scroll_timeout(repeat, XDOTOOL_SCROLL_CLICK_DELAY_MS);
-            let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
-                run_xdotool_pointer_or_fallback_with_timeout(
-                    Path::new("xdotool"),
-                    &xdotool_args,
-                    command_timeout,
-                    || async { run_ydotool_sequence(&sequence).await },
-                )
-                .await
-            })
-            .await;
-            let _input_guard = input_guard;
-            let used_xdotool = result
-                .as_ref()
-                .is_ok_and(|result| result.backend == KeyboardCommandBackend::Xdotool);
-            let mut output = action_result("scroll", result.map(|result| result.outputs), received);
-            if output.ok && used_xdotool {
-                output.message = "Action sent through xdotool (X11 XTEST).".to_string();
-            }
-            return Json(with_notes(output, off_screen_note));
-        }
         let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
             run_ydotool_sequence(&sequence).await
         })
@@ -1898,6 +1905,25 @@ impl ComputerUseLinux {
         self.indicator
             .follow("drag", (params.end_x, params.end_y), space)
             .await;
+        if self.should_prefer_xdotool_pointer() {
+            let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
+                run_xdotool_drag(
+                    Path::new("xdotool"),
+                    (params.start_x, params.start_y),
+                    (params.end_x, params.end_y),
+                )
+                .await
+            })
+            .await;
+            let _input_guard = input_guard;
+            let mut output = action_result("drag", result, received);
+            if output.ok {
+                output.message =
+                    "Drag dispatched through xdotool (X11 XTEST); verify the drop target."
+                        .to_string();
+            }
+            return Json(output);
+        }
         // Preferred backend: the uinput absolute pointer (accurate landing).
         if self.ensure_abs_pointer().await {
             let pointer = Arc::clone(&self.abs_pointer);
@@ -4058,7 +4084,6 @@ impl ComputerUseLinux {
             env::var("XDG_SESSION_TYPE").ok().as_deref(),
             env_var_non_empty("DISPLAY"),
             env::var("WAYLAND_DISPLAY").ok().as_deref(),
-            xdotool_available(),
         )
     }
 
@@ -6603,12 +6628,10 @@ fn prefer_xdotool_pointer(
     session_type: Option<&str>,
     display_available: bool,
     wayland_display: Option<&str>,
-    xdotool_available: bool,
 ) -> bool {
     !force_ydotool
         && native_x11_xdotool_pointer_session(session_type, wayland_display)
         && display_available
-        && xdotool_available
 }
 
 fn prefer_xdotool_keyboard(
@@ -7389,6 +7412,82 @@ async fn run_ydotool_sequence(
     Ok(outputs)
 }
 
+async fn xdotool_pointer_output(
+    program: &Path,
+    args: &[String],
+) -> std::result::Result<Output, String> {
+    match run_xdotool(program, args).await {
+        XdotoolAttempt::Finished(result) => result,
+        XdotoolAttempt::Unavailable => Err(
+            "Native X11 pointer input requires xdotool; no system-wide input fallback was used."
+                .to_string(),
+        ),
+    }
+}
+
+async fn run_xdotool_drag(
+    program: &Path,
+    start: (i32, i32),
+    end: (i32, i32),
+) -> std::result::Result<Vec<Output>, String> {
+    let mut outputs = vec![
+        xdotool_pointer_output(
+            program,
+            &[
+                "mousemove".into(),
+                "--".into(),
+                start.0.to_string(),
+                start.1.to_string(),
+            ],
+        )
+        .await?,
+    ];
+    let mut first_error =
+        match xdotool_pointer_output(program, &["mousedown".into(), "1".into()]).await {
+            Ok(output) => {
+                outputs.push(output);
+                None
+            }
+            Err(error) => Some(error),
+        };
+    if first_error.is_none() {
+        for (x, y) in crate::pointer_path::drag_points(start, end) {
+            sleep(crate::pointer_path::DRAG_STEP_DELAY).await;
+            match xdotool_pointer_output(
+                program,
+                &[
+                    "mousemove".into(),
+                    "--".into(),
+                    x.to_string(),
+                    y.to_string(),
+                ],
+            )
+            .await
+            {
+                Ok(output) => outputs.push(output),
+                Err(error) => {
+                    first_error = Some(error);
+                    break;
+                }
+            }
+        }
+    }
+    // A failed command may have sent the press before failing. Always release,
+    // and do not replay this partially dispatched gesture through another route.
+    let release = xdotool_pointer_output(program, &["mouseup".into(), "1".into()]).await;
+    match (first_error, release) {
+        (None, Ok(output)) => {
+            outputs.push(output);
+            Ok(outputs)
+        }
+        (Some(error), Ok(_)) => Err(error),
+        (None, Err(error)) => Err(error),
+        (Some(error), Err(release)) => Err(format!(
+            "{error}; X11 button release also failed: {release}"
+        )),
+    }
+}
+
 async fn run_ydotool_drag(
     start_x: i32,
     start_y: i32,
@@ -7408,11 +7507,16 @@ async fn run_ydotool_drag(
     sleep(Duration::from_millis(35)).await;
 
     if first_error.is_none() {
-        match run_ydotool(&absolute_mousemove_args(end_x, end_y)).await {
-            Ok(output) => outputs.push(output),
-            Err(error) => first_error = Some(error),
+        for (x, y) in crate::pointer_path::drag_points((start_x, start_y), (end_x, end_y)) {
+            match run_ydotool(&absolute_mousemove_args(x, y)).await {
+                Ok(output) => outputs.push(output),
+                Err(error) => {
+                    first_error = Some(error);
+                    break;
+                }
+            }
+            sleep(crate::pointer_path::DRAG_STEP_DELAY).await;
         }
-        sleep(Duration::from_millis(35)).await;
     }
 
     let release = run_ydotool(&["click".to_string(), "0x80".to_string()]).await;
@@ -8693,9 +8797,11 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
                         "{commands}"
                     );
                     assert!(
-                        commands.contains("ydotool mousemove --absolute -- 100 100"),
+                        commands.contains("xdotool mousemove -- 100 100"),
                         "{commands}"
                     );
+                    assert!(commands.contains("xdotool mouseup 1"), "{commands}");
+                    assert!(!commands.contains("ydotool"), "{commands}");
                 }
                 _ => assert_eq!(commands, "ydotool mousemove --wheel -- 0 -5\n"),
             }
@@ -11456,39 +11562,16 @@ esac
     }
 
     #[test]
-    fn xdotool_pointer_policy_requires_all_pure_gating_conditions() {
-        let eligible = (false, Some("x11"), true, None, true);
-        assert!(prefer_xdotool_pointer(
-            eligible.0, eligible.1, eligible.2, eligible.3, eligible.4
-        ));
-        assert!(!prefer_xdotool_pointer(true, Some("x11"), true, None, true));
-        assert!(!prefer_xdotool_pointer(
-            false,
-            Some("wayland"),
-            true,
-            None,
-            true
-        ));
-        assert!(!prefer_xdotool_pointer(
-            false,
-            None,
-            true,
-            Some("wayland-0"),
-            true
-        ));
-        assert!(!prefer_xdotool_pointer(
-            false,
-            Some("x11"),
-            false,
-            None,
-            true
-        ));
+    fn xdotool_pointer_policy_requires_a_native_display_without_global_override() {
+        assert!(prefer_xdotool_pointer(false, Some("x11"), true, None));
+        assert!(!prefer_xdotool_pointer(true, Some("x11"), true, None));
+        assert!(!prefer_xdotool_pointer(false, Some("wayland"), true, None));
+        assert!(!prefer_xdotool_pointer(false, Some("x11"), false, None));
         assert!(!prefer_xdotool_pointer(
             false,
             Some("x11"),
             true,
-            None,
-            false
+            Some("wayland-0")
         ));
     }
 
