@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.32] - 2026-10-29
+
+### Added
+
+- List and activate labwc windows through the Selkies IPC extension. Require matching compositor identities and unique window matches; omit bounds when output scaling cannot be verified.
+
+### Fixed
+
+- Keep native X11 clicks, scrolls and drags on the selected X display through XTEST. Repeated clicks land after another device moves the pointer, and missing xdotool returns an error without a system-wide fallback.
+- Send paced intermediate motion for XTEST, uinput and portal drags. Preserve valid portal drags across monitor gaps and attempt button release after failed presses or motion.
+- Keep the terminal paste chord when Konsole exposes focused container widgets, while retaining ordinary paste for editable fields.
+- Read KDE logical output geometry from KWin for portal mapping and keep layout revalidation on the selected source.
+- Avoid duplicate GNOME indicator hides during capture acknowledgement. Preserve compositor settling and tolerate short renderer stalls without replaying an action.
+- Keep labwc window identities within JavaScript's exact integer range, reject ambiguous activation, and preserve listings containing byte-truncated UTF-8 titles.
+- Snapshot forced GTK/Qt accessibility bridge state from the selected compositor so readiness and capabilities agree.
+
+Thanks @berney for the KDE and labwc contributions ([#316](https://github.com/agent-sh/computer-use-linux/pull/316), [#317](https://github.com/agent-sh/computer-use-linux/pull/317), [#318](https://github.com/agent-sh/computer-use-linux/pull/318)), @qixuancao for the GNOME capture fix ([#319](https://github.com/agent-sh/computer-use-linux/issues/319), [#320](https://github.com/agent-sh/computer-use-linux/pull/320)), and @martin152 for the X11 pointer and drag reproductions ([#321](https://github.com/agent-sh/computer-use-linux/issues/321), [#322](https://github.com/agent-sh/computer-use-linux/issues/322), [#323](https://github.com/agent-sh/computer-use-linux/issues/323), [#326](https://github.com/agent-sh/computer-use-linux/pull/326)).
+
 ## [0.7.31] - 2026-10-28
 
 ### Fixed
@@ -937,7 +955,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.31...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.32...HEAD
+[0.7.32]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.31...v0.7.32
 [0.7.31]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.30...v0.7.31
 [0.7.30]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.29...v0.7.30
 [0.7.29]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.28...v0.7.29
