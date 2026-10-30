@@ -1739,7 +1739,7 @@ impl ComputerUseLinux {
         };
         // Element centres are AT-SPI logical points; pixelflux wants capture pixels.
         let pixelflux_point = match (params.x.zip(params.y), params.element_index) {
-            (None, Some(index)) => {
+            (None, Some(index)) if crate::pixelflux::PixelfluxConfig::from_env().is_some() => {
                 let bounds = self.cached_node_bounds(index);
                 match self.pixelflux_element_point(bounds.as_ref()).await {
                     Some(point) => Some(point),
@@ -5160,6 +5160,19 @@ impl ComputerUseLinux {
             return Some(pixelflux_action_output(action, Err(error), received));
         }
         let result = crate::pixelflux::send(&config, &request).await.map(|_| ());
+        if let Err(error) = &result {
+            if crate::pixelflux::outcome_unknown(error) {
+                return Some(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: action.to_string(),
+                    message: format!(
+                        "pixelflux took {action} but did not answer ({error:#}); it may have run, so check the screen before retrying"
+                    ),
+                    received,
+                });
+            }
+        }
         Some(pixelflux_action_output(action, result, received))
     }
 
@@ -15830,37 +15843,28 @@ mod pixelflux_routing_tests {
             None
         );
     }
-    #[tokio::test]
-    async fn pixelflux_failure_after_send_is_not_replayed() {
-        if std::env::var("CUL_PIXELFLUX_CHILD").as_deref() == Ok("500") {
-            let params = serde_json::from_value(serde_json::json!({"x": 10, "y": 20})).unwrap();
-            let result = super::ComputerUseLinux::default()
-                .click(rmcp::handler::server::wrapper::Parameters(params))
-                .await
-                .unwrap();
-            let message = result.structured_content.unwrap()["message"]
-                .as_str()
-                .unwrap()
-                .to_string();
-            std::fs::write(std::env::var("CUL_PIXELFLUX_OUT").unwrap(), message).unwrap();
-            return;
-        }
+    /// Clicks in a child process against a fake pixelflux that answers the probe, then
+    /// `action_reply` (or hangs up after reading the action when `None`).
+    /// Returns the click message and what a recording `ydotool` received.
+    fn click_after_probe(
+        test: &str,
+        mode: &str,
+        action_reply: Option<&'static str>,
+    ) -> (String, String) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
-            for (status, body) in [(200, "{\"text\":\"X=0,Y=0\"}"), (500, "{\"error\":\"no\"}")] {
+            let ok = "HTTP/1.1 200 X\r\nContent-Length: 18\r\nConnection: close\r\n\r\n{\"text\":\"X=0,Y=0\"}";
+            for reply in [Some(ok), action_reply] {
                 let (mut sock, _) = listener.accept().unwrap();
                 let mut buf = [0u8; 2048];
                 let _ = std::io::Read::read(&mut sock, &mut buf);
-                let response = format!(
-                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = std::io::Write::write_all(&mut sock, response.as_bytes());
+                if let Some(reply) = reply {
+                    let _ = std::io::Write::write_all(&mut sock, reply.as_bytes());
+                }
             }
         });
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let dir = std::env::temp_dir().join(format!("cul-pf-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cul-pf-{mode}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("ydotool.log");
         let out = dir.join("out.txt");
@@ -15872,14 +15876,10 @@ mod pixelflux_routing_tests {
         .unwrap();
         std::fs::set_permissions(&ydotool, std::fs::Permissions::from_mode(0o700)).unwrap();
         let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "server::pixelflux_routing_tests::pixelflux_failure_after_send_is_not_replayed",
-                "--nocapture",
-            ])
+            .args(["--exact", test, "--nocapture"])
             .env_clear()
             .env("PATH", &dir)
-            .env("CUL_PIXELFLUX_CHILD", "500")
+            .env("CUL_PIXELFLUX_CHILD", mode)
             .env("CUL_PIXELFLUX_LOG", &log)
             .env("CUL_PIXELFLUX_OUT", &out)
             .env("PIXELFLUX_CU", port.to_string())
@@ -15889,11 +15889,52 @@ mod pixelflux_routing_tests {
             .unwrap();
         assert!(status.success(), "{status}");
         let message = std::fs::read_to_string(&out).unwrap();
+        let recorded = std::fs::read_to_string(&log).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        (message, recorded)
+    }
+
+    async fn record_click_message() {
+        let params = serde_json::from_value(serde_json::json!({"x": 10, "y": 20})).unwrap();
+        let result = super::ComputerUseLinux::default()
+            .click(rmcp::handler::server::wrapper::Parameters(params))
+            .await
+            .unwrap();
+        let message = result.structured_content.unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        std::fs::write(std::env::var("CUL_PIXELFLUX_OUT").unwrap(), message).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pixelflux_failure_after_send_is_not_replayed() {
+        if std::env::var("CUL_PIXELFLUX_CHILD").as_deref() == Ok("500") {
+            return record_click_message().await;
+        }
+        let (message, recorded) = click_after_probe(
+            "server::pixelflux_routing_tests::pixelflux_failure_after_send_is_not_replayed",
+            "500",
+            Some("HTTP/1.1 500 X\r\nContent-Length: 14\r\nConnection: close\r\n\r\n{\"error\":\"no\"}"),
+        );
         assert!(message.contains("pixelflux did not accept"), "{message}");
         assert!(!message.contains("secret"), "{message}");
-        let recorded = std::fs::read_to_string(&log).unwrap_or_default();
         assert!(recorded.is_empty(), "{recorded}");
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn pixelflux_hangup_after_send_reports_unknown_outcome() {
+        if std::env::var("CUL_PIXELFLUX_CHILD").as_deref() == Ok("hangup") {
+            return record_click_message().await;
+        }
+        let (message, recorded) = click_after_probe(
+            "server::pixelflux_routing_tests::pixelflux_hangup_after_send_reports_unknown_outcome",
+            "hangup",
+            None,
+        );
+        assert!(message.contains("it may have run"), "{message}");
+        assert!(!message.contains("did not accept"), "{message}");
+        assert!(recorded.is_empty(), "{recorded}");
     }
 
     #[tokio::test]

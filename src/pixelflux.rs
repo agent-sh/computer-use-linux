@@ -8,6 +8,8 @@ use tokio::net::TcpStream;
 
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+// pixelflux types on its own seat one key at a time (up to ~28 ms a character) and replies when done.
+const TYPE_MS_PER_CHAR: u64 = 40;
 const MAX_BODY: usize = 64 * 1024 * 1024;
 const MAX_HEADERS: usize = 64 * 1024;
 
@@ -86,7 +88,16 @@ pub(crate) async fn send(
     config: &PixelfluxConfig,
     action: &PixelfluxAction,
 ) -> Result<PixelfluxReply> {
-    exchange(config, &action_body(action)?, SEND_TIMEOUT).await
+    exchange(config, &action_body(action)?, send_timeout(action)).await
+}
+
+fn send_timeout(action: &PixelfluxAction) -> Duration {
+    match action {
+        PixelfluxAction::Type { text } => SEND_TIMEOUT.saturating_add(Duration::from_millis(
+            (text.chars().count() as u64).saturating_mul(TYPE_MS_PER_CHAR),
+        )),
+        _ => SEND_TIMEOUT,
+    }
 }
 
 pub(crate) async fn probe(config: &PixelfluxConfig) -> Result<()> {
@@ -99,6 +110,14 @@ pub(crate) fn is_unreachable(error: &anyhow::Error) -> bool {
     text.contains("connection failed")
         || text.contains("timed out")
         || text.contains("closed the connection before")
+}
+
+/// The request went out but no answer came back, so pixelflux may have acted.
+pub(crate) fn outcome_unknown(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    text.contains("timed out")
+        || text.contains("closed the connection before")
+        || text.contains("response failed")
 }
 
 fn loopback_port(raw: &str) -> Option<u16> {
@@ -686,5 +705,18 @@ mod tests {
             let body: Value = serde_json::from_slice(&hit.await.unwrap().body).unwrap();
             assert_eq!(body, want);
         }
+    }
+
+    #[test]
+    fn type_timeout_grows_with_text_length() {
+        let typed = |text: String| send_timeout(&PixelfluxAction::Type { text });
+        assert_eq!(typed(String::new()), SEND_TIMEOUT);
+        // 1,000 characters at pixelflux's ~28 ms each take 28 s; count characters, not bytes.
+        assert!(typed("x".repeat(1_000)) >= SEND_TIMEOUT + Duration::from_secs(28));
+        assert_eq!(typed("é".repeat(1_000)), typed("x".repeat(1_000)));
+        let key = PixelfluxAction::Key {
+            chord: "ctrl+l".to_string(),
+        };
+        assert_eq!(send_timeout(&key), SEND_TIMEOUT);
     }
 }
