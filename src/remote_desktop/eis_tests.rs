@@ -9,13 +9,10 @@ use reis::{
 };
 use std::{os::unix::net::UnixStream, sync::mpsc, time::Instant};
 
-struct Portal(std::sync::Mutex<Option<UnixStream>>);
-
-#[derive(Debug, zbus::DBusError)]
-#[zbus(prefix = "org.freedesktop.portal.Error")]
-enum PortalError {
-    NotSupported(String),
-}
+struct Portal(
+    std::sync::Mutex<Option<UnixStream>>,
+    std::sync::atomic::AtomicUsize,
+);
 
 #[zbus::interface(name = "org.freedesktop.portal.RemoteDesktop")]
 impl Portal {
@@ -24,13 +21,14 @@ impl Portal {
         &self,
         _session: OwnedObjectPath,
         _options: HashMap<String, OwnedValue>,
-    ) -> std::result::Result<zbus::zvariant::OwnedFd, PortalError> {
-        let socket = self
-            .0
-            .lock()
-            .unwrap()
-            .take()
-            .ok_or_else(|| PortalError::NotSupported("fixture EIS unavailable".into()))?;
+    ) -> zbus::fdo::Result<zbus::zvariant::OwnedFd> {
+        let socket = self.0.lock().unwrap().take().ok_or_else(|| {
+            if self.1.fetch_add(1, Ordering::Relaxed) == 0 {
+                zbus::fdo::Error::Failed("fixture EIS unavailable".into())
+            } else {
+                zbus::fdo::Error::NotSupported("fixture EIS unavailable".into())
+            }
+        })?;
         let fd: std::os::fd::OwnedFd = socket.into();
         Ok(fd.into())
     }
@@ -148,7 +146,10 @@ async fn gnome_fractional_pointer_reaches_full_eis_region() {
         .unwrap()
         .serve_at(
             PORTAL_DESKTOP_PATH,
-            Portal(std::sync::Mutex::new(Some(client))),
+            Portal(
+                std::sync::Mutex::new(Some(client)),
+                std::sync::atomic::AtomicUsize::new(0),
+            ),
         )
         .unwrap()
         .build()
@@ -157,13 +158,13 @@ async fn gnome_fractional_pointer_reaches_full_eis_region() {
     let connection = Connection::session().await.unwrap();
     let session = OwnedObjectPath::try_from("/fixture/session").unwrap();
     assert!(
-        portal_eis_input(&connection, &session, DeviceKind::Keyboard)
+        portal_eis_input(&connection, &session, DeviceKind::Keyboard, true)
             .await
             .unwrap()
             .is_none(),
         "GNOME keyboard must keep the legacy path"
     );
-    let ei = portal_eis_input(&connection, &session, DeviceKind::Pointer)
+    let ei = portal_eis_input(&connection, &session, DeviceKind::Pointer, true)
         .await
         .unwrap()
         .expect("GNOME pointer session must negotiate EIS");
@@ -205,11 +206,18 @@ async fn gnome_fractional_pointer_reaches_full_eis_region() {
     }
     drop(proxy);
     assert!(
-        portal_eis_input(&connection, &session, DeviceKind::Pointer)
+        portal_eis_input(&connection, &session, DeviceKind::Pointer, true)
             .await
             .unwrap()
             .is_none(),
         "unsupported EIS must retain legacy fallback"
+    );
+    assert!(
+        portal_eis_input(&connection, &session, DeviceKind::Pointer, true)
+            .await
+            .unwrap()
+            .is_none(),
+        "standard D-Bus NotSupported must retain legacy fallback"
     );
     drop(fixture);
     peer.join().unwrap();

@@ -153,6 +153,25 @@ pub enum ScrollDirection {
 }
 
 pub async fn start_portal_pointer_session() -> Result<PortalPointerSession> {
+    match start_portal_pointer_session_inner(true).await {
+        Err(error) if error.is::<GnomeEisStartupFailure>() => {
+            eprintln!("[computer-use-linux] GNOME EIS startup failed ({error:#}); starting a fresh legacy pointer session");
+            start_portal_pointer_session_inner(false).await
+        }
+        result => result,
+    }
+}
+
+#[derive(Debug)]
+struct GnomeEisStartupFailure(String);
+impl std::fmt::Display for GnomeEisStartupFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for GnomeEisStartupFailure {}
+
+async fn start_portal_pointer_session_inner(try_gnome_eis: bool) -> Result<PortalPointerSession> {
     hydrate_session_bus_env();
 
     let connection = Connection::session()
@@ -172,12 +191,12 @@ pub async fn start_portal_pointer_session() -> Result<PortalPointerSession> {
         devices & DEVICE_POINTER != 0 && !streams.is_empty(),
         restore_token,
     );
-    commit_restore_permit(permit, restore_token).await;
-
     if devices & DEVICE_POINTER == 0 {
+        commit_restore_permit(permit, restore_token).await;
         bail!("remote desktop portal session started without pointer access");
     }
     if streams.is_empty() {
+        commit_restore_permit(permit, restore_token).await;
         bail!("remote desktop portal session started without any monitor streams");
     }
 
@@ -193,12 +212,36 @@ pub async fn start_portal_pointer_session() -> Result<PortalPointerSession> {
     {
         assign_stream_pixel_scales(&mut streams, desktop_layout.as_deref());
     }
-    let ei = portal_eis_input(&connection, &session_handle, DeviceKind::Pointer).await?;
+    let gnome_eis = try_gnome_eis
+        && env_token_contains("XDG_CURRENT_DESKTOP", "gnome")
+        && streams.iter().any(|stream| stream.pixel_scale > 1.0);
+    let ei = match portal_eis_input(&connection, &session_handle, DeviceKind::Pointer, gnome_eis)
+        .await
+    {
+        Ok(ei) => ei,
+        Err(error) if gnome_eis => {
+            // ConnectToEIS may already have upgraded this session, including
+            // after a lost reply. Notify* is then forbidden. No input was sent;
+            // close it and discard its token before opening a legacy session.
+            let _ = tokio::time::timeout(
+                RELEASE_TIMEOUT,
+                close_portal_session(&connection, &session_handle),
+            )
+            .await;
+            cleanup.disarm();
+            commit_restore_permit(permit, ParsedRestoreToken::Absent).await;
+            return Err(anyhow::Error::new(GnomeEisStartupFailure(format!(
+                "{error:#}"
+            ))));
+        }
+        Err(error) => return Err(error),
+    };
     if ei.is_some() {
         // EIS takes global logical coordinates on COSMIC and GNOME. Stream
         // rectangles select outputs; the D-Bus stream pixel scale is unused.
         normalize_eis_streams(&mut streams, desktop_layout.as_deref());
     }
+    commit_restore_permit(permit, restore_token).await;
     cleanup.disarm();
 
     Ok(PortalPointerSession {
@@ -245,7 +288,7 @@ pub async fn start_portal_keyboard_session() -> Result<PortalKeyboardSession> {
     if devices & DEVICE_KEYBOARD == 0 {
         bail!("remote desktop portal session started without keyboard access");
     }
-    let ei = portal_eis_input(&connection, &session_handle, DeviceKind::Keyboard).await?;
+    let ei = portal_eis_input(&connection, &session_handle, DeviceKind::Keyboard, false).await?;
     cleanup.disarm();
 
     Ok(PortalKeyboardSession {
@@ -1932,13 +1975,15 @@ async fn portal_eis_input(
     connection: &Connection,
     session: &OwnedObjectPath,
     kind: DeviceKind,
+    try_gnome_pointer: bool,
 ) -> Result<Option<EiInput>> {
     // GNOME's legacy absolute-motion path scales stream coordinates, but the
     // portal validates against logical stream sizes first (#330). EIS uses
     // negotiated logical regions and reaches the whole fractional-scale output.
     // Keep GNOME keyboard sessions on D-Bus: older EIS peers lack text devices.
-    let gnome_pointer =
-        matches!(kind, DeviceKind::Pointer) && env_token_contains("XDG_CURRENT_DESKTOP", "gnome");
+    let gnome_pointer = try_gnome_pointer
+        && matches!(kind, DeviceKind::Pointer)
+        && env_token_contains("XDG_CURRENT_DESKTOP", "gnome");
     if !env_token_contains("XDG_CURRENT_DESKTOP", "cosmic") && !gnome_pointer {
         return Ok(None);
     }
@@ -1956,10 +2001,15 @@ async fn portal_eis_input(
             if matches!(
                 name.as_str(),
                 "org.freedesktop.DBus.Error.UnknownMethod"
+                    | "org.freedesktop.DBus.Error.NotSupported"
                     | "org.freedesktop.portal.Error.NotSupported"
             ) =>
         {
             return Ok(None)
+        }
+        Err(zbus::Error::MethodError(_, _, _)) if gnome_pointer => {
+            // A definitive rejection leaves the approved session on D-Bus.
+            return Ok(None);
         }
         Err(error) => {
             return Err(error).context("RemoteDesktop ConnectToEIS failed; no input was sent")
