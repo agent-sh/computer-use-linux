@@ -197,16 +197,7 @@ pub async fn start_portal_pointer_session() -> Result<PortalPointerSession> {
     if ei.is_some() {
         // EIS takes global logical coordinates on COSMIC and GNOME. Stream
         // rectangles select outputs; the D-Bus stream pixel scale is unused.
-        for stream in &mut streams {
-            if let Some(monitor) = desktop_layout.as_ref().and_then(|layout| {
-                layout
-                    .iter()
-                    .find(|monitor| stream.position == Some((monitor.x, monitor.y)))
-            }) {
-                stream.size = Some((monitor.width, monitor.height));
-                stream.pixel_scale = 1.0;
-            }
-        }
+        normalize_eis_streams(&mut streams, desktop_layout.as_deref());
     }
     cleanup.disarm();
 
@@ -220,6 +211,19 @@ pub async fn start_portal_pointer_session() -> Result<PortalPointerSession> {
         input_lock: portal_input_lock(),
         valid: Arc::new(AtomicBool::new(true)),
     })
+}
+
+fn normalize_eis_streams(streams: &mut [PortalStream], layout: Option<&[LogicalMonitor]>) {
+    for stream in streams {
+        if let Some(monitor) = layout.and_then(|layout| {
+            layout
+                .iter()
+                .find(|monitor| stream.position == Some((monitor.x, monitor.y)))
+        }) {
+            stream.size = Some((monitor.width, monitor.height));
+            stream.pixel_scale = 1.0;
+        }
+    }
 }
 
 pub async fn start_portal_keyboard_session() -> Result<PortalKeyboardSession> {

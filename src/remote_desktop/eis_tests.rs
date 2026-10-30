@@ -11,6 +11,12 @@ use std::{os::unix::net::UnixStream, sync::mpsc, time::Instant};
 
 struct Portal(std::sync::Mutex<Option<UnixStream>>);
 
+#[derive(Debug, zbus::DBusError)]
+#[zbus(prefix = "org.freedesktop.portal.Error")]
+enum PortalError {
+    NotSupported(String),
+}
+
 #[zbus::interface(name = "org.freedesktop.portal.RemoteDesktop")]
 impl Portal {
     #[zbus(name = "ConnectToEIS")]
@@ -18,13 +24,13 @@ impl Portal {
         &self,
         _session: OwnedObjectPath,
         _options: HashMap<String, OwnedValue>,
-    ) -> zbus::fdo::Result<zbus::zvariant::OwnedFd> {
+    ) -> std::result::Result<zbus::zvariant::OwnedFd, PortalError> {
         let socket = self
             .0
             .lock()
             .unwrap()
             .take()
-            .ok_or_else(|| zbus::fdo::Error::Failed("socket already taken".into()))?;
+            .ok_or_else(|| PortalError::NotSupported("fixture EIS unavailable".into()))?;
         let fd: std::os::fd::OwnedFd = socket.into();
         Ok(fd.into())
     }
@@ -150,20 +156,24 @@ async fn gnome_fractional_pointer_reaches_full_eis_region() {
         .unwrap();
     let connection = Connection::session().await.unwrap();
     let session = OwnedObjectPath::try_from("/fixture/session").unwrap();
+    assert!(
+        portal_eis_input(&connection, &session, DeviceKind::Keyboard)
+            .await
+            .unwrap()
+            .is_none(),
+        "GNOME keyboard must keep the legacy path"
+    );
     let ei = portal_eis_input(&connection, &session, DeviceKind::Pointer)
         .await
         .unwrap()
         .expect("GNOME pointer session must negotiate EIS");
     // EIS streams select outputs in logical space, just as on COSMIC.
-    let streams = vec![PortalStream {
+    let mut streams = vec![PortalStream {
         node_id: 7,
         position: Some((0, 0)),
         size: Some((1536, 960)),
-        pixel_scale: 1.0,
+        pixel_scale: 1.25,
     }];
-    let proxy = input_proxy(&connection, Some(ei), streams.clone())
-        .await
-        .unwrap();
     let layout = [LogicalMonitor {
         x: 0,
         y: 0,
@@ -171,6 +181,11 @@ async fn gnome_fractional_pointer_reaches_full_eis_region() {
         height: 960,
         scale: 1.25,
     }];
+    normalize_eis_streams(&mut streams, Some(&layout));
+    assert_eq!(streams[0].pixel_scale, 1.0);
+    let proxy = input_proxy(&connection, Some(ei), streams.clone())
+        .await
+        .unwrap();
     for (capture, expected) in [
         ((1650, 975), (1320.0, 780.0)),
         ((1919, 1199), (1535.0, 959.0)),
@@ -189,6 +204,13 @@ async fn gnome_fractional_pointer_reaches_full_eis_region() {
         );
     }
     drop(proxy);
+    assert!(
+        portal_eis_input(&connection, &session, DeviceKind::Pointer)
+            .await
+            .unwrap()
+            .is_none(),
+        "unsupported EIS must retain legacy fallback"
+    );
     drop(fixture);
     peer.join().unwrap();
 }
