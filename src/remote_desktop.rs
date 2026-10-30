@@ -193,10 +193,10 @@ pub async fn start_portal_pointer_session() -> Result<PortalPointerSession> {
     {
         assign_stream_pixel_scales(&mut streams, desktop_layout.as_deref());
     }
-    let ei = cosmic_eis_input(&connection, &session_handle, DeviceKind::Pointer).await?;
+    let ei = portal_eis_input(&connection, &session_handle, DeviceKind::Pointer).await?;
     if ei.is_some() {
-        // COSMIC video stream sizes are physical, while EIS takes global
-        // logical coordinates. These streams now select outputs only.
+        // EIS takes global logical coordinates on COSMIC and GNOME. Stream
+        // rectangles select outputs; the D-Bus stream pixel scale is unused.
         for stream in &mut streams {
             if let Some(monitor) = desktop_layout.as_ref().and_then(|layout| {
                 layout
@@ -241,7 +241,7 @@ pub async fn start_portal_keyboard_session() -> Result<PortalKeyboardSession> {
     if devices & DEVICE_KEYBOARD == 0 {
         bail!("remote desktop portal session started without keyboard access");
     }
-    let ei = cosmic_eis_input(&connection, &session_handle, DeviceKind::Keyboard).await?;
+    let ei = portal_eis_input(&connection, &session_handle, DeviceKind::Keyboard).await?;
     cleanup.disarm();
 
     Ok(PortalKeyboardSession {
@@ -1924,12 +1924,18 @@ async fn input_proxy(
     })
 }
 
-async fn cosmic_eis_input(
+async fn portal_eis_input(
     connection: &Connection,
     session: &OwnedObjectPath,
     kind: DeviceKind,
 ) -> Result<Option<EiInput>> {
-    if !env_token_contains("XDG_CURRENT_DESKTOP", "cosmic") {
+    // GNOME's legacy absolute-motion path scales stream coordinates, but the
+    // portal validates against logical stream sizes first (#330). EIS uses
+    // negotiated logical regions and reaches the whole fractional-scale output.
+    // Keep GNOME keyboard sessions on D-Bus: older EIS peers lack text devices.
+    let gnome_pointer =
+        matches!(kind, DeviceKind::Pointer) && env_token_contains("XDG_CURRENT_DESKTOP", "gnome");
+    if !env_token_contains("XDG_CURRENT_DESKTOP", "cosmic") && !gnome_pointer {
         return Ok(None);
     }
     let proxy = remote_desktop_proxy(connection).await?;
@@ -2319,6 +2325,9 @@ fn request_token(prefix: &str) -> String {
     })
     .collect()
 }
+
+#[cfg(test)]
+mod eis_tests;
 
 #[cfg(test)]
 mod tests {

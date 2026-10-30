@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Drive Selkies desktops through the configured pixelflux computer-use API for screenshots, clicks, scrolling, drags and keyboard input. Map element targets from logical layout coordinates and keep uncertain input outcomes from being replayed.
+
+### Fixed
+
+- Use the portal's negotiated EIS pointer regions on GNOME so fractional scaling can reach the right and bottom screen edges. Keep the legacy D-Bus path when EIS is unsupported.
+- Bound wlroots output discovery even when a Wayland peer stops responding, and include pixelflux in input readiness diagnostics.
+
+Thanks @berney for the pixelflux backend ([#331](https://github.com/agent-sh/computer-use-linux/pull/331)) and @DenysFizer for the GNOME fractional-scaling report ([#330](https://github.com/agent-sh/computer-use-linux/issues/330)).
+
 ## [0.7.32] - 2026-10-29
 
 ### Added
