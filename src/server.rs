@@ -1755,22 +1755,19 @@ impl ComputerUseLinux {
             }
             _ => target_point,
         };
-        if let Some((x, y)) = pixelflux_point {
-            if let Some(output) = self
-                .pixelflux_send(
-                    "scroll",
-                    crate::pixelflux::PixelfluxAction::Scroll {
-                        x,
-                        y,
-                        direction,
-                        amount: u32::try_from(units.max(1)).unwrap_or(1),
-                    },
-                    received.clone(),
-                )
-                .await
-            {
-                return Json(output);
-            }
+        if let Some(output) = self
+            .pixelflux_send(
+                "scroll",
+                crate::pixelflux::PixelfluxAction::Scroll {
+                    point: pixelflux_point,
+                    direction,
+                    amount: u32::try_from(units.max(1)).unwrap_or(1),
+                },
+                received.clone(),
+            )
+            .await
+        {
+            return Json(output);
         }
 
         let off_screen_note = match target_point {
@@ -5105,6 +5102,9 @@ impl ComputerUseLinux {
             return None;
         }
         let button = pixelflux_pointer_button(button)?;
+        if count.clamp(1, 10) > 1 && !matches!(button, PointerButton::Left) {
+            return None;
+        }
         let point = if element_click {
             self.pixelflux_element_point(element_bounds).await
         } else {
@@ -15875,10 +15875,24 @@ mod pixelflux_routing_tests {
         )
         .unwrap();
         std::fs::set_permissions(&ydotool, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let systemctl = dir.join("systemctl");
+        std::fs::write(&systemctl, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o700)).unwrap();
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", test, "--nocapture"])
             .env_clear()
             .env("PATH", &dir)
+            .env("HOME", &dir)
+            .env("XDG_RUNTIME_DIR", &dir)
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}/no-bus", dir.display()),
+            )
+            .env("DISPLAY", ":9876")
+            .env("WAYLAND_DISPLAY", "no-wayland")
+            .env("XDG_CURRENT_DESKTOP", "fixture")
+            .env("XDG_SESSION_TYPE", "wayland")
+            .env("COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER", "1")
             .env("CUL_PIXELFLUX_CHILD", mode)
             .env("CUL_PIXELFLUX_LOG", &log)
             .env("CUL_PIXELFLUX_OUT", &out)
@@ -15895,6 +15909,21 @@ mod pixelflux_routing_tests {
     }
 
     async fn record_click_message() {
+        if std::env::var("CUL_PIXELFLUX_CHILD").as_deref() == Ok("scroll") {
+            let params = serde_json::from_value(serde_json::json!({"direction": "down"})).unwrap();
+            let result = super::ComputerUseLinux::default()
+                .scroll(rmcp::handler::server::wrapper::Parameters(params))
+                .await
+                .unwrap();
+            std::fs::write(
+                std::env::var("CUL_PIXELFLUX_OUT").unwrap(),
+                result.structured_content.unwrap()["message"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            return;
+        }
         let params = serde_json::from_value(serde_json::json!({"x": 10, "y": 20})).unwrap();
         let result = super::ComputerUseLinux::default()
             .click(rmcp::handler::server::wrapper::Parameters(params))
@@ -15905,6 +15934,38 @@ mod pixelflux_routing_tests {
             .unwrap()
             .to_string();
         std::fs::write(std::env::var("CUL_PIXELFLUX_OUT").unwrap(), message).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pixelflux_untargeted_scroll_uses_current_cursor() {
+        if std::env::var("CUL_PIXELFLUX_CHILD").as_deref() == Ok("scroll") {
+            return record_click_message().await;
+        }
+        let (message, recorded) = click_after_probe(
+            "server::pixelflux_routing_tests::pixelflux_untargeted_scroll_uses_current_cursor",
+            "scroll",
+            Some("HTTP/1.1 200 X\r\nContent-Length: 15\r\n\r\n{\"result\":\"ok\"}"),
+        );
+        assert!(
+            message.contains("Action sent through pixelflux"),
+            "{message}"
+        );
+        assert!(recorded.is_empty(), "{recorded}");
+    }
+
+    #[tokio::test]
+    async fn pixelflux_malformed_reply_reports_unknown_outcome() {
+        if std::env::var("CUL_PIXELFLUX_CHILD").as_deref() == Ok("malformed") {
+            return record_click_message().await;
+        }
+        let (message, recorded) = click_after_probe(
+            "server::pixelflux_routing_tests::pixelflux_malformed_reply_reports_unknown_outcome",
+            "malformed",
+            Some("HTTP/1.1 200 X\r\nContent-Length: 4\r\n\r\noops"),
+        );
+        assert!(message.contains("it may have run"), "{message}");
+        assert!(!message.contains("did not accept"), "{message}");
+        assert!(recorded.is_empty(), "{recorded}");
     }
 
     #[tokio::test]

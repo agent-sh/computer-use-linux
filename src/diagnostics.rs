@@ -1118,7 +1118,8 @@ fn can_send_development_input(
 ) -> bool {
     let force_ydotool = env_flag_enabled_any(FORCE_YDOTOOL_KEYBOARD_ENV_KEYS);
     let force_xdotool = env_flag_enabled_any(FORCE_XDOTOOL_KEYBOARD_ENV_KEYS);
-    portal_keyboard_input_available(platform, remote_desktop_keyboard)
+    input.pixelflux.ok
+        || portal_keyboard_input_available(platform, remote_desktop_keyboard)
         || platform_is_wayland(platform)
             && wtype_compatible_wayland_desktop(platform.xdg_current_desktop.as_deref())
             && input.wtype.ok
@@ -2097,6 +2098,18 @@ pub(crate) mod tests {
 
         assert_eq!(capabilities.input, ["xdotool", "ydotool"]);
         assert_eq!(capabilities.preferred.input.as_deref(), Some("xdotool"));
+    }
+
+    #[test]
+    fn pixelflux_only_desktop_is_input_ready() {
+        let platform = platform_report();
+        let mut input = input_report(false);
+        input.pixelflux = Check::ok("loopback port 8080");
+        assert!(can_send_development_input(
+            &platform,
+            &Check::fail("missing portal"),
+            &input,
+        ));
     }
 
     #[test]

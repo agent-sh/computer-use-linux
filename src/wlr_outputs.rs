@@ -1,9 +1,8 @@
 use crate::remote_desktop::LogicalMonitor;
 use anyhow::{Context, Result};
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use wayland_client::globals::{registry_queue_init, GlobalListContents};
-use wayland_client::protocol::wl_registry;
+use std::{collections::HashMap, os::fd::AsRawFd};
+use wayland_client::protocol::{wl_callback, wl_registry};
 use wayland_client::{event_created_child, Connection, Dispatch, Proxy, QueueHandle};
 use wayland_protocols_wlr::output_management::v1::client::{
     zwlr_output_head_v1, zwlr_output_manager_v1, zwlr_output_mode_v1,
@@ -56,37 +55,92 @@ pub(crate) fn logical_layout(heads: &[RecordedHead]) -> Option<Vec<LogicalMonito
 }
 
 pub(crate) async fn wlr_output_layout() -> Option<Vec<LogicalMonitor>> {
-    // blocking_dispatch can wait past the loop deadline; bound the whole task.
-    tokio::time::timeout(LAYOUT_TIMEOUT, tokio::task::spawn_blocking(collect_layout))
+    tokio::task::spawn_blocking(collect_layout)
         .await
-        .ok()?
         .ok()
         .and_then(Result::ok)
 }
 
 fn collect_layout() -> Result<Vec<LogicalMonitor>> {
-    let conn = Connection::connect_to_env().context("no Wayland display")?;
-    let (globals, mut event_queue) =
-        registry_queue_init(&conn).context("Wayland registry failed")?;
+    // Open a separate connection without consuming an inherited WAYLAND_SOCKET.
+    let display = std::path::PathBuf::from(
+        std::env::var_os("WAYLAND_DISPLAY").context("no Wayland display")?,
+    );
+    let path = if display.is_absolute() {
+        display
+    } else {
+        let runtime = std::path::PathBuf::from(
+            std::env::var_os("XDG_RUNTIME_DIR").context("no Wayland runtime directory")?,
+        );
+        anyhow::ensure!(
+            runtime.is_absolute(),
+            "Wayland runtime directory is not absolute"
+        );
+        runtime.join(display)
+    };
+    let socket = crate::x11_display::connect_unix(
+        path.to_str().context("Wayland socket path is not UTF-8")?,
+        Instant::now() + LAYOUT_TIMEOUT,
+    )?;
+    let conn = Connection::from_socket(socket).context("Wayland connection failed")?;
+    collect_layout_from_connection(conn)
+}
+
+fn collect_layout_from_connection(conn: Connection) -> Result<Vec<LogicalMonitor>> {
+    let mut event_queue = conn.new_event_queue::<State>();
     let mut state = State::default();
     let qh = event_queue.handle();
-    state.manager = globals
-        .bind::<zwlr_output_manager_v1::ZwlrOutputManagerV1, _, _>(&qh, 1..=4, ())
-        .ok();
-    if state.manager.is_none() {
-        anyhow::bail!("zwlr_output_manager_v1 is not advertised");
-    }
+    let _registry = conn.display().get_registry(&qh, ());
+    conn.display().sync(&qh, ());
     let deadline = Instant::now() + LAYOUT_TIMEOUT;
-    while !state.done && Instant::now() < deadline {
+    loop {
+        anyhow::ensure!(Instant::now() < deadline, "wlr output layout timed out");
         event_queue
-            .blocking_dispatch(&mut state)
+            .dispatch_pending(&mut state)
             .context("Wayland dispatch failed")?;
+        if state.done {
+            break;
+        }
+        anyhow::ensure!(
+            !state.registry_done || state.manager.is_some(),
+            "zwlr_output_manager_v1 is not advertised"
+        );
+        event_queue.flush().context("Wayland flush failed")?;
+        if let Some(guard) = event_queue.prepare_read() {
+            let mut fd = libc::pollfd {
+                fd: guard.connection_fd().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let millis = remaining.as_millis().min(i32::MAX as u128) as i32;
+            // SAFETY: fd describes one live Wayland connection for this call.
+            let ready = unsafe { libc::poll(&mut fd, 1, millis) };
+            anyhow::ensure!(ready != 0, "wlr output layout timed out");
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error).context("Wayland poll failed");
+            }
+            match guard.read() {
+                Ok(_) => {}
+                Err(wayland_client::backend::WaylandError::Io(error))
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(error) => return Err(error).context("Wayland read failed"),
+            }
+        }
     }
     state.layout().context("wlr output layout was not ready")
 }
 
 #[derive(Default)]
 struct State {
+    registry_done: bool,
     manager: Option<zwlr_output_manager_v1::ZwlrOutputManagerV1>,
     done: bool,
     heads: HashMap<u32, Head>,
@@ -220,21 +274,59 @@ impl Dispatch<zwlr_output_mode_v1::ZwlrOutputModeV1, ()> for State {
     }
 }
 
-impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
+impl Dispatch<wl_callback::WlCallback, ()> for State {
     fn event(
-        _: &mut Self,
-        _: &wl_registry::WlRegistry,
-        _: wl_registry::Event,
-        _: &GlobalListContents,
+        state: &mut Self,
+        _: &wl_callback::WlCallback,
+        _: wl_callback::Event,
+        _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        state.registry_done = true;
+    }
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for State {
+    fn event(
+        state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
+            if interface == "zwlr_output_manager_v1" && version > 0 && state.manager.is_none() {
+                state.manager = Some(registry.bind(name, version.min(4), qh, ()));
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stalled_peer_releases_layout_worker() {
+        let (client, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (finished, result) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let connection = Connection::from_socket(client).unwrap();
+            let _ = finished.send(collect_layout_from_connection(connection));
+        });
+        let completed = result.recv_timeout(LAYOUT_TIMEOUT + Duration::from_secs(1));
+        drop(peer);
+        worker.join().unwrap();
+        assert!(completed.is_ok(), "layout worker outlived its deadline");
+        assert!(completed.unwrap().is_err());
+    }
 
     #[test]
     fn logical_layout_divides_mode_by_scale() {

@@ -66,8 +66,7 @@ pub(crate) enum PixelfluxAction {
         to: (i32, i32),
     },
     Scroll {
-        x: i32,
-        y: i32,
+        point: Option<(i32, i32)>,
         direction: ScrollDirection,
         amount: u32,
     },
@@ -114,11 +113,24 @@ pub(crate) fn is_unreachable(error: &anyhow::Error) -> bool {
 
 /// The request went out but no answer came back, so pixelflux may have acted.
 pub(crate) fn outcome_unknown(error: &anyhow::Error) -> bool {
-    let text = format!("{error:#}");
-    text.contains("timed out")
-        || text.contains("closed the connection before")
-        || text.contains("response failed")
+    error
+        .downcast_ref::<DispatchError>()
+        .is_some_and(|error| matches!(error, DispatchError::Unknown(_)))
 }
+
+#[derive(Debug)]
+enum DispatchError {
+    Unknown(String),
+    Rejected(String),
+}
+impl std::fmt::Display for DispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown(message) | Self::Rejected(message) => f.write_str(message),
+        }
+    }
+}
+impl std::error::Error for DispatchError {}
 
 fn loopback_port(raw: &str) -> Option<u16> {
     let port = if let Some(rest) = raw.strip_prefix("[::1]:") {
@@ -162,16 +174,20 @@ fn action_body(action: &PixelfluxAction) -> Result<Vec<u8>> {
             "coordinate": [to.0, to.1],
         }),
         PixelfluxAction::Scroll {
-            x,
-            y,
+            point,
             direction,
             amount,
-        } => json!({
+        } => {
+            let mut value = json!({
             "action": "scroll",
-            "coordinate": [x, y],
             "scroll_direction": scroll_name(*direction),
             "scroll_amount": amount,
-        }),
+            });
+            if let Some((x, y)) = point {
+                value["coordinate"] = json!([x, y]);
+            }
+            value
+        }
         PixelfluxAction::Key { chord } => json!({"action": "key", "text": chord}),
         PixelfluxAction::Type { text } => json!({"action": "type", "text": text}),
     };
@@ -205,8 +221,18 @@ async fn exchange(
 ) -> Result<PixelfluxReply> {
     let token = &config.token;
     match tokio::time::timeout(timeout, exchange_inner(config, body)).await {
-        Ok(result) => result.map_err(|error| anyhow!(redact(&format!("{error:#}"), token))),
-        Err(_) => Err(anyhow!(redact("pixelflux timed out", token))),
+        Ok(result) => result.map_err(|error| {
+            let message = redact(&format!("{error:#}"), token);
+            if outcome_unknown(&error) {
+                anyhow!(DispatchError::Unknown(message))
+            } else {
+                anyhow!(message)
+            }
+        }),
+        Err(_) => Err(anyhow!(DispatchError::Unknown(redact(
+            "pixelflux timed out",
+            token
+        )))),
     }
 }
 
@@ -229,19 +255,39 @@ async fn exchange_inner(config: &PixelfluxConfig, body: &[u8]) -> Result<Pixelfl
     );
     let mut request = header.into_bytes();
     request.extend_from_slice(body);
-    stream
+    if let Err(error) = stream
         .write_all(&request)
         .await
-        .context("pixelflux request failed")?;
-    let (status, headers, leftover) = read_headers(&mut stream).await?;
-    let payload = read_body(&mut stream, &headers, leftover).await?;
+        .context("pixelflux request failed")
+    {
+        return Err(anyhow!(DispatchError::Unknown(format!("{error:#}"))));
+    }
+    read_reply(&mut stream).await.map_err(|error| {
+        if matches!(
+            error.downcast_ref::<DispatchError>(),
+            Some(DispatchError::Rejected(_))
+        ) {
+            error
+        } else {
+            anyhow!(DispatchError::Unknown(format!("{error:#}")))
+        }
+    })
+}
+
+async fn read_reply(stream: &mut TcpStream) -> Result<PixelfluxReply> {
+    let (status, headers, leftover) = read_headers(stream).await?;
+    let payload = read_body(stream, &headers, leftover).await?;
     let value: Value =
         serde_json::from_slice(&payload).context("pixelflux response was not JSON")?;
     if let Some(error) = value.get("error").and_then(Value::as_str) {
-        bail!("pixelflux returned HTTP {status}: {error}");
+        return Err(anyhow!(DispatchError::Rejected(format!(
+            "pixelflux returned HTTP {status}: {error}"
+        ))));
     }
     if !(200..300).contains(&status) {
-        bail!("pixelflux returned HTTP {status}");
+        return Err(anyhow!(DispatchError::Rejected(format!(
+            "pixelflux returned HTTP {status}"
+        ))));
     }
     let data = match value.get("data").and_then(Value::as_str) {
         Some(encoded) => Some(
@@ -673,12 +719,19 @@ mod tests {
             ),
             (
                 PixelfluxAction::Scroll {
-                    x: 5,
-                    y: 6,
+                    point: Some((5, 6)),
                     direction: ScrollDirection::Down,
                     amount: 3,
                 },
                 json!({"action":"scroll","coordinate":[5,6],"scroll_direction":"down","scroll_amount":3}),
+            ),
+            (
+                PixelfluxAction::Scroll {
+                    point: None,
+                    direction: ScrollDirection::Down,
+                    amount: 3,
+                },
+                json!({"action":"scroll","scroll_direction":"down","scroll_amount":3}),
             ),
             (
                 PixelfluxAction::Key {
