@@ -7,12 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.33] - 2026-10-30
+
 ### Added
 
 - Drive Selkies desktops through the configured pixelflux computer-use API for screenshots, clicks, scrolling, drags and keyboard input. Map element targets from logical layout coordinates and keep uncertain input outcomes from being replayed.
 
 ### Fixed
 
+- Keep pixelflux input serialized until its request completes, including after the caller cancels it.
 - Use the portal's negotiated EIS pointer regions on GNOME so fractional scaling can reach the right and bottom screen edges. Keep the legacy D-Bus path when EIS is unsupported.
 - Bound wlroots output discovery even when a Wayland peer stops responding, and include pixelflux in input readiness diagnostics.
 
@@ -966,7 +969,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.32...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.33...HEAD
+[0.7.33]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.32...v0.7.33
 [0.7.32]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.31...v0.7.32
 [0.7.31]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.30...v0.7.31
 [0.7.30]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.29...v0.7.30
