@@ -105,6 +105,12 @@ pub(crate) async fn probe(config: &PixelfluxConfig) -> Result<()> {
 }
 
 pub(crate) fn is_unreachable(error: &anyhow::Error) -> bool {
+    if matches!(
+        error.downcast_ref::<DispatchError>(),
+        Some(DispatchError::Rejected(_))
+    ) {
+        return false;
+    }
     let text = format!("{error:#}");
     text.contains("connection failed")
         || text.contains("timed out")
@@ -225,6 +231,11 @@ async fn exchange(
             let message = redact(&format!("{error:#}"), token);
             if outcome_unknown(&error) {
                 anyhow!(DispatchError::Unknown(message))
+            } else if matches!(
+                error.downcast_ref::<DispatchError>(),
+                Some(DispatchError::Rejected(_))
+            ) {
+                anyhow!(DispatchError::Rejected(message))
             } else {
                 anyhow!(message)
             }
@@ -706,6 +717,22 @@ mod tests {
         assert_eq!(body["text"], text);
         assert_eq!(body["action"], "type");
     }
+    #[tokio::test]
+    async fn explicit_probe_rejection_is_not_unreachable() {
+        let payload = br#"{"error":"backend timed out"}"#;
+        let mut response = format!(
+            "HTTP/1.1 500 X\r\nContent-Length: {}\r\n\r\n",
+            payload.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(payload);
+        let (port, hit) = serve(response).await;
+        let error = probe(&config(port)).await.unwrap_err();
+        hit.await.unwrap();
+        assert!(!is_unreachable(&error), "{error:#}");
+        assert!(!outcome_unknown(&error));
+    }
+
     #[tokio::test]
     async fn remaining_actions_match_observed_fields() {
         let ok = b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"result\":\"ok\"}".to_vec();

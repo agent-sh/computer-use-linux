@@ -15909,6 +15909,12 @@ mod pixelflux_routing_tests {
     }
 
     async fn record_click_message() {
+        for (button, count) in [("right", 2), ("middle", 3)] {
+            assert!(super::ComputerUseLinux::default()
+                .try_pixelflux_click(10, 20, false, None, Some(button), count, None)
+                .await
+                .is_none());
+        }
         if std::env::var("CUL_PIXELFLUX_CHILD").as_deref() == Ok("scroll") {
             let params = serde_json::from_value(serde_json::json!({"direction": "down"})).unwrap();
             let result = super::ComputerUseLinux::default()
