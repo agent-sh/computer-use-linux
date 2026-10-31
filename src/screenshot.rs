@@ -421,13 +421,15 @@ async fn capture_with_pixelflux(
     let reply =
         crate::pixelflux::send(config, &crate::pixelflux::PixelfluxAction::Screenshot).await?;
     let bytes = reply.data.context("pixelflux screenshot had no image")?;
-    let image = image::load_from_memory(&bytes).context("pixelflux screenshot was not an image")?;
+    // Read only the PNG header: a full decode here would inflate an
+    // arbitrary-size image just to learn its dimensions.
+    let (width, height) = png_dimensions(&bytes).context("pixelflux screenshot was not a PNG")?;
     Ok(RawScreenshotCapture {
         mime_type: "image/png".to_string(),
         bytes,
         source: "pixelflux".to_string(),
-        width: image.width(),
-        height: image.height(),
+        width,
+        height,
     })
 }
 

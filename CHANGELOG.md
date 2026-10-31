@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `get_app_state` refuses a screenshot of a targeted window that is not focused before it captures anything. It used to capture the whole desktop first and then refuse, so on a portal session the call raised a consent prompt and grabbed every monitor only to discard the image.
+- Keep the remote desktop restore grant when EIS setup fails after `Start` on a non-GNOME session such as COSMIC, so persistence does not drop the grant and prompt for consent again.
+- Connect the pixelflux client to the configured loopback host instead of always dialing 127.0.0.1, so `[::1]:PORT` reaches an IPv6-only server. Read screenshot dimensions from the PNG header instead of fully decoding the image, and cap the typing request timeout at two minutes.
 
 ## [0.7.34] - 2026-10-31
 
