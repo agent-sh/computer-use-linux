@@ -14,7 +14,7 @@ Provides:
 > `ToolAnnotations` so hosts can distinguish read-only observation from mutating
 > desktop actions.
 
-On labwc, window targeting requires the Selkies IPC patch and its `labwc.sock`; stock labwc does not expose this socket. Activation requires a unique app-id/title match. Window IDs include the title and must be refreshed after it changes. Ambiguous windows are rejected. Window bounds and relative coordinate targeting are unavailable until output scaling can be verified.
+On labwc, window targeting uses the Selkies IPC patch's `labwc.sock` when it exists. Stock labwc and other wlroots compositors that advertise wlr-foreign-toplevel-management use that protocol instead, which reports no pids or bounds. Activation requires a unique app-id/title match. Window IDs include the title and must be refreshed after it changes. Ambiguous windows are rejected. Window bounds and relative coordinate targeting are unavailable until output scaling can be verified.
 
 Native X11 clicks, scrolls and drags use xdotool/XTEST on `DISPLAY`, ahead of uinput and portal input. Install xdotool for this route. Missing or failed commands return an error without a system-wide fallback. Drags send paced intermediate motion and always attempt release after a failed press or motion; verify the drop target afterward.
 
