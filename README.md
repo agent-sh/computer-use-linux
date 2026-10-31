@@ -11,6 +11,9 @@
 
 > Running open models for your company? [**Tiyuvta**](https://tiyuvta.ai/services/) helps with model choice, deployment and optimization, and fine-tuning on your hardware or cloud account.
 
+> Built and maintained with a lot of agent tokens and hours.
+> If it saves you time, [sponsoring](https://github.com/sponsors/avifenesh) helps keep it going.
+
 `computer-use-linux` gives AI agents real, structured control of a local Linux desktop: semantic AT-SPI accessibility trees, bounded screenshots, compositor-aware window targeting, Wayland/X11 input synthesis, single-round-trip post-action verification, and a click-through on-screen activity indicator across **GNOME, KDE Plasma/KWin, Hyprland, niri, COSMIC, i3, labwc, and X11/EWMH**.
 
 ## Quick start
