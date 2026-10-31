@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
+const { spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const https = require('node:https');
@@ -98,6 +99,42 @@ function sha256File(filePath) {
   return hash.digest('hex');
 }
 
+function hostGlibcVersion() {
+  try {
+    return process.report.getReport().header.glibcVersionRuntime || null;
+  } catch {
+    return null;
+  }
+}
+
+// Prebuilt binaries link against the glibc of the release build host. On an
+// older distribution the dynamic loader rejects them before main() runs, and
+// the only message is a terse "GLIBC_x.y not found". Probe the binary once so
+// the install log explains the failure and points at a source build instead.
+function warnIfBinaryCannotRun(binary) {
+  const result = spawnSync(binary, ['--help'], { encoding: 'utf8', timeout: 10000 });
+  if (result.error || result.status === 0) {
+    return;
+  }
+  const required = [...new Set(
+    [...(result.stderr || '').matchAll(/version `GLIBC_([0-9.]+)' not found/g)].map((m) => m[1])
+  )];
+  if (required.length === 0) {
+    return;
+  }
+  const host = hostGlibcVersion() || 'unknown';
+  console.warn(
+    [
+      '[computer-use-linux] WARNING: the prebuilt binary cannot run on this system.',
+      `[computer-use-linux] It requires glibc ${required.join(', ')}; this system has glibc ${host}.`,
+      '[computer-use-linux] Build from source instead (needs a Rust toolchain):',
+      '[computer-use-linux]   git clone https://github.com/agent-sh/computer-use-linux && cd computer-use-linux && ./install.sh',
+      '[computer-use-linux] or: cargo install computer-use-linux',
+      '[computer-use-linux] Then point this wrapper at it with COMPUTER_USE_LINUX_BIN=/path/to/computer-use-linux.',
+    ].join('\n')
+  );
+}
+
 async function main() {
   if (process.env.COMPUTER_USE_LINUX_SKIP_DOWNLOAD === '1') {
     console.log('[computer-use-linux] skipping binary download');
@@ -175,6 +212,7 @@ async function main() {
       fs.rmSync(indicatorPath, { force: true });
     }
     console.log(`[computer-use-linux] installed ${asset} and ${cosmicAsset}${hasIndicator ? ` and ${indicatorAsset}` : ' (release has no indicator)'}`);
+    warnIfBinaryCannotRun(binaryPath);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

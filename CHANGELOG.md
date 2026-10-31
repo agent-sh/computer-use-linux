@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Warn during npm install when the prebuilt binary needs a newer glibc than the host provides (for example on Ubuntu 22.04), and point to a source build instead of leaving only the dynamic loader's `GLIBC_x.y not found` error.
+
 ## [0.7.33] - 2026-10-30
 
 ### Added

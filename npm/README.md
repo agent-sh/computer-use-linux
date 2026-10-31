@@ -27,6 +27,12 @@ npm install -g @agent-sh/computer-use-linux
 computer-use-linux doctor
 ```
 
+The prebuilt binaries link against the glibc of the release build host. If the
+install log warns that the binary needs a newer glibc than your system has
+(for example on Ubuntu 22.04), build from source with `./install.sh` or
+`cargo install computer-use-linux`, then set `COMPUTER_USE_LINUX_BIN` to the
+built binary.
+
 Configure in any MCP client:
 
 ```json
