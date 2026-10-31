@@ -156,8 +156,11 @@ does not yet forward the flag or include the tool in its catalog.
 - **Element targets**: `click`, `scroll`, `perform_action`, and `set_value`
   accept an optional app target (`pid`, `window_id`, `app_id`, `wm_class`,
   `window_title`). With one, an `element_index` or selector from another app's
-  `get_app_state` snapshot is refused. `perform_action` and `set_value` do not
-  focus the window; an `element_identifier` is not checked.
+  `get_app_state` snapshot is refused. When the window backend reports no pid
+  for the target window (i3, sway, COSMIC), the snapshot must have been taken
+  for that window. `perform_action` and `set_value` do not focus the window;
+  an `element_identifier` is refused only when its bus owner is known and is
+  not the target pid.
 - **Click vs. semantic actions**: Plain left `click` by element index or selector prefers a native AT-SPI
   `click`, `press`, or `toggle` action over toolkit bounds,
   avoiding pointer-coordinate conversion when that action is available. Explicit

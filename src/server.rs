@@ -93,6 +93,30 @@ struct CachedAccessibilitySnapshot {
     recovery_scope: Option<AccessibilityRecoveryScope>,
 }
 
+/// The app or window an element action names, as the cached-node target
+/// check sees it: the target pid when one is known, and the resolved window
+/// with its backend when the target named a window.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ElementOwnerTarget {
+    pid: Option<u32>,
+    window: Option<(u64, String)>,
+}
+
+impl ElementOwnerTarget {
+    fn pid(pid: Option<u32>) -> Self {
+        Self { pid, window: None }
+    }
+
+    /// A resolved window target. The window's own pid wins over `pid`, the
+    /// one the caller passed.
+    fn window(window: &WindowInfo, pid: Option<u32>) -> Self {
+        Self {
+            pid: window.pid.or(pid),
+            window: Some((window.window_id, window.backend.clone())),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct AccessibilityRecoveryScope {
     params: GetAppStateParams,
@@ -981,7 +1005,7 @@ impl ComputerUseLinux {
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let mut portal_target_point = None;
         let mut input_focus = None;
-        let mut target_pid = params.pid;
+        let mut owner_target = ElementOwnerTarget::pid(params.pid);
         if let Err(message) = validate_click_coordinate_space(&params) {
             return Json(ActionOutput {
                 ok: false,
@@ -1027,7 +1051,7 @@ impl ComputerUseLinux {
                     });
                 }
             };
-            target_pid = focus_target_pid(focus.as_ref()).or(target_pid);
+            owner_target = focus_owner_target(focus.as_ref(), params.pid);
             tokio::time::sleep(Duration::from_millis(120)).await;
             // Window-relative coordinates: translate by the window's top-left so
             // the agent can click the pixel it saw in a window-cropped screenshot.
@@ -1084,7 +1108,7 @@ impl ComputerUseLinux {
                     params.element_index,
                     &params.selector(),
                     ElementResolvePurpose::Click,
-                    target_pid,
+                    &owner_target,
                 )
                 .await
             {
@@ -1437,7 +1461,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "perform_action",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
-        description = "Invoke an accessibility action exposed by an element selected by index, identifier, or semantic selector. Defaults to the primary action unless action is provided. A stale semantic target can recover once with verified process/window ownership. Recovery invalidates cached indices; call get_app_state before further element_index actions. Pass the target app (pid, window_id, app_id, wm_class, or window_title, as for click) to refuse an element_index or selector from another app's get_app_state snapshot; the window is not focused. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+        description = "Invoke an accessibility action exposed by an element selected by index, identifier, or semantic selector. Defaults to the primary action unless action is provided. A stale semantic target can recover once with verified process/window ownership. Recovery invalidates cached indices; call get_app_state before further element_index actions. Pass the target app (pid, window_id, app_id, wm_class, or window_title, as for click) to refuse an element_index or selector from another app's or window's get_app_state snapshot, and an element_identifier owned by another pid; the window is not focused. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1462,7 +1486,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "set_value",
         output_schema = rmcp::handler::server::tool::schema_for_output::<SetValueToolOutput>(),
-        description = "Set the value of a settable accessibility element selected by index, identifier, or semantic selector. Editable-text writes are verified by exact readback; password fields are explicitly unverifiable. Pass the target app (pid, window_id, app_id, wm_class, or window_title, as for click) to refuse an element_index or selector from another app's get_app_state snapshot; the window is not focused. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+        description = "Set the value of a settable accessibility element selected by index, identifier, or semantic selector. Editable-text writes are verified by exact readback; password fields are explicitly unverifiable. Pass the target app (pid, window_id, app_id, wm_class, or window_title, as for click) to refuse an element_index or selector from another app's or window's get_app_state snapshot, and an element_identifier owned by another pid; the window is not focused. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1592,7 +1616,7 @@ impl ComputerUseLinux {
         };
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let mut portal_target_point = None;
-        let mut target_pid = params.pid;
+        let mut owner_target = ElementOwnerTarget::pid(params.pid);
         // Raise/focus the target window first (parity with click) so wheel
         // events land on the intended app.
         let mut window_target = params.window_target();
@@ -1618,7 +1642,7 @@ impl ComputerUseLinux {
                     });
                 }
             };
-            target_pid = focus_target_pid(focus.as_ref()).or(target_pid);
+            owner_target = focus_owner_target(focus.as_ref(), params.pid);
             tokio::time::sleep(Duration::from_millis(120)).await;
             if params.relative == Some(true) {
                 let Some(focus) = focus.as_ref() else {
@@ -1713,7 +1737,7 @@ impl ComputerUseLinux {
                     params.element_index,
                     &ElementSelector::default(),
                     ElementResolvePurpose::Click,
-                    target_pid,
+                    &owner_target,
                 )
                 .await
             {
@@ -5655,85 +5679,97 @@ impl ComputerUseLinux {
     }
 
     /// Reject an element-targeted action whose cached node belongs to a
-    /// different app than the action's target. A snapshot taken for a pid is
-    /// judged by that pid; an untargeted snapshot mixes apps, so its node is
-    /// judged by the pid that owns it on the accessibility bus. When neither is
-    /// known the action proceeds, since a mismatch cannot be shown.
+    /// different app or window than the action's target. With a target pid,
+    /// a snapshot taken for a pid is judged by that pid; an untargeted
+    /// snapshot mixes apps, so its node is judged by the pid that owns it on
+    /// the accessibility bus. When neither is known the action proceeds, since
+    /// a mismatch cannot be shown. A window target with no known pid (i3,
+    /// sway and COSMIC report none) is judged by the snapshot's window and
+    /// fails closed when the snapshot recorded no comparable window.
     async fn check_node_target(
         &self,
         node: &AccessibilityNode,
-        target_pid: Option<u32>,
+        target: &ElementOwnerTarget,
     ) -> std::result::Result<(), String> {
-        let Some(target_pid) = target_pid else {
+        if let Some(target_pid) = target.pid {
+            let snapshot_pid = self
+                .last_snapshot
+                .lock()
+                .ok()
+                .and_then(|snapshot| snapshot.pid);
+            let owner_pid = match snapshot_pid {
+                Some(pid) => Some(pid),
+                None => object_ref_owner_pid(&node.object_ref).await.ok().flatten(),
+            };
+            return match owner_pid {
+                Some(owner_pid) if owner_pid != target_pid => Err(node_target_mismatch_message(
+                    node.index, owner_pid, target_pid,
+                )),
+                _ => Ok(()),
+            };
+        }
+        let Some((target_window, target_backend)) = target.window.as_ref() else {
             return Ok(());
         };
-        let snapshot_pid = self
+        let snapshot_window = self
             .last_snapshot
             .lock()
             .ok()
-            .and_then(|snapshot| snapshot.pid);
-        let owner_pid = match snapshot_pid {
-            Some(pid) => Some(pid),
-            None => object_ref_owner_pid(&node.object_ref).await.ok().flatten(),
-        };
-        match owner_pid {
-            Some(owner_pid) if owner_pid != target_pid => Err(node_target_mismatch_message(
-                node.index, owner_pid, target_pid,
-            )),
-            _ => Ok(()),
+            .and_then(|snapshot| snapshot.window_id.zip(snapshot.window_backend.clone()));
+        match snapshot_window {
+            Some((window_id, backend)) if backend == *target_backend => {
+                if window_id == *target_window {
+                    Ok(())
+                } else {
+                    Err(node_window_mismatch_message(
+                        node.index,
+                        window_id,
+                        *target_window,
+                    ))
+                }
+            }
+            _ => Err(node_window_unverified_message(node.index, *target_window)),
         }
     }
 
     /// Reject an element action whose cached element_index or selector
-    /// resolves to a node from another app's snapshot. Shared by click, scroll,
-    /// perform_action and set_value. A call that names no cached element or no
-    /// target pid passes; resolution errors are left to the tool.
+    /// resolves to a node from another app's or window's snapshot. Shared by
+    /// click, scroll, perform_action and set_value. A call that names no
+    /// cached element or no target passes; resolution errors are left to the
+    /// tool.
     async fn check_cached_element_target(
         &self,
         element_index: Option<u32>,
         selector: &ElementSelector<'_>,
         purpose: ElementResolvePurpose,
-        target_pid: Option<u32>,
+        target: &ElementOwnerTarget,
     ) -> std::result::Result<(), String> {
         match self.cached_node_for(element_index, selector, purpose) {
-            Some(node) => self.check_node_target(&node, target_pid).await,
+            Some(node) => self.check_node_target(&node, target).await,
             None => Ok(()),
         }
     }
 
-    /// The pid an AT-SPI element action targets, without raising the window:
-    /// the action needs no focus. A bare pid is used as given; window_id,
-    /// app_id, wm_class and title resolve through the window matcher click
-    /// uses before it focuses. An unresolvable target fails closed.
-    async fn element_action_target_pid(
+    /// The app or window an AT-SPI element action targets, without raising
+    /// the window: the action needs no focus. A bare pid is used as given;
+    /// window_id, app_id, wm_class and title resolve through the window
+    /// matcher click uses before it focuses. An unresolvable target fails
+    /// closed.
+    async fn element_action_owner(
         &self,
         target: Option<&WindowTarget>,
-    ) -> std::result::Result<Option<u32>, String> {
+    ) -> std::result::Result<ElementOwnerTarget, String> {
         let Some(target) = target.filter(|target| target.has_target()) else {
-            return Ok(None);
+            return Ok(ElementOwnerTarget::default());
         };
         let pid_only = target.window_id.is_none()
             && trimmed_nonempty(target.app_id.as_deref()).is_none()
             && trimmed_nonempty(target.wm_class.as_deref()).is_none()
             && trimmed_nonempty(target.title.as_deref()).is_none();
         if pid_only {
-            return Ok(target.pid);
+            return Ok(ElementOwnerTarget::pid(target.pid));
         }
-        let resolved = match list_windows().await {
-            Ok(windows) => resolve_window_target(&windows, target).map(|window| window.pid),
-            Err(error) => Err(error),
-        };
-        resolved.map(|pid| pid.or(target.pid)).map_err(|error| {
-            let error = format!("{error:#}");
-            match window_permission_hint(&error) {
-                Some(hint) => format!(
-                    "Did not act because the target window could not be resolved: {error}. {hint}"
-                ),
-                None => {
-                    format!("Did not act because the target window could not be resolved: {error}")
-                }
-            }
-        })
+        element_action_owner_from(list_windows().await, target)
     }
 
     /// The cached node an element-targeted action would act on, when the
@@ -5980,7 +6016,8 @@ impl ComputerUseLinux {
 
     /// The target check perform_action and set_value run before resolving
     /// their element. An element_identifier names the object itself, not a
-    /// cached snapshot node, so it is not checked against the target.
+    /// cached snapshot node, so it is checked only against a known target pid,
+    /// by the pid that owns it on the accessibility bus.
     async fn check_element_action_target(
         &self,
         target: &ElementActionTarget,
@@ -5989,13 +6026,20 @@ impl ComputerUseLinux {
         selector: &ElementSelector<'_>,
         purpose: ElementResolvePurpose,
     ) -> std::result::Result<(), String> {
-        if trimmed_nonempty(element_identifier).is_some() {
-            return Ok(());
-        }
-        let target_pid = self
-            .element_action_target_pid(target.window_target().as_ref())
+        let owner = self
+            .element_action_owner(target.window_target().as_ref())
             .await?;
-        self.check_cached_element_target(element_index, selector, purpose, target_pid)
+        if let Some(element_identifier) = trimmed_nonempty(element_identifier) {
+            let Some(target_pid) = owner.pid else {
+                return Ok(());
+            };
+            let owner_pid = object_ref_owner_pid(element_identifier)
+                .await
+                .ok()
+                .flatten();
+            return check_identifier_owner(owner_pid, Some(target_pid));
+        }
+        self.check_cached_element_target(element_index, selector, purpose, &owner)
             .await
     }
 
@@ -7625,6 +7669,82 @@ fn node_target_mismatch_message(element_index: u32, owner_pid: u32, target_pid: 
     format!(
         "element_index {element_index} comes from the latest get_app_state snapshot of pid {owner_pid}, not the target pid {target_pid}. Call get_app_state for the target app and use an index from that result."
     )
+}
+
+fn node_window_mismatch_message(
+    element_index: u32,
+    snapshot_window: u64,
+    target_window: u64,
+) -> String {
+    format!(
+        "element_index {element_index} comes from the latest get_app_state snapshot of window_id {snapshot_window}, not the target window_id {target_window}. Call get_app_state for the target window and use an index from that result."
+    )
+}
+
+fn node_window_unverified_message(element_index: u32, target_window: u64) -> String {
+    format!(
+        "Did not act because element_index {element_index} could not be tied to target window_id {target_window}: the window backend reports no pid for it and the latest get_app_state snapshot was not taken for that window. Pass pid, or call get_app_state for that window and use an index from that result."
+    )
+}
+
+fn identifier_target_mismatch_message(owner_pid: u32, target_pid: u32) -> String {
+    format!(
+        "element_identifier belongs to pid {owner_pid}, not the target pid {target_pid}. Use an element_identifier from the target app, or drop the target."
+    )
+}
+
+/// Refuse an element_identifier whose bus owner is known and is not the
+/// target pid. An unknown owner or target proceeds: the identifier names the
+/// object itself.
+fn check_identifier_owner(
+    owner_pid: Option<u32>,
+    target_pid: Option<u32>,
+) -> std::result::Result<(), String> {
+    match (owner_pid, target_pid) {
+        (Some(owner_pid), Some(target_pid)) if owner_pid != target_pid => {
+            Err(identifier_target_mismatch_message(owner_pid, target_pid))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Resolve a window-style element action target against a window listing.
+fn element_action_owner_from(
+    windows: Result<Vec<WindowInfo>>,
+    target: &WindowTarget,
+) -> std::result::Result<ElementOwnerTarget, String> {
+    windows
+        .and_then(|windows| {
+            resolve_window_target(&windows, target)
+                .map(|window| ElementOwnerTarget::window(window, target.pid))
+        })
+        .map_err(|error| {
+            let error = format!("{error:#}");
+            match window_permission_hint(&error) {
+                Some(hint) => format!(
+                    "Did not act because the target window could not be resolved: {error}. {hint}"
+                ),
+                None => {
+                    format!("Did not act because the target window could not be resolved: {error}")
+                }
+            }
+        })
+}
+
+/// The ownership target of a click or scroll: the focused window's pid, else
+/// the requested window's, else the pid the caller passed, plus the
+/// requested window.
+fn focus_owner_target(focus: Option<&WindowFocusResult>, pid: Option<u32>) -> ElementOwnerTarget {
+    match focus {
+        Some(focus) => ElementOwnerTarget {
+            pid: focus_target_pid(Some(focus)).or(pid),
+            window: Some((
+                focus.requested_window.window_id,
+                focus.requested_window.backend.clone(),
+            )),
+        },
+        None => ElementOwnerTarget::pid(pid),
+    }
 }
 
 fn focus_target_pid(focus: Option<&WindowFocusResult>) -> Option<u32> {
@@ -14890,7 +15010,7 @@ mod node_target_scope_tests {
         backend.cache_snapshot(std::slice::from_ref(&node), Some(2_690_687));
 
         let error = backend
-            .check_node_target(&node, Some(2_690_664))
+            .check_node_target(&node, &ElementOwnerTarget::pid(Some(2_690_664)))
             .await
             .unwrap_err();
         assert!(error.contains("pid 2690687"), "{error}");
@@ -14908,10 +15028,13 @@ mod node_target_scope_tests {
         backend.cache_snapshot(std::slice::from_ref(&node), Some(2_690_664));
 
         assert!(backend
-            .check_node_target(&node, Some(2_690_664))
+            .check_node_target(&node, &ElementOwnerTarget::pid(Some(2_690_664)))
             .await
             .is_ok());
-        assert!(backend.check_node_target(&node, None).await.is_ok());
+        assert!(backend
+            .check_node_target(&node, &ElementOwnerTarget::pid(None))
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
@@ -14922,7 +15045,10 @@ mod node_target_scope_tests {
         let node = cached_node(2, ":1.9999/org/a11y/atspi/accessible/42");
         backend.cache_snapshot(std::slice::from_ref(&node), None);
 
-        assert!(backend.check_node_target(&node, Some(1)).await.is_ok());
+        assert!(backend
+            .check_node_target(&node, &ElementOwnerTarget::pid(Some(1)))
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
@@ -14971,7 +15097,7 @@ mod node_target_scope_tests {
             "snapshot publication must wait for input"
         );
         assert!(backend
-            .check_node_target(&checked_node, Some(10))
+            .check_node_target(&checked_node, &ElementOwnerTarget::pid(Some(10)))
             .await
             .is_ok());
         let params = ClickParams {
@@ -15156,6 +15282,84 @@ mod node_target_scope_tests {
             node_target_mismatch_message(2, APP_B, APP_A),
             "set_value must refuse with the wording click uses"
         );
+    }
+
+    /// An i3, sway or COSMIC window: the backend reports no pid.
+    fn pidless_window(window_id: u64) -> WindowInfo {
+        WindowInfo {
+            window_id,
+            title: Some(format!("window {window_id}")),
+            app_id: None,
+            wm_class: None,
+            pid: None,
+            bounds: None,
+            workspace: None,
+            focused: false,
+            hidden: false,
+            client_type: None,
+            backend: "i3".to_string(),
+            terminal: None,
+        }
+    }
+
+    fn pidless_owner(window_id: u64) -> ElementOwnerTarget {
+        let windows = vec![pidless_window(10), pidless_window(20)];
+        let target = WindowTarget {
+            window_id: Some(window_id),
+            ..Default::default()
+        };
+        element_action_owner_from(Ok(windows), &target).unwrap()
+    }
+
+    #[tokio::test]
+    async fn pidless_window_target_refuses_another_windows_snapshot() {
+        // get_app_state of window 20, then an action that targets window 10.
+        let backend = ComputerUseLinux::default();
+        let node = cached_node(2, ":1.9/org/a11y/atspi/accessible/42");
+        backend.cache_snapshot_with_window(
+            std::slice::from_ref(&node),
+            None,
+            None,
+            Some(&pidless_window(20)),
+        );
+
+        assert_eq!(
+            backend
+                .check_node_target(&node, &pidless_owner(10))
+                .await
+                .unwrap_err(),
+            node_window_mismatch_message(2, 20, 10)
+        );
+        assert!(backend
+            .check_node_target(&node, &pidless_owner(20))
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn pidless_window_target_fails_closed_without_a_snapshot_window() {
+        let backend = ComputerUseLinux::default();
+        let node = cached_node(2, ":1.9/org/a11y/atspi/accessible/42");
+        backend.cache_snapshot(std::slice::from_ref(&node), None);
+
+        assert_eq!(
+            backend
+                .check_node_target(&node, &pidless_owner(10))
+                .await
+                .unwrap_err(),
+            node_window_unverified_message(2, 10)
+        );
+    }
+
+    #[test]
+    fn identifier_owned_by_another_pid_is_refused() {
+        assert_eq!(
+            check_identifier_owner(Some(APP_B), Some(APP_A)).unwrap_err(),
+            identifier_target_mismatch_message(APP_B, APP_A)
+        );
+        assert!(check_identifier_owner(Some(APP_A), Some(APP_A)).is_ok());
+        assert!(check_identifier_owner(None, Some(APP_A)).is_ok());
+        assert!(check_identifier_owner(Some(APP_B), None).is_ok());
     }
 }
 

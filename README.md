@@ -80,7 +80,7 @@ The crate was extracted from [`codex-desktop-linux`](https://github.com/avifenes
 | **Opt-in host tools** | `complete_interaction` | Parameter-free desktop completion notification (`notify-send`); registered only when `COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE=1`. |
 | | `run_shell` | Bounded non-login `/bin/sh -c` execution; registered only when `COMPUTER_USE_LINUX_ENABLE_SHELL=1` (absent by default). |
 
-`click`, `scroll`, `perform_action`, and `set_value` take an optional app target (`pid`, `window_id`, `app_id`, `wm_class`, `window_title`). With one, an `element_index` or selector from another app's `get_app_state` snapshot is refused; call `get_app_state` for the target app first. `perform_action` and `set_value` do not focus the target window. An `element_identifier` names the object itself and is not checked.
+`click`, `scroll`, `perform_action`, and `set_value` take an optional app target (`pid`, `window_id`, `app_id`, `wm_class`, `window_title`). With one, an `element_index` or selector from another app's `get_app_state` snapshot is refused; call `get_app_state` for the target app first. When the window backend reports no pid for a target window (i3, sway, COSMIC), the snapshot must have been taken for that window, or the call is refused. `perform_action` and `set_value` do not focus the target window. An `element_identifier` is refused when its owner on the accessibility bus is a different pid than the target; it is not checked when either pid is unknown.
 
 ### Post-action observation in one round trip
 
