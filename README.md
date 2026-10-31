@@ -80,6 +80,8 @@ The crate was extracted from [`codex-desktop-linux`](https://github.com/avifenes
 | **Opt-in host tools** | `complete_interaction` | Parameter-free desktop completion notification (`notify-send`); registered only when `COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE=1`. |
 | | `run_shell` | Bounded non-login `/bin/sh -c` execution; registered only when `COMPUTER_USE_LINUX_ENABLE_SHELL=1` (absent by default). |
 
+`click`, `scroll`, `perform_action`, and `set_value` take an optional app target (`pid`, `window_id`, `app_id`, `wm_class`, `window_title`). With one, an `element_index` or selector from another app's `get_app_state` snapshot is refused; call `get_app_state` for the target app first. `perform_action` and `set_value` do not focus the target window. An `element_identifier` names the object itself and is not checked.
+
 ### Post-action observation in one round trip
 
 All mutating tools (`click`, `drag`, `scroll`, `press_key`, `type_text`, `perform_action`, `set_value`, `activate_window`, `move_window`, and `resize_window`) accept optional post-action observation parameters so an action and its verification complete in a single MCP tool call:

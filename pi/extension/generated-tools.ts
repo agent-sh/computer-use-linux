@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.33";
-export const GENERATED_TOOL_CATALOG_HASH = "4ed9b3d2980e8be0a2a629c2443e7a70c373f791e1e37560684de534d856e767";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "a288cd5a4c9c0c572b95286aed605f44849acbc5b629bdc0a1c863666b0f16bb";
+export const GENERATED_TOOL_CATALOG_HASH = "f4c1b7a94f9c71916ac9f183e96eec9805b72a2f0f028d208d398ee0fb0dc1e8";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "d8df5a2da684108986c6a30f0e4809ea79c4c744594afa80c73b1f17e0569aa5";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -162,7 +162,6 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -366,7 +365,6 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -741,7 +739,6 @@ export const GENERATED_MCP_TOOLS =
         "window_id": {
           "default": null,
           "description": "Compositor window id. Also scopes the accessibility tree to that window's\napplication when possible.",
-          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -964,7 +961,6 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -1004,7 +1000,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Invoke an accessibility action exposed by an element selected by index, identifier, or semantic selector. Defaults to the primary action unless action is provided. A stale semantic target can recover once with verified process/window ownership. Recovery invalidates cached indices; call get_app_state before further element_index actions. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Invoke an accessibility action exposed by an element selected by index, identifier, or semantic selector. Defaults to the primary action unless action is provided. A stale semantic target can recover once with verified process/window ownership. Recovery invalidates cached indices; call get_app_state before further element_index actions. Pass the target app (pid, window_id, app_id, wm_class, or window_title, as for click) to refuse an element_index or selector from another app's get_app_state snapshot; the window is not focused. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -1018,6 +1014,13 @@ export const GENERATED_MCP_TOOLS =
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "action": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "app_id": {
           "default": null,
           "type": [
             "string",
@@ -1088,6 +1091,14 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "pid": {
+          "default": null,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "quality": {
           "description": "JPEG quality from 1 to 95 (default 80) for post-action screenshots. Ignored for png.",
           "maximum": 95,
@@ -1138,6 +1149,28 @@ export const GENERATED_MCP_TOOLS =
           "type": "array"
         },
         "text": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "window_id": {
+          "default": null,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "window_title": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wm_class": {
           "default": null,
           "type": [
             "string",
@@ -1302,7 +1335,6 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -1484,7 +1516,6 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -1625,7 +1656,6 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -1787,7 +1817,6 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -1839,7 +1868,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Set the value of a settable accessibility element selected by index, identifier, or semantic selector. Editable-text writes are verified by exact readback; password fields are explicitly unverifiable. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Set the value of a settable accessibility element selected by index, identifier, or semantic selector. Editable-text writes are verified by exact readback; password fields are explicitly unverifiable. Pass the target app (pid, window_id, app_id, wm_class, or window_title, as for click) to refuse an element_index or selector from another app's get_app_state snapshot; the window is not focused. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -1852,6 +1881,13 @@ export const GENERATED_MCP_TOOLS =
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "app_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "element_identifier": {
           "default": null,
           "type": [
@@ -1916,6 +1952,14 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "pid": {
+          "default": null,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "quality": {
           "description": "JPEG quality from 1 to 95 (default 80) for post-action screenshots. Ignored for png.",
           "maximum": 95,
@@ -1974,6 +2018,28 @@ export const GENERATED_MCP_TOOLS =
         },
         "value": {
           "type": "string"
+        },
+        "window_id": {
+          "default": null,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "window_title": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wm_class": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -2164,7 +2230,6 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",

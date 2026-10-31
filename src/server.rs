@@ -1079,20 +1079,22 @@ impl ComputerUseLinux {
         if params.x.zip(params.y).is_none()
             || params.coordinate_space == ClickCoordinateSpace::Atspi
         {
-            if let Some(node) = self.cached_node_for(
-                params.element_index,
-                &params.selector(),
-                ElementResolvePurpose::Click,
-            ) {
-                if let Err(message) = self.check_node_target(&node, target_pid).await {
-                    return Json(ActionOutput {
-                        ok: false,
-                        implemented: true,
-                        action: "click".to_string(),
-                        message,
-                        received,
-                    });
-                }
+            if let Err(message) = self
+                .check_cached_element_target(
+                    params.element_index,
+                    &params.selector(),
+                    ElementResolvePurpose::Click,
+                    target_pid,
+                )
+                .await
+            {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "click".to_string(),
+                    message,
+                    received,
+                });
             }
         }
         let target = match self.resolve_click_target(&params) {
@@ -1435,7 +1437,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "perform_action",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
-        description = "Invoke an accessibility action exposed by an element selected by index, identifier, or semantic selector. Defaults to the primary action unless action is provided. A stale semantic target can recover once with verified process/window ownership. Recovery invalidates cached indices; call get_app_state before further element_index actions. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+        description = "Invoke an accessibility action exposed by an element selected by index, identifier, or semantic selector. Defaults to the primary action unless action is provided. A stale semantic target can recover once with verified process/window ownership. Recovery invalidates cached indices; call get_app_state before further element_index actions. Pass the target app (pid, window_id, app_id, wm_class, or window_title, as for click) to refuse an element_index or selector from another app's get_app_state snapshot; the window is not focused. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1449,16 +1451,18 @@ impl ComputerUseLinux {
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
         let requested_action = requested_or_primary_action(params.action.as_deref());
+        let target = params.target.window_target();
         let Json(output) = self
             .perform_element_action(&params, Some(requested_action))
             .await;
-        self.finish_action_output(output, &capture, None).await
+        self.finish_action_output(output, &capture, target.as_ref())
+            .await
     }
 
     #[tool(
         name = "set_value",
         output_schema = rmcp::handler::server::tool::schema_for_output::<SetValueToolOutput>(),
-        description = "Set the value of a settable accessibility element selected by index, identifier, or semantic selector. Editable-text writes are verified by exact readback; password fields are explicitly unverifiable. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+        description = "Set the value of a settable accessibility element selected by index, identifier, or semantic selector. Editable-text writes are verified by exact readback; password fields are explicitly unverifiable. Pass the target app (pid, window_id, app_id, wm_class, or window_title, as for click) to refuse an element_index or selector from another app's get_app_state snapshot; the window is not focused. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1471,14 +1475,36 @@ impl ComputerUseLinux {
         Parameters(params): Parameters<SetValueParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
+        let target = params.target.window_target();
         let (output, verified) = self.dispatch_set_value(params).await;
-        self.finish_set_value_output(output, verified, &capture)
+        self.finish_set_value_output(output, verified, &capture, target.as_ref())
             .await
     }
 
     async fn dispatch_set_value(&self, params: SetValueParams) -> (ActionOutput, Option<bool>) {
         let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let received = Some(serde_json::json!(params.clone()));
+        if let Err(message) = self
+            .check_element_action_target(
+                &params.target,
+                params.element_index,
+                params.element_identifier.as_deref(),
+                &params.selector(),
+                ElementResolvePurpose::SetValue,
+            )
+            .await
+        {
+            return (
+                ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "set_value".to_string(),
+                    message,
+                    received,
+                },
+                None,
+            );
+        }
         let object_ref = match self.resolve_object_ref(
             params.element_index,
             params.element_identifier.as_deref(),
@@ -1682,20 +1708,22 @@ impl ComputerUseLinux {
             }
         }
         if params.x.is_none() && params.y.is_none() {
-            if let Some(node) = self.cached_node_for(
-                params.element_index,
-                &ElementSelector::default(),
-                ElementResolvePurpose::Click,
-            ) {
-                if let Err(message) = self.check_node_target(&node, target_pid).await {
-                    return Json(ActionOutput {
-                        ok: false,
-                        implemented: true,
-                        action: "scroll".to_string(),
-                        message,
-                        received,
-                    });
-                }
+            if let Err(message) = self
+                .check_cached_element_target(
+                    params.element_index,
+                    &ElementSelector::default(),
+                    ElementResolvePurpose::Click,
+                    target_pid,
+                )
+                .await
+            {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "scroll".to_string(),
+                    message,
+                    received,
+                });
             }
         }
         let target_point =
@@ -3757,25 +3785,13 @@ struct ClickParams {
 impl ClickParams {
     /// A window target if any window-identifying field was supplied.
     fn window_target(&self) -> Option<WindowTarget> {
-        if self.window_id.is_none()
-            && self.pid.is_none()
-            && self.app_id.is_none()
-            && self.wm_class.is_none()
-            && self.window_title.is_none()
-        {
-            return None;
-        }
-        Some(WindowTarget {
-            window_id: self.window_id,
-            pid: self.pid,
-            tty: None,
-            terminal_pid: None,
-            terminal_command: None,
-            terminal_cwd: None,
-            app_id: self.app_id.clone(),
-            wm_class: self.wm_class.clone(),
-            title: self.window_title.clone(),
-        })
+        optional_window_target(
+            self.window_id,
+            self.pid,
+            &self.app_id,
+            &self.wm_class,
+            &self.window_title,
+        )
     }
 
     fn selector(&self) -> ElementSelector<'_> {
@@ -3785,6 +3801,67 @@ impl ClickParams {
             text: self.text.as_deref(),
             states: &self.states,
         }
+    }
+}
+
+/// The window target named by the click, scroll, perform_action and set_value
+/// fields, if any of them was supplied.
+fn optional_window_target(
+    window_id: Option<u64>,
+    pid: Option<u32>,
+    app_id: &Option<String>,
+    wm_class: &Option<String>,
+    window_title: &Option<String>,
+) -> Option<WindowTarget> {
+    if window_id.is_none()
+        && pid.is_none()
+        && app_id.is_none()
+        && wm_class.is_none()
+        && window_title.is_none()
+    {
+        return None;
+    }
+    Some(WindowTarget {
+        window_id,
+        pid,
+        tty: None,
+        terminal_pid: None,
+        terminal_command: None,
+        terminal_cwd: None,
+        app_id: app_id.clone(),
+        wm_class: wm_class.clone(),
+        title: window_title.clone(),
+    })
+}
+
+/// The optional app or window target of perform_action and set_value, the
+/// same fields click and scroll take. AT-SPI actions need no focus, so the
+/// target is not raised; it names the app whose get_app_state snapshot a
+/// cached element_index or selector must come from.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+struct ElementActionTarget {
+    #[serde(default)]
+    window_id: Option<u64>,
+    #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
+    app_id: Option<String>,
+    #[serde(default)]
+    wm_class: Option<String>,
+    #[serde(default)]
+    window_title: Option<String>,
+}
+
+impl ElementActionTarget {
+    /// A window target if any window-identifying field was supplied.
+    fn window_target(&self) -> Option<WindowTarget> {
+        optional_window_target(
+            self.window_id,
+            self.pid,
+            &self.app_id,
+            &self.wm_class,
+            &self.window_title,
+        )
     }
 }
 
@@ -3804,6 +3881,8 @@ struct ActionParams {
     states: Vec<String>,
     #[serde(default)]
     action: Option<String>,
+    #[serde(flatten)]
+    target: ElementActionTarget,
     #[serde(flatten)]
     capture: PostActionCaptureParams,
 }
@@ -3834,6 +3913,8 @@ struct SetValueParams {
     #[serde(default)]
     states: Vec<String>,
     value: String,
+    #[serde(flatten)]
+    target: ElementActionTarget,
     #[serde(flatten)]
     capture: PostActionCaptureParams,
 }
@@ -3900,25 +3981,13 @@ fn scroll_units(pages: Option<f64>) -> std::result::Result<i32, String> {
 impl ScrollParams {
     /// A window target if any window-identifying field was supplied.
     fn window_target(&self) -> Option<WindowTarget> {
-        if self.window_id.is_none()
-            && self.pid.is_none()
-            && self.app_id.is_none()
-            && self.wm_class.is_none()
-            && self.window_title.is_none()
-        {
-            return None;
-        }
-        Some(WindowTarget {
-            window_id: self.window_id,
-            pid: self.pid,
-            tty: None,
-            terminal_pid: None,
-            terminal_command: None,
-            terminal_cwd: None,
-            app_id: self.app_id.clone(),
-            wm_class: self.wm_class.clone(),
-            title: self.window_title.clone(),
-        })
+        optional_window_target(
+            self.window_id,
+            self.pid,
+            &self.app_id,
+            &self.wm_class,
+            &self.window_title,
+        )
     }
 }
 
@@ -4753,6 +4822,7 @@ impl ComputerUseLinux {
         mut output: ActionOutput,
         verified: Option<bool>,
         capture: &PostActionCaptureParams,
+        target: Option<&WindowTarget>,
     ) -> Result<CallToolResult, ErrorData> {
         if !output.ok && verified != Some(false) {
             return self.action_tool_result(
@@ -4765,7 +4835,7 @@ impl ComputerUseLinux {
             );
         }
         let (observation, screenshot, notes) = self
-            .capture_post_action_observation(capture, None, None)
+            .capture_post_action_observation(capture, target, None)
             .await;
         output = with_notes(output, notes);
         self.action_tool_result(
@@ -5614,8 +5684,60 @@ impl ComputerUseLinux {
         }
     }
 
-    /// The cached node an element-targeted click or scroll would act on, when
-    /// the call names one. Resolution errors are left to the tool's own path.
+    /// Reject an element action whose cached element_index or selector
+    /// resolves to a node from another app's snapshot. Shared by click, scroll,
+    /// perform_action and set_value. A call that names no cached element or no
+    /// target pid passes; resolution errors are left to the tool.
+    async fn check_cached_element_target(
+        &self,
+        element_index: Option<u32>,
+        selector: &ElementSelector<'_>,
+        purpose: ElementResolvePurpose,
+        target_pid: Option<u32>,
+    ) -> std::result::Result<(), String> {
+        match self.cached_node_for(element_index, selector, purpose) {
+            Some(node) => self.check_node_target(&node, target_pid).await,
+            None => Ok(()),
+        }
+    }
+
+    /// The pid an AT-SPI element action targets, without raising the window:
+    /// the action needs no focus. A bare pid is used as given; window_id,
+    /// app_id, wm_class and title resolve through the window matcher click
+    /// uses before it focuses. An unresolvable target fails closed.
+    async fn element_action_target_pid(
+        &self,
+        target: Option<&WindowTarget>,
+    ) -> std::result::Result<Option<u32>, String> {
+        let Some(target) = target.filter(|target| target.has_target()) else {
+            return Ok(None);
+        };
+        let pid_only = target.window_id.is_none()
+            && trimmed_nonempty(target.app_id.as_deref()).is_none()
+            && trimmed_nonempty(target.wm_class.as_deref()).is_none()
+            && trimmed_nonempty(target.title.as_deref()).is_none();
+        if pid_only {
+            return Ok(target.pid);
+        }
+        let resolved = match list_windows().await {
+            Ok(windows) => resolve_window_target(&windows, target).map(|window| window.pid),
+            Err(error) => Err(error),
+        };
+        resolved.map(|pid| pid.or(target.pid)).map_err(|error| {
+            let error = format!("{error:#}");
+            match window_permission_hint(&error) {
+                Some(hint) => format!(
+                    "Did not act because the target window could not be resolved: {error}. {hint}"
+                ),
+                None => {
+                    format!("Did not act because the target window could not be resolved: {error}")
+                }
+            }
+        })
+    }
+
+    /// The cached node an element-targeted action would act on, when the
+    /// call names one. Resolution errors are left to the tool's own path.
     fn cached_node_for(
         &self,
         element_index: Option<u32>,
@@ -5856,6 +5978,27 @@ impl ComputerUseLinux {
             .clone()
     }
 
+    /// The target check perform_action and set_value run before resolving
+    /// their element. An element_identifier names the object itself, not a
+    /// cached snapshot node, so it is not checked against the target.
+    async fn check_element_action_target(
+        &self,
+        target: &ElementActionTarget,
+        element_index: Option<u32>,
+        element_identifier: Option<&str>,
+        selector: &ElementSelector<'_>,
+        purpose: ElementResolvePurpose,
+    ) -> std::result::Result<(), String> {
+        if trimmed_nonempty(element_identifier).is_some() {
+            return Ok(());
+        }
+        let target_pid = self
+            .element_action_target_pid(target.window_target().as_ref())
+            .await?;
+        self.check_cached_element_target(element_index, selector, purpose, target_pid)
+            .await
+    }
+
     fn resolve_object_ref(
         &self,
         element_index: Option<u32>,
@@ -5967,6 +6110,18 @@ impl ComputerUseLinux {
     {
         let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let received = Some(serde_json::json!(params.clone()));
+        if let Err(message) = self
+            .check_element_action_target(
+                &params.target,
+                params.element_index,
+                params.element_identifier.as_deref(),
+                &params.selector(),
+                ElementResolvePurpose::Action,
+            )
+            .await
+        {
+            return action_error_output(message, &received);
+        }
         let object_ref = match self.resolve_object_ref(
             params.element_index,
             params.element_identifier.as_deref(),
@@ -14864,6 +15019,144 @@ mod node_target_scope_tests {
         backend.clear_cached_nodes();
         assert_eq!(backend.last_snapshot.lock().unwrap().pid, None);
     }
+
+    const APP_A: u32 = 2_690_664;
+    const APP_B: u32 = 2_690_687;
+
+    /// get_app_state of app A, then of app B: the cache holds B's nodes.
+    fn backend_after_snapshots_of_a_then_b() -> ComputerUseLinux {
+        let backend = ComputerUseLinux::default();
+        backend.cache_snapshot(
+            &[cached_node(2, ":1.7/org/a11y/atspi/accessible/7")],
+            Some(APP_A),
+        );
+        backend.cache_snapshot(
+            &[cached_node(2, ":1.9/org/a11y/atspi/accessible/42")],
+            Some(APP_B),
+        );
+        backend
+    }
+
+    fn pid_target(pid: u32) -> ElementActionTarget {
+        ElementActionTarget {
+            pid: Some(pid),
+            ..Default::default()
+        }
+    }
+
+    async fn perform_action_dispatches(
+        backend: &ComputerUseLinux,
+        params: ActionParams,
+    ) -> (ActionOutput, Vec<String>) {
+        let dispatched = Arc::new(Mutex::new(Vec::new()));
+        let Json(output) = backend
+            .perform_element_action_with(
+                &params,
+                Some("click"),
+                {
+                    let dispatched = Arc::clone(&dispatched);
+                    move |object_ref, _| {
+                        dispatched.lock().unwrap().push(object_ref);
+                        async {
+                            Ok(crate::atspi_tree_impl::ActionInvocation {
+                                action_index: 0,
+                                action_name: Some("click".to_string()),
+                                ok: true,
+                            })
+                        }
+                    }
+                },
+                |_| async { panic!("an indexed action must not refresh") },
+            )
+            .await;
+        let dispatched = dispatched.lock().unwrap().clone();
+        (output, dispatched)
+    }
+
+    #[tokio::test]
+    async fn perform_action_refuses_an_index_from_another_apps_snapshot() {
+        let backend = backend_after_snapshots_of_a_then_b();
+        let (output, dispatched) = perform_action_dispatches(
+            &backend,
+            ActionParams {
+                element_index: Some(2),
+                target: pid_target(APP_A),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(!output.ok);
+        assert!(dispatched.is_empty(), "dispatched to {dispatched:?}");
+        assert_eq!(
+            output.message,
+            node_target_mismatch_message(2, APP_B, APP_A),
+            "perform_action must refuse with the wording click uses"
+        );
+    }
+
+    #[tokio::test]
+    async fn perform_action_refuses_a_selector_from_another_apps_snapshot() {
+        let backend = backend_after_snapshots_of_a_then_b();
+        let (output, dispatched) = perform_action_dispatches(
+            &backend,
+            ActionParams {
+                role: Some("push button".to_string()),
+                name: Some("Hit me".to_string()),
+                target: pid_target(APP_A),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(!output.ok);
+        assert!(dispatched.is_empty(), "dispatched to {dispatched:?}");
+        assert!(
+            output.message.contains("target pid 2690664"),
+            "{}",
+            output.message
+        );
+    }
+
+    #[tokio::test]
+    async fn perform_action_on_the_snapshot_target_or_without_one_dispatches() {
+        let backend = backend_after_snapshots_of_a_then_b();
+        let b_ref = ":1.9/org/a11y/atspi/accessible/42".to_string();
+        for target in [pid_target(APP_B), ElementActionTarget::default()] {
+            let (output, dispatched) = perform_action_dispatches(
+                &backend,
+                ActionParams {
+                    element_index: Some(2),
+                    target,
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert!(output.ok, "{}", output.message);
+            assert_eq!(dispatched, vec![b_ref.clone()]);
+        }
+    }
+
+    #[tokio::test]
+    async fn set_value_refuses_an_index_from_another_apps_snapshot() {
+        let backend = backend_after_snapshots_of_a_then_b();
+        let (output, verified) = backend
+            .dispatch_set_value(SetValueParams {
+                element_index: Some(2),
+                value: "written for app A".to_string(),
+                target: pid_target(APP_A),
+                ..Default::default()
+            })
+            .await;
+
+        assert!(!output.ok);
+        assert_eq!(verified, None);
+        assert_eq!(
+            output.message,
+            node_target_mismatch_message(2, APP_B, APP_A),
+            "set_value must refuse with the wording click uses"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -15658,7 +15951,7 @@ echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
         let (output, verified) =
             editable_text_action_result(EditableTextSetOutcome::MismatchAfterDeadline, None);
         let result = server
-            .finish_set_value_output(output, verified, &set_value_capture)
+            .finish_set_value_output(output, verified, &set_value_capture, None)
             .await
             .unwrap();
         assert_eq!(result.is_error, Some(true));
@@ -15676,7 +15969,7 @@ echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
         std::fs::write(&log_path, "").unwrap();
         let output = action_result("set_value", Err("pre-dispatch failure".to_string()), None);
         let result = server
-            .finish_set_value_output(output, None, &set_value_capture)
+            .finish_set_value_output(output, None, &set_value_capture, None)
             .await
             .unwrap();
         assert_eq!(result.is_error, Some(true));
