@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.34] - 2026-10-31
+
 ### Added
 
 - `get_app_state` takes `interactive_only: true` to return only nodes with an action, editable text or a value, plus headings, status and live regions, windows and dialogs. Containers are collapsed and `element_index` values match the full tree ([#338](https://github.com/agent-sh/computer-use-linux/issues/338)).
@@ -19,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Give `perform_action` and `set_value` the optional app target `click` takes (`pid`, `window_id`, `app_id`, `wm_class`, `window_title`). With a target, an `element_index` or selector from another app's `get_app_state` snapshot is refused with the message `click` returns, instead of acting on that app. When the window backend reports no pid for the target window (i3, sway, COSMIC), all four tools compare the snapshot's window instead and refuse when they differ or when the snapshot was not taken for a window. An `element_identifier` whose bus owner is a different pid than the target is refused. The window is not focused. Calls without a target behave as before ([#337](https://github.com/agent-sh/computer-use-linux/issues/337)).
-- Build the release binaries with cargo-zigbuild against glibc 2.28, so they run on RHEL 8, Debian 10, Ubuntu 20.04 and newer. v0.7.33 needed glibc 2.38 for the main binary and 2.43 for the indicator, so it failed on Ubuntu 22.04, and the indicator also failed on Ubuntu 24.04 and Debian 13. The release job now fails if a binary needs a newer glibc.
+- Build the release binaries with cargo-zigbuild against glibc 2.28, so they run on RHEL 8, Debian 10, Ubuntu 20.04 and newer. v0.7.33 needed glibc 2.38 for the main binary and 2.43 for the indicator, so it failed on Ubuntu 22.04, and the indicator also failed on Ubuntu 24.04 and Debian 13. The release job now fails if a binary needs a newer glibc. Thanks @zqj2021 for the report and symbol analysis ([#339](https://github.com/agent-sh/computer-use-linux/issues/339)).
 - Keep KWin window IDs within JavaScript's exact integer range (2^53-1), so JavaScript MCP clients can pass a `window_id` from `list_windows` back unchanged. KWin hashed the window UUID into all 64 bits, and clients that parse JSON numbers as doubles rounded the ID. KWin IDs change once with this release and stay stable per window after it. Every other backend already returned IDs in range. Tool schemas now advertise the maximum, and a `window_id` that is not an integer from 0 to 2^53-1, including a rounded ID above the u64 range, is rejected with a prompt to re-run `list_windows` instead of being matched by rounding. Thanks @Movoid for the report ([#341](https://github.com/agent-sh/computer-use-linux/issues/341)).
 
 ## [0.7.33] - 2026-10-30
@@ -984,7 +986,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.33...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.34...HEAD
+[0.7.34]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.33...v0.7.34
 [0.7.33]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.32...v0.7.33
 [0.7.32]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.31...v0.7.32
 [0.7.31]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.30...v0.7.31

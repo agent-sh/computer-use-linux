@@ -5,7 +5,7 @@
 # message goes to stderr.
 set -eu
 
-version=0.7.33
+version=0.7.34
 
 say() {
   echo "computer-use-linux plugin: $*" >&2
