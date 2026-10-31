@@ -505,7 +505,9 @@ async fn snapshot_tree_inner(
 
 /// Children of an app root, narrowed to the window named `title` when the root
 /// holds several windows. Returns the children to read and the matched window
-/// name. Popups, menus and other non-window children are kept.
+/// name. Only the other named frames are dropped: popups, menus, dialogs and
+/// unnamed windows are kept, since Chromium puts a window's popups and dialogs
+/// beside it under the app root.
 async fn scope_to_window(
     conn: &AccessibilityConnection,
     children: Vec<ObjectRefOwned>,
@@ -526,14 +528,27 @@ async fn scope_to_window(
         return (children, None);
     };
     let name = labels[chosen].1.clone();
+    let keep = kept_beside_window(&labels, chosen);
     let kept = children
         .into_iter()
-        .zip(&labels)
-        .enumerate()
-        .filter(|(index, (_, (role, _)))| *index == chosen || !is_window_role(role))
-        .map(|(_, (child, _))| child)
+        .zip(keep)
+        .filter_map(|(child, keep)| keep.then_some(child))
         .collect();
     (kept, name)
+}
+
+/// Which app root children (`(role, name)`) stay when `chosen` is the targeted
+/// window: it, and every child that is not another named frame.
+fn kept_beside_window(children: &[(String, Option<String>)], chosen: usize) -> Vec<bool> {
+    children
+        .iter()
+        .enumerate()
+        .map(|(index, (role, name))| {
+            index == chosen
+                || role != "frame"
+                || name.as_deref().is_none_or(|name| name.trim().is_empty())
+        })
+        .collect()
 }
 
 pub(crate) fn is_window_role(role: &str) -> bool {
@@ -2639,6 +2654,22 @@ mod tests {
     fn an_exact_window_name_wins_over_a_substring_match() {
         let windows = app_children(&[("frame", "Docs"), ("frame", "Docs - Settings")]);
         assert_eq!(matching_window(&windows, "Docs"), Some(0));
+    }
+
+    #[test]
+    fn narrowing_keeps_popups_and_dialogs_beside_the_window() {
+        let chromium = app_children(&[
+            ("frame", "GitHub - Chromium"),
+            ("frame", "PlanetScale - Chromium"),
+            ("window", ""),
+            ("dialog", "Open File"),
+            ("menu", ""),
+        ]);
+        let chosen = matching_window(&chromium, "PlanetScale").unwrap();
+        assert_eq!(
+            kept_beside_window(&chromium, chosen),
+            [false, true, true, true, true]
+        );
     }
 
     #[test]

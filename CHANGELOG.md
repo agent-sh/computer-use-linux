@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Accessibility trees in `get_app_state`, `get_tree_page`, `include_tree` results and spill files use a compact node encoding: null, empty, zero and false fields are left out, containers drop the U+FFFC placeholder text, and `actions` lists action names. `get_app_state` with `verbose: true` returns the full encoding. Compaction also drops containers whose only text is that placeholder and whose only actions are the `doDefault`, `showContextMenu` and `clickAncestor` that Chromium lists on every element ([#338](https://github.com/agent-sh/computer-use-linux/issues/338)).
-- A `title` or `window_id` target narrows the tree to that window when the app exposes several windows under one AT-SPI application root, as Chromium does ([#338](https://github.com/agent-sh/computer-use-linux/issues/338)).
+- A `title` or `window_id` target narrows the tree to that window when the app exposes several windows under one AT-SPI application root, as Chromium does. The app's popups, dialogs and unnamed windows stay, since Chromium lists them beside the window; `include_tree` results use the same scope ([#338](https://github.com/agent-sh/computer-use-linux/issues/338)).
 
 ### Fixed
 

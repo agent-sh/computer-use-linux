@@ -233,4 +233,5 @@ does not yet forward the flag or include the tool in its catalog.
   status and live regions, windows and dialogs, with containers collapsed and
   the same `element_index` values as the full tree. When `title` or
   `window_id` names one of several windows under one AT-SPI application root,
-  as in Chromium, the tree covers only that window.
+  as in Chromium, the tree covers that window plus the app's popups and
+  dialogs, and drops its other named windows.

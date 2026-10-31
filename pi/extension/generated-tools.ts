@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.33";
-export const GENERATED_TOOL_CATALOG_HASH = "8db15cfd6a8003e15da1a78ff1b5c43f773fde1bae2b897e80052b5f4a9f1ea4";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "fa14056ce74c3c508049d4d882016575f2582d4ca71475cb102e352e555e78ac";
+export const GENERATED_TOOL_CATALOG_HASH = "c177fdd395c0d9e234522ec297bf5a6a47c81f13bc89e47dfe9d50c9e5a12c95";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "4fb534ebd38a5f9d22b61cdd4e3a4b475d5097eb54dcadcb971a22946a45042b";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -565,7 +565,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Nodes are compact (empty fields left out, actions by name; verbose=true returns every field). Pass interactive_only=true for only actionable nodes, headings and status regions, with the same element_index values. A title or window_id target narrows an app with several windows under one AT-SPI root (Chromium) to that window. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
+    "description": "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Nodes are compact (empty fields left out, actions by name; verbose=true returns every field). Pass interactive_only=true for only actionable nodes, headings and status regions, with the same element_index values. A title or window_id target narrows an app with several windows under one AT-SPI root (Chromium) to that window, keeping the app's popups and dialogs. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
