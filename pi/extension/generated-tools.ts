@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.33";
-export const GENERATED_TOOL_CATALOG_HASH = "94d518f3939f7c36842230f687f3246d39f391b542cf5254908a2ea6ecfde5bc";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "3343d325e57fd67036793a7c862e855b52e81655628d86f82258803892a04c16";
+export const GENERATED_TOOL_CATALOG_HASH = "4ed9b3d2980e8be0a2a629c2443e7a70c373f791e1e37560684de534d856e767";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "a288cd5a4c9c0c572b95286aed605f44849acbc5b629bdc0a1c863666b0f16bb";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -162,6 +162,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -365,6 +366,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -739,6 +741,7 @@ export const GENERATED_MCP_TOOLS =
         "window_id": {
           "default": null,
           "description": "Compositor window id. Also scopes the accessibility tree to that window's\napplication when possible.",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -961,6 +964,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -1298,6 +1302,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -1479,6 +1484,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -1619,6 +1625,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -1780,6 +1787,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -2156,6 +2164,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",

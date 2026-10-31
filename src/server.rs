@@ -3112,7 +3112,11 @@ struct PostActionObservation {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct ActivateWindowParams {
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::windowing::types::deserialize_window_id"
+    )]
+    #[schemars(range(max = crate::windowing::types::MAX_WINDOW_ID))]
     window_id: Option<u64>,
     #[serde(default)]
     pid: Option<u32>,
@@ -3262,7 +3266,11 @@ struct GetAppStateParams {
     app_name_or_bundle_identifier: Option<String>,
     /// Compositor window id. Also scopes the accessibility tree to that window's
     /// application when possible.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::windowing::types::deserialize_window_id"
+    )]
+    #[schemars(range(max = crate::windowing::types::MAX_WINDOW_ID))]
     window_id: Option<u64>,
     /// Process id. Also scopes the accessibility tree to that process when it
     /// exposes AT-SPI.
@@ -3360,7 +3368,11 @@ impl GetAppStateParams {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct ScreenshotParams {
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::windowing::types::deserialize_window_id"
+    )]
+    #[schemars(range(max = crate::windowing::types::MAX_WINDOW_ID))]
     window_id: Option<u64>,
     #[serde(default)]
     pid: Option<u32>,
@@ -3718,7 +3730,11 @@ struct ClickParams {
     // Optional window target: when set, the window is raised/focused before the
     // click so a coordinate click reliably lands on the intended app rather than
     // whatever window happens to be stacked on top at that pixel.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::windowing::types::deserialize_window_id"
+    )]
+    #[schemars(range(max = crate::windowing::types::MAX_WINDOW_ID))]
     window_id: Option<u64>,
     #[serde(default)]
     pid: Option<u32>,
@@ -3847,7 +3863,11 @@ struct ScrollParams {
     pages: Option<f64>,
     // Optional window target (parity with click): the window is raised/focused
     // before scrolling so the wheel events land on the intended app.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::windowing::types::deserialize_window_id"
+    )]
+    #[schemars(range(max = crate::windowing::types::MAX_WINDOW_ID))]
     window_id: Option<u64>,
     #[serde(default)]
     pid: Option<u32>,
@@ -3915,7 +3935,11 @@ struct DragParams {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct PressKeyParams {
     key: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::windowing::types::deserialize_window_id"
+    )]
+    #[schemars(range(max = crate::windowing::types::MAX_WINDOW_ID))]
     window_id: Option<u64>,
     #[serde(default)]
     pid: Option<u32>,
@@ -3940,7 +3964,11 @@ struct PressKeyParams {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct TypeTextParams {
     text: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::windowing::types::deserialize_window_id"
+    )]
+    #[schemars(range(max = crate::windowing::types::MAX_WINDOW_ID))]
     window_id: Option<u64>,
     #[serde(default)]
     pid: Option<u32>,
@@ -12665,7 +12693,7 @@ esac
             "ş".repeat(WTYPE_MAX_TEXT_BYTES / 2 + 1),
         ] {
             let params: TypeTextParams =
-                serde_json::from_value(serde_json::json!({"text": text, "window_id": u64::MAX}))
+                serde_json::from_value(serde_json::json!({"text": text, "window_id": crate::windowing::types::MAX_WINDOW_ID}))
                     .unwrap();
             let result = server.type_text(Parameters(params)).await.unwrap();
             let structured = result

@@ -138,6 +138,7 @@ does not yet forward the flag or include the tool in its catalog.
   disabling other clients or restoring an old value. An app launched during a
   reset may still need restarting, so this is not a complete GNOME toggle fix.
 - **COSMIC Wayland**: Pointer coordinates use per-monitor RemoteDesktop portal streams. Approve the consent dialog before continuing. Available EIS connections wait for device readiness before the first input event. Window bounds support targeted screenshots and relative input, and window IDs fit JavaScript's exact integer range. The toplevel protocol does not expose PID.
+- **Window IDs**: Every backend's `window_id` fits JavaScript's exact integer range (at most 2^53-1), including KWin, so JSON clients can pass it back unchanged. A larger value is rejected with a prompt to re-run `list_windows`.
 - **Portal keyboard focus**: The receiving window or app target is preserved before consent and its focus is restored and verified afterward. If verification fails, no text or key chord is sent. Untargeted portal keyboard calls require working window introspection. GNOME Introspect can only verify an already focused app; refocus it manually after consent if needed.
 - **GNOME Wayland portal persistence**: On GNOME Wayland the remote-control portal asks again for every new server
   process. Set `COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP=1` in that process's
