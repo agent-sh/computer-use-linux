@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.35] - 2026-10-31
+
 ### Added
 
 - Hyprland background mode: with `COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND=1`, `type_text` and `press_key` calls that name a target window send keys through Hyprland's `send_key_state` dispatcher without focusing it, and `get_app_state` and `screenshot` capture an unfocused target alone with `grim -T` instead of raising it or using the portal. Targets on hidden workspaces are captured until two frames match, because Hyprland repaints them only when captured. The user's focus, cursor and workspace stay put, so an agent can work on a window on another workspace. Keys go over Hyprland's control socket, never in a process's arguments, and show on the action indicator (masked unless the target's field is known not to be secret). Text is mapped for a US layout and refused whole otherwise.
@@ -15,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `get_app_state` refuses a screenshot of a targeted window that is not focused before it captures anything. It used to capture the whole desktop first and then refuse, so on a portal session the call raised a consent prompt and grabbed every monitor only to discard the image.
 - Keep the remote desktop restore grant when EIS setup fails after `Start` on a non-GNOME session such as COSMIC, so persistence does not drop the grant and prompt for consent again.
-- Connect the pixelflux client to the configured loopback host instead of always dialing 127.0.0.1, so `[::1]:PORT` reaches an IPv6-only server. Read screenshot dimensions from the PNG header instead of fully decoding the image, and cap the typing request timeout at two minutes.
+- Connect the pixelflux client to the configured loopback host instead of always dialing 127.0.0.1, so `[::1]:PORT` reaches an IPv6-only server. Read screenshot dimensions from the PNG header instead of fully decoding the image, cap the typing request timeout at two minutes, and refuse text past the timeout budget before anything is sent instead of timing out mid-typing.
 
 ## [0.7.34] - 2026-10-31
 
@@ -996,7 +998,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.34...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.35...HEAD
+[0.7.35]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.34...v0.7.35
 [0.7.34]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.33...v0.7.34
 [0.7.33]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.32...v0.7.33
 [0.7.32]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.31...v0.7.32
