@@ -95,6 +95,10 @@ struct CachedAccessibilitySnapshot {
     /// Encoding of the result the nodes were returned in; get_tree_page pages
     /// them in the same one.
     detail: NodeDetail,
+    /// The AT-SPI window the tree was narrowed to, when the app exposes
+    /// several windows under one root. A post-action tree with no window
+    /// target of its own keeps the same scope.
+    window_scope: Option<String>,
 }
 
 /// The app or window an element action names, as the cached-node target
@@ -667,6 +671,7 @@ impl ComputerUseLinux {
                 detail,
             )
             .await;
+            self.remember_window_scope(window_scope.clone());
         } else {
             self.commit_snapshot(&[], None).await;
         }
@@ -4760,13 +4765,18 @@ impl ComputerUseLinux {
                 || target_pid.is_some()
                 || app_filter.is_some();
             let (max_nodes, max_depth) = crate::atspi_tree::snapshot_limits(None, None);
-            let window_title = target.and_then(|target| {
-                targeted_window_title(
-                    target.window_id,
-                    target.title.as_deref(),
-                    resolved_window.as_ref(),
-                )
+            let cached_window_scope = self.last_snapshot.lock().ok().and_then(|snapshot| {
+                snapshot
+                    .window_scope
+                    .clone()
+                    .map(|scope| (scope, snapshot.pid))
             });
+            let window_title = post_action_window_title(
+                target,
+                resolved_window.as_ref(),
+                target_pid,
+                cached_window_scope,
+            );
             match snapshot_accessibility_tree(
                 app_filter.as_deref(),
                 target_pid,
@@ -4802,6 +4812,7 @@ impl ComputerUseLinux {
                         snapshot.truncated,
                     );
                     self.commit_snapshot(&nodes, snapshot.root_pid).await;
+                    self.remember_window_scope(snapshot.window_scope.clone());
                     if let Some(warning) = unscoped_accessibility_tree_warning(
                         snapshot.scoped,
                         true,
@@ -5677,6 +5688,12 @@ impl ComputerUseLinux {
         self.cache_snapshot(nodes, target_pid);
     }
 
+    fn remember_window_scope(&self, window_scope: Option<String>) {
+        if let Ok(mut cached) = self.last_snapshot.lock() {
+            cached.window_scope = window_scope;
+        }
+    }
+
     async fn commit_app_state_snapshot(
         &self,
         nodes: &[AccessibilityNode],
@@ -5727,6 +5744,7 @@ impl ComputerUseLinux {
                 window_backend: window.map(|window| window.backend.clone()),
                 recovery_scope,
                 detail: NodeDetail::Compact,
+                window_scope: None,
             };
         }
     }
@@ -7155,6 +7173,30 @@ fn accessibility_window_title(
     window: Option<&WindowInfo>,
 ) -> Option<String> {
     targeted_window_title(params.window_id, params.title.as_deref(), window)
+}
+
+/// The window a post-action tree is narrowed to. An action that names a
+/// window by window_id or title uses it. One that names none keeps the window
+/// the last snapshot of the same app was narrowed to, so
+/// get_app_state(title=...) followed by perform_action(include_tree=true)
+/// does not widen to every window of the app again.
+fn post_action_window_title(
+    target: Option<&WindowTarget>,
+    resolved_window: Option<&WindowInfo>,
+    target_pid: Option<u32>,
+    cached_window_scope: Option<(String, Option<u32>)>,
+) -> Option<String> {
+    let targeted = target.and_then(|target| {
+        targeted_window_title(target.window_id, target.title.as_deref(), resolved_window)
+    });
+    if targeted.is_some()
+        || target.is_some_and(|target| target.window_id.is_some() || target.title.is_some())
+    {
+        return targeted;
+    }
+    cached_window_scope
+        .filter(|(_, cached_pid)| cached_pid.is_some() && *cached_pid == target_pid)
+        .map(|(scope, _)| scope)
 }
 
 /// accessibility_window_title for a target given as its window_id and title.
@@ -11577,6 +11619,43 @@ esac
             ["index", "depth", "object_ref", "role"]
         );
         assert_eq!(required("CompactText"), ["character_count"]);
+    }
+
+    #[test]
+    fn post_action_tree_keeps_the_snapshot_window_scope_of_the_same_app() {
+        let scope = Some(("PlanetScale - Chromium".to_string(), Some(7)));
+        // An untargeted perform_action or set_value on the same app keeps it.
+        assert_eq!(
+            post_action_window_title(None, None, Some(7), scope.clone()).as_deref(),
+            Some("PlanetScale - Chromium")
+        );
+        // A pid-only target of the same app keeps it too.
+        let pid_only = WindowTarget {
+            pid: Some(7),
+            ..WindowTarget::default()
+        };
+        assert_eq!(
+            post_action_window_title(Some(&pid_only), None, Some(7), scope.clone()).as_deref(),
+            Some("PlanetScale - Chromium")
+        );
+        // Another app, or a snapshot with no pid, does not inherit it.
+        assert_eq!(
+            post_action_window_title(None, None, Some(8), scope.clone()),
+            None
+        );
+        assert_eq!(
+            post_action_window_title(None, None, None, Some(("x".to_string(), None))),
+            None
+        );
+        // A target that names its own window uses that window.
+        let titled = WindowTarget {
+            title: Some("Other".to_string()),
+            ..WindowTarget::default()
+        };
+        assert_eq!(
+            post_action_window_title(Some(&titled), None, Some(7), scope).as_deref(),
+            Some("Other")
+        );
     }
 
     #[test]
