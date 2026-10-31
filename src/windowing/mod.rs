@@ -381,12 +381,23 @@ mod tests {
     #[test]
     fn window_id_input_rejects_integers_above_javascript_safe_range() {
         // Issue #341: the Firefox ID a JavaScript client received for a KWin
-        // window, after rounding.
-        let error = serde_json::from_str::<WindowTarget>(r#"{"window_id":17289304398224070000}"#)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("above 9007199254740991"), "{error}");
-        assert!(error.contains("re-run list_windows"), "{error}");
+        // window, after rounding. 18446744073709552000 is u64::MAX after
+        // JavaScript rounding, which serde_json reads as a float; negative
+        // and fractional numbers are not window IDs either.
+        for window_id in [
+            "17289304398224070000",
+            "18446744073709552000",
+            "9007199254740992",
+            "-1",
+            "1.5",
+        ] {
+            let error =
+                serde_json::from_str::<WindowTarget>(&format!(r#"{{"window_id":{window_id}}}"#))
+                    .unwrap_err()
+                    .to_string();
+            assert!(error.contains("0 to 9007199254740991"), "{error}");
+            assert!(error.contains("re-run list_windows"), "{error}");
+        }
 
         let max =
             serde_json::from_str::<WindowTarget>(r#"{"window_id":9007199254740991}"#).unwrap();
