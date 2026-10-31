@@ -408,6 +408,7 @@ dependencies = [
  "xkbcommon-dl",
  "xkeysym",
  "zbus",
+ "zbus_xml",
 ]
 
 [[package]]

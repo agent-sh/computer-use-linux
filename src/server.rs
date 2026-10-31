@@ -2274,7 +2274,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "press_key",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
-        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. When ydotool is absent and the session has no RemoteDesktop portal (for example wlroots compositors), chords go through wtype instead. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -2352,7 +2352,39 @@ impl ComputerUseLinux {
         let input_guard = Arc::try_unwrap(input_guard)
             .expect("pixelflux fallback must not retain dispatched input");
 
-        if self.should_prefer_portal_keyboard_for_chords().await {
+        let route = self.chord_route().await;
+        if route == ChordRoute::Wtype {
+            let Some(args) = wtype_key_args(&params.key) else {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "press_key".to_string(),
+                    message: "Unsupported key. Use names like Enter, Escape, Tab, ArrowLeft, Super, Ctrl+L, or a single US keyboard letter/digit.".to_string(),
+                    received,
+                });
+            };
+            let (input_guard, result) =
+                run_cancellation_safe_input(input_guard, async move { run_wtype_key(&args).await })
+                    .await;
+            let _input_guard = input_guard;
+            let output = match result {
+                Ok(()) => successful_action_with_focus(
+                    "press_key",
+                    "Action sent through wtype (Wayland virtual-keyboard protocol).",
+                    received,
+                    focus.clone(),
+                ),
+                Err(error) => {
+                    action_result_with_focus("press_key", Err(error), received, focus.clone())
+                }
+            };
+            if output.ok && focus.is_some() {
+                let notes = self.input_landing_notes(focus.as_ref(), false).await;
+                return Json(with_notes(output, notes));
+            }
+            return Json(output);
+        }
+        if route == ChordRoute::Portal {
             let portal_target = match self
                 .portal_keyboard_target(&params.window_target(), focus.as_ref())
                 .await
@@ -4414,6 +4446,20 @@ impl ComputerUseLinux {
             return true;
         }
         !ydotool_backend_available().await
+    }
+
+    /// Chord route for `press_key`. The portal stays preferred wherever it
+    /// exists; the portal probe only runs when wtype could replace it.
+    async fn chord_route(&self) -> ChordRoute {
+        let prefer_portal = self.should_prefer_portal_keyboard_for_chords().await;
+        let portal_pinned = self.cached_portal_keyboard_session().is_some()
+            || env_flag_enabled("COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD");
+        let wtype = self.should_prefer_wtype_keyboard();
+        let portal_missing = prefer_portal
+            && !portal_pinned
+            && wtype
+            && crate::remote_desktop::remote_desktop_portal_missing().await;
+        chord_route_from(prefer_portal, portal_pinned, wtype, portal_missing)
     }
 
     fn should_prefer_kde_clipboard_text_backend(&self) -> bool {
@@ -9298,6 +9344,112 @@ fn prefer_wtype_keyboard(
     !force_ydotool && is_wayland && compatible_desktop && available
 }
 
+/// Where `press_key` sends a chord.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChordRoute {
+    Portal,
+    Wtype,
+    /// xdotool on X11, otherwise ydotool.
+    Command,
+}
+
+/// wtype replaces the portal only when the session has no RemoteDesktop
+/// portal at all, and the portal is neither forced nor already holding the
+/// user's consent. Wherever the portal exists it stays preferred.
+fn chord_route_from(
+    prefer_portal: bool,
+    portal_pinned: bool,
+    wtype: bool,
+    portal_missing: bool,
+) -> ChordRoute {
+    if !prefer_portal {
+        ChordRoute::Command
+    } else if !portal_pinned && wtype && portal_missing {
+        ChordRoute::Wtype
+    } else {
+        ChordRoute::Portal
+    }
+}
+
+/// wtype arguments for a chord: hold each modifier with `-M`, tap the key by
+/// keysym name with `-k`, then release the modifiers in reverse with `-m`.
+/// wtype uploads its own keymap, so keysyms do not depend on the layout.
+/// `-M` only changes the modifier state, so a lone modifier is tapped as its
+/// left-hand keysym, like the portal route.
+fn wtype_key_args(key: &str) -> Option<Vec<String>> {
+    let parts = key
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let (key_part, modifier_parts) = parts.split_last()?;
+
+    // Validate through the same evdev grammar so every backend accepts
+    // exactly the same input set.
+    key_chord(key)?;
+
+    let modifiers = modifier_parts
+        .iter()
+        .map(|part| wtype_modifier_name(part))
+        .collect::<Option<Vec<_>>>()?;
+    let mut args = Vec::new();
+    for modifier in &modifiers {
+        args.extend(["-M".to_string(), modifier.to_string()]);
+    }
+    let keysym = match wtype_modifier_keysym(key_part).filter(|_| modifier_parts.is_empty()) {
+        Some(bare) => bare.to_string(),
+        None => xdotool_keysym_name(key_part)?,
+    };
+    args.extend(["-k".to_string(), keysym]);
+    for modifier in modifiers.iter().rev() {
+        args.extend(["-m".to_string(), modifier.to_string()]);
+    }
+    Some(args)
+}
+
+fn wtype_modifier_name(key: &str) -> Option<&'static str> {
+    match normalize_key(key).as_str() {
+        "ctrl" | "control" => Some("ctrl"),
+        "alt" | "option" => Some("alt"),
+        "shift" => Some("shift"),
+        "meta" | "super" | "cmd" | "command" => Some("logo"),
+        _ => None,
+    }
+}
+
+/// Standalone keysym for a bare modifier press (`press_key "Super"`).
+fn wtype_modifier_keysym(key: &str) -> Option<&'static str> {
+    match normalize_key(key).as_str() {
+        "ctrl" | "control" => Some("Control_L"),
+        "alt" | "option" => Some("Alt_L"),
+        "shift" => Some("Shift_L"),
+        "meta" | "super" | "cmd" | "command" => Some("Super_L"),
+        _ => None,
+    }
+}
+
+/// Pause, in milliseconds, after wtype uploads its keymap and before the
+/// first key. Each wtype run is a new virtual keyboard, and on Sway the
+/// focused client gets a fresh `wl_keyboard.enter` for it. A key pressed
+/// before that enter arrives only in its held-key list, so the client never
+/// sees the press.
+const WTYPE_KEY_SETTLE_MS: u64 = 50;
+
+async fn run_wtype_key(args: &[String]) -> std::result::Result<(), String> {
+    let mut command = TokioCommand::new("wtype");
+    command
+        .args(["-s", &WTYPE_KEY_SETTLE_MS.to_string()])
+        .args(args);
+    let output =
+        crate::command_runner::output_with_timeout(command, "run wtype", INPUT_COMMAND_TIMEOUT)
+            .await
+            .map_err(|error| format!("{error:#}"))?;
+    if !output.status.success() {
+        return Err(command_output_error("wtype", output));
+    }
+    Ok(())
+}
+
 /// Default per-character delay for `xdotool type`, in milliseconds (xdotool's
 /// own default). `--delay 0` lets XTEST key events race each other on some X
 /// servers (Cinnamon on Mint 22, issue #147): every character arrives, but in
@@ -11046,6 +11198,46 @@ esac
         assert!(!prefer_wtype_keyboard(false, false, true, true));
         assert!(!prefer_wtype_keyboard(false, true, false, true));
         assert!(!prefer_wtype_keyboard(false, true, true, false));
+    }
+
+    #[test]
+    fn chords_use_wtype_only_where_no_remote_desktop_portal_exists() {
+        // (prefer_portal, portal_pinned, wtype, portal_missing)
+        assert_eq!(chord_route_from(true, false, true, true), ChordRoute::Wtype);
+        // The portal exists: it stays preferred even when wtype is present.
+        assert_eq!(
+            chord_route_from(true, false, true, false),
+            ChordRoute::Portal
+        );
+        // Forced portal or an existing consented session keeps the portal.
+        assert_eq!(chord_route_from(true, true, true, true), ChordRoute::Portal);
+        // Without wtype the portal reports its own error.
+        assert_eq!(
+            chord_route_from(true, false, false, true),
+            ChordRoute::Portal
+        );
+        // ydotool, xdotool and forced ydotool keep their command route.
+        assert_eq!(
+            chord_route_from(false, false, true, true),
+            ChordRoute::Command
+        );
+    }
+
+    #[test]
+    fn wtype_chords_hold_modifiers_around_one_keysym() {
+        let args = |key| wtype_key_args(key).map(|args| args.join(" "));
+        assert_eq!(args("Return").as_deref(), Some("-k Return"));
+        assert_eq!(
+            args("Ctrl+Shift+T").as_deref(),
+            Some("-M ctrl -M shift -k t -m shift -m ctrl")
+        );
+        assert_eq!(args("cmd+l").as_deref(), Some("-M logo -k l -m logo"));
+        assert_eq!(args("Alt+F4").as_deref(), Some("-M alt -k F4 -m alt"));
+        assert_eq!(args("Super").as_deref(), Some("-k Super_L"));
+        assert_eq!(args("Page Down").as_deref(), Some("-k Page_Down"));
+        assert!(wtype_key_args("Ctrl+Hyper+L").is_none());
+        assert!(wtype_key_args("Ctrl+F13").is_none());
+        assert!(wtype_key_args("").is_none());
     }
 
     #[test]

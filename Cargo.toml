@@ -62,6 +62,7 @@ x11rb = { version = "0.14", features = ["xkb"] }
 xkbcommon-dl = "0.4.2"
 xkeysym = "0.2.1"
 zbus = "5.14.0"
+zbus_xml = "5.1.1"
 
 [profile.dev]
 # Keep file and line numbers in backtraces without full variable/type debug info.

@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - List and focus windows through `zwlr_foreign_toplevel_manager_v1` on wlroots compositors without a dedicated backend, such as stock labwc, phoc and river-classic. Windows carry no pids or bounds, and focus requires a unique app id and title match.
 - Selkies container guide: run the server inside a linuxserver.io Selkies desktop container, reached from the host's MCP client over `docker exec`, with a launcher that joins the desktop session (`skills/computer-use-linux/references/selkies-setup.md`).
+- `press_key` sends chords through `wtype` on Wayland sessions without ydotool whose session bus answers that no RemoteDesktop portal exists, as on wlroots compositors with xdg-desktop-portal-wlr (Sway, labwc, river, phoc, cage). Chords used to fail there. The portal stays preferred when it exists, when a keyboard session is already active, or with `COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD=1`. A missing or unreachable bus, a timeout or any other error keeps the portal route, and a failed or denied portal request is never replayed through wtype.
 
 ## [0.7.35] - 2026-10-31
 
