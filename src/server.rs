@@ -22,6 +22,7 @@ use crate::screenshot::{
     ScreenshotOutputFormat, ScreenshotPayloadOptions,
 };
 use crate::terminal::{terminal_paste_shortcut, TerminalPasteShortcut};
+use crate::tree_encoding::{is_placeholder_text, NodeDetail, TreeNodes};
 use crate::windowing::backends::kwin::{
     KwinElementClickPoint, KwinElementClickTarget, KwinElementFrame,
 };
@@ -91,6 +92,9 @@ struct CachedAccessibilitySnapshot {
     window_id: Option<u64>,
     window_backend: Option<String>,
     recovery_scope: Option<AccessibilityRecoveryScope>,
+    /// Encoding of the result the nodes were returned in; get_tree_page pages
+    /// them in the same one.
+    detail: NodeDetail,
 }
 
 /// The app or window an element action names, as the cached-node target
@@ -338,12 +342,12 @@ impl ComputerUseLinux {
         &self,
         Parameters(params): Parameters<GetTreePageParams>,
     ) -> Json<GetTreePageOutput> {
-        let nodes = self
+        let (nodes, detail) = self
             .last_snapshot
             .lock()
-            .map(|snapshot| snapshot.nodes.clone())
+            .map(|snapshot| (snapshot.nodes.clone(), snapshot.detail))
             .unwrap_or_default();
-        Json(tree_page(&nodes, params.offset.unwrap_or(0)))
+        Json(tree_page(&nodes, detail, params.offset.unwrap_or(0)))
     }
 
     #[tool(
@@ -461,7 +465,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "get_app_state",
         output_schema = rmcp::handler::server::tool::schema_for_output::<GetAppStateOutput>(),
-        description = "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
+        description = "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Nodes are compact (empty fields left out, actions by name; verbose=true returns every field). Pass interactive_only=true for only actionable nodes, headings and status regions, with the same element_index values. A title or window_id target narrows an app with several windows under one AT-SPI root (Chromium) to that window. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -559,15 +563,20 @@ impl ComputerUseLinux {
         let mut tree_root_pid = None;
         let mut accessibility_tree_truncated = false;
         let mut shell_only_note = None;
+        let mut window_scope = None;
+        let mut interactive_note = None;
+        let detail = NodeDetail::from_verbose(verbose);
         let (accessibility_tree, accessibility_tree_raw_count, accessibility_error, tree_read) =
             if diagnostics.readiness.can_build_accessibility_tree {
                 let target_pid = accessibility_snapshot_target_pid(
                     app_filter.as_deref(),
                     window_context.as_ref().and_then(|window| window.pid),
                 );
+                let window_title = accessibility_window_title(&params, window_context.as_ref());
                 match snapshot_accessibility_tree(
                     app_filter.as_deref(),
                     target_pid,
+                    window_title.as_deref(),
                     max_nodes,
                     max_depth,
                 )
@@ -577,6 +586,7 @@ impl ComputerUseLinux {
                         tree_scoped = snapshot.scoped;
                         tree_root_pid = snapshot.root_pid;
                         accessibility_tree_truncated = snapshot.truncated;
+                        window_scope = snapshot.window_scope;
                         let raw_count = snapshot.nodes.len();
                         let (nodes, note) = compact_accessibility_tree_with_note(
                             snapshot.nodes,
@@ -584,6 +594,17 @@ impl ComputerUseLinux {
                             accessibility_tree_truncated,
                         );
                         shell_only_note = note;
+                        let nodes = if params.interactive_only.unwrap_or(false) {
+                            let compacted = nodes.len();
+                            let nodes = interactive_accessibility_tree(nodes);
+                            interactive_note = Some(format!(
+                                "interactive_only kept {} of {compacted} compacted nodes; element_index values match the full tree.",
+                                nodes.len()
+                            ));
+                            nodes
+                        } else {
+                            nodes
+                        };
                         let read = if raw_count == 0 {
                             TreeRead::Failed
                         } else {
@@ -643,6 +664,7 @@ impl ComputerUseLinux {
                 window_context.as_ref(),
                 &params,
                 tree_scoped,
+                detail,
             )
             .await;
         } else {
@@ -695,6 +717,15 @@ impl ComputerUseLinux {
             message.push(' ');
             message.push_str(note);
         }
+        if let Some(window) = window_scope {
+            message.push_str(&format!(
+                " The app exposes several windows; the tree covers only the window named {window:?}."
+            ));
+        }
+        if let Some(note) = interactive_note {
+            message.push(' ');
+            message.push_str(&note);
+        }
 
         // Full diagnostics are huge (portal/process dumps); emit them only on
         // request. The compact readiness block always travels, and failures get
@@ -716,7 +747,7 @@ impl ComputerUseLinux {
             backend: "linux-atspi".to_string(),
             screenshot: screenshot.as_ref().map(ScreenshotSummary::from),
             screenshot_error,
-            accessibility_tree: Vec::new(),
+            accessibility_tree: TreeNodes::new(Vec::new(), detail),
             accessibility_tree_raw_count,
             accessibility_tree_spill: None,
             tree_scoped,
@@ -728,7 +759,7 @@ impl ComputerUseLinux {
         };
         // The tree gets whatever the rest of the result leaves of the budget.
         let rest = serde_json::to_string(&output).map_or(0, |json| json.len());
-        let mut accessibility_tree = accessibility_tree;
+        let mut accessibility_tree = TreeNodes::new(accessibility_tree, detail);
         let (spill, note) = fit_tree(
             &self.tree_spiller,
             &mut accessibility_tree,
@@ -2718,7 +2749,7 @@ impl ComputerUseLinux {
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
     version = "0.7.33",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send literal type_text through KDE clipboard integration on Plasma Wayland, wtype on compatible Wayland compositors, or portal keysyms on other Wayland sessions. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Mutating tools (click, type_text, press_key, scroll, drag, perform_action, set_value, activate_window, move_window, resize_window) accept optional screenshot_after (true, \"screen\", or \"window\") with format/quality/scale/max_width/max_height/max_bytes and optional include_tree=true to return post-action observation in the same tool call. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype uses a single literal argument after -- to avoid stdin keymap-refresh corruption; text is visible in process arguments, so confirmed password fields are rejected (use set_value). Terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call; split larger input into smaller calls or expose accessibility. Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. X11 xdotool can silently substitute symbols under non-US XKB layouts (reported with br/ABNT2) or changing keymap state; inspect the text before pressing Enter or submitting it. A successful type_text result confirms dispatch only; every text backend leaves field contents unverified. Re-observe the target before retrying. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, read, or time budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 10000 and 64), not by lowering max_nodes. A compacted tree too large to return inline comes back as its leading nodes plus accessibility_tree_spill.path, a private JSON file with the whole tree and the same element_index values; search that file instead of requesting the tree again, or page through it with get_tree_page when files are not readable. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content."
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send literal type_text through KDE clipboard integration on Plasma Wayland, wtype on compatible Wayland compositors, or portal keysyms on other Wayland sessions. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Mutating tools (click, type_text, press_key, scroll, drag, perform_action, set_value, activate_window, move_window, resize_window) accept optional screenshot_after (true, \"screen\", or \"window\") with format/quality/scale/max_width/max_height/max_bytes and optional include_tree=true to return post-action observation in the same tool call. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype uses a single literal argument after -- to avoid stdin keymap-refresh corruption; text is visible in process arguments, so confirmed password fields are rejected (use set_value). Terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call; split larger input into smaller calls or expose accessibility. Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. X11 xdotool can silently substitute symbols under non-US XKB layouts (reported with br/ABNT2) or changing keymap state; inspect the text before pressing Enter or submitting it. A successful type_text result confirms dispatch only; every text backend leaves field contents unverified. Re-observe the target before retrying. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block and compact tree nodes (null, empty and default fields left out, actions listed by name) by default; pass verbose=true for the full diagnostics dump and full nodes. Pass interactive_only=true to get only nodes with an action, editable text or a value, plus headings, status/live regions, windows and dialogs; containers are collapsed and element_index values match the full tree. A title or window_id target narrows an app that exposes several windows under one AT-SPI application root (Chromium) to that window's subtree. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, read, or time budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 10000 and 64), not by lowering max_nodes. A compacted tree too large to return inline comes back as its leading nodes plus accessibility_tree_spill.path, a private JSON file with the whole tree and the same element_index values; search that file instead of requesting the tree again, or page through it with get_tree_page when files are not readable. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content."
 )]
 impl ServerHandler for ComputerUseLinux {}
 
@@ -3143,7 +3174,7 @@ struct PostActionObservation {
     screenshot_error: Option<String>,
     /// Post-action compacted AT-SPI accessibility tree when `include_tree=true` was requested.
     #[serde(skip_serializing_if = "Option::is_none")]
-    accessibility_tree: Option<Vec<AccessibilityNode>>,
+    accessibility_tree: Option<TreeNodes>,
     /// Raw AT-SPI node count before compaction when `include_tree=true` was requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     accessibility_tree_raw_count: Option<usize>,
@@ -3385,10 +3416,19 @@ struct GetAppStateParams {
     #[serde(default)]
     #[schemars(range(min = 1, max = 95))]
     quality: Option<u8>,
-    /// Include the full diagnostics report (large). Default false: only the
-    /// compact readiness block is returned.
+    /// Include the full diagnostics report (large) and return tree nodes in the
+    /// full encoding, with null and empty fields and action descriptions and
+    /// keybindings. Default false: only the compact readiness block, and
+    /// compact nodes.
     #[serde(default)]
     verbose: Option<bool>,
+    /// Return only nodes that can be acted on (an action, editable text, or a
+    /// value), plus headings, status/live regions, windows and dialogs.
+    /// Containers are collapsed: each node's parent_index points at its
+    /// nearest kept ancestor. element_index values are the same as in the full
+    /// tree, so they work with click, perform_action and set_value.
+    #[serde(default)]
+    interactive_only: Option<bool>,
 }
 
 impl GetAppStateParams {
@@ -3590,7 +3630,7 @@ struct GetTreePageParams {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 struct GetTreePageOutput {
     /// Nodes from `offset`, as many as fit in one result.
-    nodes: Vec<AccessibilityNode>,
+    nodes: TreeNodes,
     offset: usize,
     /// Offset of the next page, or null when this page ends the tree.
     next_offset: Option<usize>,
@@ -3601,11 +3641,11 @@ struct GetTreePageOutput {
 
 /// A page of `nodes` from `offset` that fits the inline budget. Always at least
 /// one node, so paging advances even past a node larger than the budget.
-fn tree_page(nodes: &[AccessibilityNode], offset: usize) -> GetTreePageOutput {
+fn tree_page(nodes: &[AccessibilityNode], detail: NodeDetail, offset: usize) -> GetTreePageOutput {
     let node_count = nodes.len();
     if node_count == 0 {
         return GetTreePageOutput {
-            nodes: Vec::new(),
+            nodes: TreeNodes::new(Vec::new(), detail),
             offset,
             next_offset: None,
             node_count,
@@ -3614,7 +3654,7 @@ fn tree_page(nodes: &[AccessibilityNode], offset: usize) -> GetTreePageOutput {
     }
     let start = offset.min(node_count);
     let rest = &nodes[start..];
-    let fit = crate::tree_spill::inline_prefix_len(rest, tree_budget(TREE_PAGE_RESERVE))
+    let fit = crate::tree_spill::inline_prefix_len(rest, detail, tree_budget(TREE_PAGE_RESERVE))
         .max(usize::from(!rest.is_empty()));
     let end = start + fit;
     let next_offset = (end < node_count).then_some(end);
@@ -3630,7 +3670,7 @@ fn tree_page(nodes: &[AccessibilityNode], offset: usize) -> GetTreePageOutput {
         None => format!("Offset {offset} is past the end of the {node_count}-node tree."),
     };
     GetTreePageOutput {
-        nodes: rest[..fit].to_vec(),
+        nodes: TreeNodes::new(rest[..fit].to_vec(), detail),
         offset: start,
         next_offset,
         node_count,
@@ -3722,8 +3762,9 @@ struct GetAppStateOutput {
     screenshot: Option<ScreenshotSummary>,
     screenshot_error: Option<String>,
     /// Compacted tree, or its leading nodes when the whole tree is in
-    /// `accessibility_tree_spill`.
-    accessibility_tree: Vec<AccessibilityNode>,
+    /// `accessibility_tree_spill`. Nodes use the compact encoding (empty and
+    /// default fields left out, actions by name) unless verbose=true.
+    accessibility_tree: TreeNodes,
     accessibility_tree_raw_count: usize,
     /// Set when the compacted tree was too large to return inline: the whole
     /// tree is in this private file, with the same element_index values.
@@ -4722,6 +4763,7 @@ impl ComputerUseLinux {
             match snapshot_accessibility_tree(
                 app_filter.as_deref(),
                 target_pid,
+                None,
                 max_nodes,
                 max_depth,
             )
@@ -4739,7 +4781,7 @@ impl ComputerUseLinux {
                     let error = "GNOME accessibility is disabled; call setup_accessibility first."
                         .to_string();
                     notes.push(format!("Post-action accessibility tree failed: {error}"));
-                    observation.accessibility_tree = Some(Vec::new());
+                    observation.accessibility_tree = Some(TreeNodes::default());
                     observation.accessibility_tree_raw_count = Some(0);
                     observation.tree_scoped = Some(false);
                     observation.accessibility_tree_truncated = Some(false);
@@ -4766,7 +4808,7 @@ impl ComputerUseLinux {
                     if let Some(note) = shell_only_note {
                         notes.push(note.to_string());
                     }
-                    let mut nodes = nodes;
+                    let mut nodes = TreeNodes::from(nodes);
                     let (spill, spill_note) = fit_tree(
                         &self.tree_spiller,
                         &mut nodes,
@@ -4783,7 +4825,7 @@ impl ComputerUseLinux {
                     self.commit_snapshot(&[], None).await;
                     let error = format!("{error:#}");
                     notes.push(format!("Post-action accessibility tree failed: {error}"));
-                    observation.accessibility_tree = Some(Vec::new());
+                    observation.accessibility_tree = Some(TreeNodes::default());
                     observation.accessibility_tree_raw_count = Some(0);
                     observation.tree_scoped = Some(false);
                     observation.accessibility_tree_truncated = Some(false);
@@ -5635,6 +5677,7 @@ impl ComputerUseLinux {
         window: Option<&WindowInfo>,
         params: &GetAppStateParams,
         scoped: bool,
+        detail: NodeDetail,
     ) {
         let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let recovery_scope = scoped.then(|| AccessibilityRecoveryScope {
@@ -5642,6 +5685,9 @@ impl ComputerUseLinux {
             target_pid,
         });
         self.cache_snapshot_with_window(nodes, target_pid, recovery_scope, window);
+        if let Ok(mut cached) = self.last_snapshot.lock() {
+            cached.detail = detail;
+        }
     }
 
     fn cache_snapshot(&self, nodes: &[AccessibilityNode], target_pid: Option<u32>) {
@@ -5673,6 +5719,7 @@ impl ComputerUseLinux {
                 window_id: window.map(|window| window.window_id),
                 window_backend: window.map(|window| window.backend.clone()),
                 recovery_scope,
+                detail: NodeDetail::Compact,
             };
         }
     }
@@ -6113,9 +6160,11 @@ impl ComputerUseLinux {
         );
         let (max_nodes, max_depth) =
             crate::atspi_tree::snapshot_limits(params.max_nodes, params.max_depth);
+        let window_title = accessibility_window_title(params, window_context.as_ref());
         let snapshot = snapshot_accessibility_tree(
             app_filter.as_deref(),
             accessibility_snapshot_target_pid(app_filter.as_deref(), target_pid),
+            window_title.as_deref(),
             max_nodes,
             max_depth,
         )
@@ -6881,11 +6930,12 @@ fn tree_budget(rest: usize) -> usize {
 /// file when it does not fit. Returns the spill and a note for the message.
 fn fit_tree(
     spiller: &crate::tree_spill::TreeSpiller,
-    nodes: &mut Vec<AccessibilityNode>,
+    tree: &mut TreeNodes,
     budget: usize,
 ) -> (Option<crate::tree_spill::TreeSpill>, Option<String>) {
-    let total = nodes.len();
-    match spiller.fit(nodes, budget) {
+    let total = tree.len();
+    let detail = tree.detail;
+    match spiller.fit(&mut tree.nodes, detail, budget) {
         Ok(None) => (None, None),
         Ok(Some(spill)) => {
             let note = format!(
@@ -6976,6 +7026,143 @@ fn nearest_kept_parent(
     None
 }
 
+/// The compacted tree cut to what an agent acts on or reads results from:
+/// controls and nodes with a specific action, editable text or a value,
+/// headings, status and live regions with their text, and app roots, windows
+/// and dialogs. Removed containers are
+/// collapsed: a kept node's parent_index names its nearest kept ancestor and
+/// child_count counts kept children. Indices are not renumbered, so an
+/// element_index means the same node as in the full compacted tree.
+fn interactive_accessibility_tree(nodes: Vec<AccessibilityNode>) -> Vec<AccessibilityNode> {
+    let position: std::collections::HashMap<u32, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(position, node)| (node.index, position))
+        .collect();
+    // Nodes come in traversal order, so a parent is classified before its children.
+    let mut in_live_region = vec![false; nodes.len()];
+    let mut keep = vec![false; nodes.len()];
+    for (index, node) in nodes.iter().enumerate() {
+        let below_live_region = node
+            .parent_index
+            .and_then(|parent| position.get(&parent))
+            .is_some_and(|&parent| parent < index && in_live_region[parent]);
+        in_live_region[index] = below_live_region || is_live_region_role(&node.role);
+        keep[index] = is_interactive_tree_node(node, below_live_region);
+    }
+    let kept_ancestor = |node: &AccessibilityNode| {
+        let mut parent = node.parent_index;
+        while let Some(index) = parent {
+            let position = *position.get(&index)?;
+            if keep[position] {
+                return Some(index);
+            }
+            parent = nodes[position].parent_index;
+        }
+        None
+    };
+    let parents: Vec<Option<u32>> = nodes.iter().map(kept_ancestor).collect();
+    let mut child_counts: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
+    for (parent, keep) in parents.iter().zip(&keep) {
+        if let (true, Some(parent)) = (*keep, parent) {
+            *child_counts.entry(*parent).or_default() += 1;
+        }
+    }
+    nodes
+        .into_iter()
+        .zip(parents)
+        .zip(keep)
+        .filter_map(|((mut node, parent), keep)| {
+            keep.then(|| {
+                node.parent_index = parent;
+                node.child_count = child_counts.get(&node.index).copied().unwrap_or_default();
+                node
+            })
+        })
+        .collect()
+}
+
+/// Roles that read out results: headings and status or live regions.
+fn is_result_role(role: &str) -> bool {
+    matches!(
+        role,
+        "heading"
+            | "alert"
+            | "status bar"
+            | "statusbar"
+            | "notification"
+            | "log"
+            | "marquee"
+            | "timer"
+            | "info bar"
+    )
+}
+
+fn is_live_region_role(role: &str) -> bool {
+    role != "heading" && is_result_role(role)
+}
+
+/// Roles of controls an agent operates, whatever actions the toolkit lists.
+fn is_control_role(role: &str) -> bool {
+    matches!(
+        role,
+        "push button"
+            | "button"
+            | "toggle button"
+            | "check box"
+            | "radio button"
+            | "link"
+            | "entry"
+            | "password text"
+            | "combo box"
+            | "menu item"
+            | "check menu item"
+            | "radio menu item"
+            | "page tab"
+            | "slider"
+            | "spin button"
+            | "switch"
+    )
+}
+
+/// Whether interactive_only keeps a node. `in_live_region` is true below a
+/// status or live region, whose text is the result an agent reads.
+fn is_interactive_tree_node(node: &AccessibilityNode, in_live_region: bool) -> bool {
+    let role = node.role.as_str();
+    // App roots and their windows (depth 0 and 1) frame everything else, and
+    // KWin element clicks map through the depth-1 window.
+    node.depth <= 1
+        || is_actionable_accessibility_node(node)
+        || is_control_role(role)
+        || crate::atspi_tree::is_window_role(role)
+        || ((is_result_role(role) || in_live_region) && has_meaningful_node_copy(node))
+        // A live region whose text sits in its children frames that text.
+        || (is_live_region_role(role) && node.child_count > 0)
+}
+
+/// Window title that narrows an app root holding several windows to one, when
+/// the caller targeted a window by title or id. The resolved window's full
+/// title is preferred over the caller's substring.
+fn accessibility_window_title(
+    params: &GetAppStateParams,
+    window: Option<&WindowInfo>,
+) -> Option<String> {
+    let requested_title = params
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty());
+    if params.window_id.is_none() && requested_title.is_none() {
+        return None;
+    }
+    window
+        .and_then(|window| window.title.as_deref())
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .or(requested_title)
+        .map(str::to_string)
+}
+
 fn should_keep_accessibility_node(node: &AccessibilityNode) -> bool {
     if node.depth <= 1 {
         return true;
@@ -6991,8 +7178,22 @@ fn should_keep_accessibility_node(node: &AccessibilityNode) -> bool {
     ) && !is_sentinel_or_missing_bounds(node.bounds.as_ref())
 }
 
+/// Actions Chromium lists on every element, whether or not it does anything:
+/// a generic default action, the context menu, and a click forwarded to the
+/// nearest clickable ancestor.
+const GENERIC_ACTIONS: &[&str] = &[
+    "doDefault",
+    "showContextMenu",
+    "clickAncestor",
+    "click-ancestor",
+];
+
 fn is_actionable_accessibility_node(node: &AccessibilityNode) -> bool {
-    !node.actions.is_empty() || node.supports_editable_text || node.value.is_some()
+    node.actions
+        .iter()
+        .any(|action| !GENERIC_ACTIONS.contains(&action.name.as_str()))
+        || node.supports_editable_text
+        || node.value.is_some()
 }
 
 fn has_meaningful_node_copy(node: &AccessibilityNode) -> bool {
@@ -7001,8 +7202,10 @@ fn has_meaningful_node_copy(node: &AccessibilityNode) -> bool {
         || has_non_empty_text(node.text.as_ref().and_then(|text| text.content.as_deref()))
 }
 
+/// Readable copy: not empty, whitespace, or only the U+FFFC characters a
+/// container's text holds for its children.
 fn has_non_empty_text(value: Option<&str>) -> bool {
-    value.map(str::trim).is_some_and(|value| !value.is_empty())
+    value.is_some_and(|value| !is_placeholder_text(value))
 }
 
 fn is_sentinel_or_missing_bounds(bounds: Option<&Bounds>) -> bool {
@@ -9879,7 +10082,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             backend: "linux-atspi".to_string(),
             screenshot: screenshot.map(ScreenshotSummary::from),
             screenshot_error: None,
-            accessibility_tree: Vec::new(),
+            accessibility_tree: TreeNodes::default(),
             accessibility_tree_spill: None,
             accessibility_tree_raw_count: 0,
             tree_scoped: true,
@@ -11154,6 +11357,258 @@ esac
         assert_eq!(compacted.len(), 3);
         assert_eq!(compacted[2].role, "page tab");
         assert_eq!(compacted[2].name.as_deref(), Some("Hidden"));
+    }
+
+    fn tree_node(index: u32, parent: Option<u32>, depth: u32, role: &str) -> AccessibilityNode {
+        AccessibilityNode {
+            index,
+            parent_index: parent,
+            depth,
+            object_ref: format!(":1.{index}/node"),
+            role: role.to_string(),
+            name: None,
+            description: None,
+            child_count: 0,
+            bounds: None,
+            states: Vec::new(),
+            actions: Vec::new(),
+            value: None,
+            text: None,
+            supports_editable_text: false,
+        }
+    }
+
+    fn placeholder_text(children: usize) -> crate::atspi_tree::AccessibilityText {
+        crate::atspi_tree::AccessibilityText {
+            character_count: children as i32,
+            caret_offset: Some(0),
+            content: Some("\u{fffc}".repeat(children)),
+            truncated: false,
+            selections: Vec::new(),
+        }
+    }
+
+    fn named_action(index: i32, name: &str) -> AccessibilityAction {
+        AccessibilityAction {
+            index,
+            name: name.to_string(),
+            description: String::new(),
+            keybinding: String::new(),
+        }
+    }
+
+    #[test]
+    fn compaction_drops_containers_whose_text_is_only_child_placeholders() {
+        // Chromium sections report one U+FFFC per child as their text.
+        let mut section = tree_node(2, Some(1), 2, "section");
+        section.text = Some(placeholder_text(1));
+        let mut button = tree_node(3, Some(2), 3, "push button");
+        button.name = Some("Save".to_string());
+        button.actions = vec![named_action(0, "click")];
+        let nodes = vec![
+            tree_node(0, None, 0, "application"),
+            tree_node(1, Some(0), 1, "frame"),
+            section,
+            button,
+        ];
+
+        let compacted = compact_accessibility_tree(nodes);
+
+        let roles: Vec<_> = compacted.iter().map(|node| node.role.as_str()).collect();
+        assert_eq!(roles, ["application", "frame", "push button"]);
+        assert_eq!(compacted[2].parent_index, Some(1));
+    }
+
+    fn chromium_generic_actions() -> Vec<AccessibilityAction> {
+        vec![
+            named_action(0, "doDefault"),
+            named_action(1, "showContextMenu"),
+        ]
+    }
+
+    #[test]
+    fn compaction_drops_chromium_containers_with_only_generic_actions() {
+        // Chromium lists doDefault and showContextMenu on every element.
+        let mut panel = tree_node(2, Some(1), 2, "panel");
+        panel.actions = chromium_generic_actions();
+        panel.text = Some(placeholder_text(1));
+        let mut button = tree_node(3, Some(2), 3, "push button");
+        button.name = Some("Save".to_string());
+        button.actions = vec![named_action(0, "press"), named_action(1, "showContextMenu")];
+        let nodes = vec![
+            tree_node(0, None, 0, "application"),
+            tree_node(1, Some(0), 1, "frame"),
+            panel,
+            button,
+        ];
+
+        let compacted = compact_accessibility_tree(nodes);
+
+        let roles: Vec<_> = compacted.iter().map(|node| node.role.as_str()).collect();
+        assert_eq!(roles, ["application", "frame", "push button"]);
+    }
+
+    #[test]
+    fn interactive_tree_keeps_controls_and_results_with_their_indices() {
+        let mut nodes = vec![
+            tree_node(0, None, 0, "application"),
+            tree_node(1, Some(0), 1, "frame"),
+            tree_node(2, Some(1), 2, "section"),
+            tree_node(3, Some(2), 3, "heading"),
+            tree_node(4, Some(2), 3, "section"),
+            tree_node(5, Some(4), 4, "link"),
+            tree_node(6, Some(5), 5, "static"),
+            tree_node(7, Some(4), 4, "entry"),
+            tree_node(8, Some(2), 3, "statusbar"),
+            tree_node(9, Some(2), 3, "progress bar"),
+            tree_node(10, Some(2), 3, "paragraph"),
+            tree_node(11, Some(8), 4, "static"),
+            tree_node(12, Some(2), 3, "notification"),
+            tree_node(13, Some(2), 3, "button"),
+        ];
+        for node in &mut nodes {
+            node.actions = chromium_generic_actions();
+        }
+        nodes[3].name = Some("Results".to_string());
+        nodes[5].actions = vec![named_action(0, "jump"), named_action(1, "showContextMenu")];
+        nodes[5].name = Some("Docs".to_string());
+        // Text inside the link only forwards clicks to it.
+        nodes[6].actions = vec![named_action(0, "clickAncestor")];
+        nodes[6].name = Some("Docs".to_string());
+        nodes[7].supports_editable_text = true;
+        nodes[9].value = Some(crate::atspi_tree::AccessibilityValue {
+            current: 40.0,
+            minimum: 0.0,
+            maximum: 100.0,
+            minimum_increment: 1.0,
+            text: None,
+        });
+        nodes[10].name = Some("Body copy".to_string());
+        // The status region's text sits in a child, as in Chromium; an empty
+        // notification (node 12) announces nothing, and a button with no
+        // specific action (node 13) is still a control.
+        nodes[8].child_count = 1;
+        nodes[11].name = Some("Saved".to_string());
+
+        let kept = interactive_accessibility_tree(nodes);
+
+        let summary: Vec<_> = kept
+            .iter()
+            .map(|node| (node.index, node.parent_index, node.child_count))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (0, None, 1),
+                (1, Some(0), 6),
+                (3, Some(1), 0),
+                (5, Some(1), 0),
+                (7, Some(1), 0),
+                (8, Some(1), 1),
+                (9, Some(1), 0),
+                (11, Some(8), 0),
+                (13, Some(1), 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn interactive_indices_resolve_to_the_same_cached_nodes() {
+        let backend = ComputerUseLinux::default();
+        let mut nodes: Vec<_> = (0..4)
+            .map(|index| tree_node(index, index.checked_sub(1), index, "section"))
+            .collect();
+        nodes[3].role = "push button".to_string();
+        nodes[3].actions = vec![named_action(0, "click")];
+        let kept = interactive_accessibility_tree(nodes);
+        backend.cache_snapshot(&kept, None);
+
+        let node = backend
+            .resolve_cached_node(
+                Some(3),
+                &ElementSelector::default(),
+                ElementResolvePurpose::Action,
+            )
+            .unwrap();
+        assert_eq!(node.object_ref, ":1.3/node");
+        assert!(backend
+            .resolve_cached_node(
+                Some(2),
+                &ElementSelector::default(),
+                ElementResolvePurpose::Action
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn output_schema_lets_compact_nodes_leave_out_default_fields() {
+        let schema = rmcp::handler::server::tool::schema_for_output::<GetAppStateOutput>();
+        let required = |name: &str| -> Vec<String> {
+            schema["$defs"][name]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|field| field.as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            required("CompactNode"),
+            ["index", "depth", "object_ref", "role"]
+        );
+        assert_eq!(required("CompactText"), ["character_count"]);
+    }
+
+    #[test]
+    fn compact_tree_pages_and_spills_in_the_snapshot_encoding() {
+        let mut node = tree_node(0, None, 0, "frame");
+        node.actions = vec![named_action(0, "click")];
+        let page = tree_page(&[node.clone()], NodeDetail::Compact, 0);
+        let json = serde_json::to_value(&page).unwrap();
+        assert_eq!(json["nodes"][0]["actions"], serde_json::json!(["click"]));
+        assert!(json["nodes"][0].get("value").is_none());
+
+        let page = tree_page(&[node], NodeDetail::Full, 0);
+        let json = serde_json::to_value(&page).unwrap();
+        assert_eq!(json["nodes"][0]["actions"][0]["name"], "click");
+        assert!(json["nodes"][0]["value"].is_null());
+    }
+
+    #[test]
+    fn window_title_narrows_only_title_or_window_id_targets() {
+        let params = |value: serde_json::Value| -> GetAppStateParams {
+            serde_json::from_value(value).unwrap()
+        };
+        let window = WindowInfo {
+            title: Some("PlanetScale - Chromium".to_string()),
+            ..kwin_window(42)
+        };
+
+        assert_eq!(
+            accessibility_window_title(&params(serde_json::json!({"pid": 7})), Some(&window)),
+            None,
+            "a pid target keeps every window of the app"
+        );
+        assert_eq!(
+            accessibility_window_title(
+                &params(serde_json::json!({"title": "PlanetScale"})),
+                Some(&window)
+            )
+            .as_deref(),
+            Some("PlanetScale - Chromium")
+        );
+        assert_eq!(
+            accessibility_window_title(&params(serde_json::json!({"title": "PlanetScale"})), None)
+                .as_deref(),
+            Some("PlanetScale")
+        );
+        assert_eq!(
+            accessibility_window_title(
+                &params(serde_json::json!({"window_id": 42})),
+                Some(&window)
+            )
+            .as_deref(),
+            Some("PlanetScale - Chromium")
+        );
     }
 
     #[test]
@@ -13845,6 +14300,7 @@ mod action_recovery_tests {
                 root_pid,
                 app_filter_matched: true,
                 truncated: false,
+                window_scope: None,
             },
             target_pid,
             window: None,
@@ -13910,7 +14366,14 @@ mod action_recovery_tests {
         .unwrap();
 
         backend
-            .commit_app_state_snapshot(&[action_node(0, OLD_REF)], Some(1234), None, &params, true)
+            .commit_app_state_snapshot(
+                &[action_node(0, OLD_REF)],
+                Some(1234),
+                None,
+                &params,
+                true,
+                NodeDetail::Compact,
+            )
             .await;
         let scope = backend
             .last_snapshot
@@ -13932,7 +14395,14 @@ mod action_recovery_tests {
         assert_eq!(scope.target_pid, Some(1234));
 
         backend
-            .commit_app_state_snapshot(&[action_node(0, OLD_REF)], None, None, &params, false)
+            .commit_app_state_snapshot(
+                &[action_node(0, OLD_REF)],
+                None,
+                None,
+                &params,
+                false,
+                NodeDetail::Compact,
+            )
             .await;
         assert!(backend
             .last_snapshot
@@ -14074,6 +14544,7 @@ mod action_recovery_tests {
                     Some(&recovery_window(42, 1234)),
                     &serde_json::from_value(params).unwrap(),
                     true,
+                    NodeDetail::Compact,
                 )
                 .await;
             let dispatches = Arc::new(AtomicUsize::new(0));
@@ -14124,6 +14595,7 @@ mod action_recovery_tests {
                 None,
                 &serde_json::from_value(serde_json::json!({"window_id": 42})).unwrap(),
                 true,
+                NodeDetail::Compact,
             )
             .await;
         let refreshes = Arc::new(AtomicUsize::new(0));
@@ -14177,6 +14649,7 @@ mod action_recovery_tests {
                     Some(&original_window),
                     &serde_json::from_value(serde_json::json!({"window_id": 42})).unwrap(),
                     true,
+                    NodeDetail::Compact,
                 )
                 .await;
             let dispatches = Arc::new(AtomicUsize::new(0));
@@ -14356,6 +14829,7 @@ mod action_recovery_tests {
                     }))
                     .unwrap(),
                     true,
+                    NodeDetail::Compact,
                 )
                 .await;
             let fresh_window = fresh_window_id.map(|window_id| WindowInfo {
@@ -14692,6 +15166,7 @@ mod action_recovery_tests {
                 Some(&recovery_window(42, 5678)),
                 &serde_json::from_value(serde_json::json!({"window_id": 42})).unwrap(),
                 true,
+                NodeDetail::Compact,
             )
             .await;
 
@@ -16296,7 +16771,7 @@ mod tree_spill_server_tests {
         let (backend, root) = backend("index");
         let tree: Vec<_> = (0..300).map(node).collect();
         backend.cache_snapshot(&tree, None);
-        let mut inline = tree.clone();
+        let mut inline = TreeNodes::new(tree.clone(), NodeDetail::Full);
         let (spill, note) = fit_tree(&backend.tree_spiller, &mut inline, tree_budget(2_000));
         let spill = spill.expect("a 300-node tree spills");
         assert!(note.unwrap().contains("get_tree_page"));
@@ -16323,7 +16798,7 @@ mod tree_spill_server_tests {
         let mut seen = Vec::new();
         let mut offset = 0;
         loop {
-            let page = tree_page(&tree, offset);
+            let page = tree_page(&tree, NodeDetail::Full, offset);
             assert!(!page.nodes.is_empty());
             assert!(
                 serde_json::to_string(&page).unwrap().len()
@@ -16337,15 +16812,17 @@ mod tree_spill_server_tests {
             }
         }
         assert_eq!(seen, (0..300).collect::<Vec<_>>());
-        assert!(tree_page(&tree, 999).nodes.is_empty());
-        assert!(tree_page(&[], 0).message.contains("call get_app_state"));
+        assert!(tree_page(&tree, NodeDetail::Full, 999).nodes.is_empty());
+        assert!(tree_page(&[], NodeDetail::Full, 0)
+            .message
+            .contains("call get_app_state"));
     }
 
     #[test]
     fn a_page_holds_one_node_even_past_the_budget() {
         let mut huge = node(0);
         huge.name = Some("x".repeat(crate::tree_spill::INLINE_RESULT_BYTES * 2));
-        let page = tree_page(&[huge, node(1)], 0);
+        let page = tree_page(&[huge, node(1)], NodeDetail::Full, 0);
         assert_eq!(page.nodes.len(), 1);
         assert_eq!(page.next_offset, Some(1));
     }

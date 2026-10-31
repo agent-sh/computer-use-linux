@@ -77,6 +77,18 @@ It uses two private displays and a private D-Bus session, hides uinput, and
 denies global-input helpers. It checks repeated clicks, GTK drag payloads,
 release after failure, missing xdotool, and isolation from the other display.
 
+The Chromium accessibility-tree regressions run Chrome on a private Xvfb display
+and D-Bus session, with the same tools as the X11 fixture plus openbox, xprop
+and google-chrome or chromium. `app_state_size_test.py` opens two windows of one
+browser, checks window scoping, the compact encoding and `interactive_only`,
+and prints bytes per node; `CUL_338_MEASURE_ONLY=1` prints the numbers for an
+older binary without the checks:
+
+```bash
+/usr/bin/python3 scripts/app_state_size_test.py target/debug/computer-use-linux
+/usr/bin/python3 scripts/contenteditable_focus_test.py target/debug/computer-use-linux
+```
+
 ## PR Guidelines
 
 - Keep changes focused and explain the desktop/session you tested on.

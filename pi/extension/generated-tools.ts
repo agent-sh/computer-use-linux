@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.33";
-export const GENERATED_TOOL_CATALOG_HASH = "c400df2cb083b9993f7b280ef658b3d23bfddff833597f831537ca328d9ad4e7";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "7804e4784ea3082fd3697969b98f4b42f5ff5d80bb905988ee99c733e8c39771";
+export const GENERATED_TOOL_CATALOG_HASH = "8db15cfd6a8003e15da1a78ff1b5c43f773fde1bae2b897e80052b5f4a9f1ea4";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "fa14056ce74c3c508049d4d882016575f2582d4ca71475cb102e352e555e78ac";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -162,7 +162,6 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -366,7 +365,6 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -567,7 +565,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
+    "description": "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Nodes are compact (empty fields left out, actions by name; verbose=true returns every field). Pass interactive_only=true for only actionable nodes, headings and status regions, with the same element_index values. A title or window_id target narrows an app with several windows under one AT-SPI root (Chromium) to that window. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -611,6 +609,14 @@ export const GENERATED_MCP_TOOLS =
         "include_screenshot": {
           "default": null,
           "description": "Include a size-bounded screenshot (default true). Set false when the\naccessibility tree is enough.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "interactive_only": {
+          "default": null,
+          "description": "Return only nodes that can be acted on (an action, editable text, or a\nvalue), plus headings, status/live regions, windows and dialogs.\nContainers are collapsed: each node's parent_index points at its\nnearest kept ancestor. element_index values are the same as in the full\ntree, so they work with click, perform_action and set_value.",
           "type": [
             "boolean",
             "null"
@@ -732,7 +738,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "verbose": {
           "default": null,
-          "description": "Include the full diagnostics report (large). Default false: only the\ncompact readiness block is returned.",
+          "description": "Include the full diagnostics report (large) and return tree nodes in the\nfull encoding, with null and empty fields and action descriptions and\nkeybindings. Default false: only the compact readiness block, and\ncompact nodes.",
           "type": [
             "boolean",
             "null"
@@ -741,7 +747,6 @@ export const GENERATED_MCP_TOOLS =
         "window_id": {
           "default": null,
           "description": "Compositor window id. Also scopes the accessibility tree to that window's\napplication when possible.",
-          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -964,7 +969,6 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -1004,7 +1008,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Invoke an accessibility action exposed by an element selected by index, identifier, or semantic selector. Defaults to the primary action unless action is provided. A stale semantic target can recover once with verified process/window ownership. Recovery invalidates cached indices; call get_app_state before further element_index actions. Pass the target app (pid, window_id, app_id, wm_class, or window_title, as for click) to refuse an element_index or selector from another app's or window's get_app_state snapshot, and an element_identifier owned by another pid; the window is not focused. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Invoke an accessibility action exposed by an element selected by index, identifier, or semantic selector. Defaults to the primary action unless action is provided. A stale semantic target can recover once with verified process/window ownership. Recovery invalidates cached indices; call get_app_state before further element_index actions. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -1018,13 +1022,6 @@ export const GENERATED_MCP_TOOLS =
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "action": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "app_id": {
           "default": null,
           "type": [
             "string",
@@ -1095,14 +1092,6 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
-        "pid": {
-          "default": null,
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
         "quality": {
           "description": "JPEG quality from 1 to 95 (default 80) for post-action screenshots. Ignored for png.",
           "maximum": 95,
@@ -1153,29 +1142,6 @@ export const GENERATED_MCP_TOOLS =
           "type": "array"
         },
         "text": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "window_id": {
-          "default": null,
-          "maximum": 9007199254740991,
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "window_title": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "wm_class": {
           "default": null,
           "type": [
             "string",
@@ -1340,7 +1306,6 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -1522,7 +1487,6 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -1663,7 +1627,6 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -1825,7 +1788,6 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",
@@ -1877,7 +1839,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Set the value of a settable accessibility element selected by index, identifier, or semantic selector. Editable-text writes are verified by exact readback; password fields are explicitly unverifiable. Pass the target app (pid, window_id, app_id, wm_class, or window_title, as for click) to refuse an element_index or selector from another app's or window's get_app_state snapshot, and an element_identifier owned by another pid; the window is not focused. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Set the value of a settable accessibility element selected by index, identifier, or semantic selector. Editable-text writes are verified by exact readback; password fields are explicitly unverifiable. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -1890,13 +1852,6 @@ export const GENERATED_MCP_TOOLS =
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "app_id": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "element_identifier": {
           "default": null,
           "type": [
@@ -1961,14 +1916,6 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
-        "pid": {
-          "default": null,
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
         "quality": {
           "description": "JPEG quality from 1 to 95 (default 80) for post-action screenshots. Ignored for png.",
           "maximum": 95,
@@ -2027,29 +1974,6 @@ export const GENERATED_MCP_TOOLS =
         },
         "value": {
           "type": "string"
-        },
-        "window_id": {
-          "default": null,
-          "maximum": 9007199254740991,
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "window_title": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "wm_class": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
         }
       },
       "required": [
@@ -2240,7 +2164,6 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
             "integer",

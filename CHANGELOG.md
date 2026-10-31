@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `get_app_state` takes `interactive_only: true` to return only nodes with an action, editable text or a value, plus headings, status and live regions, windows and dialogs. Containers are collapsed and `element_index` values match the full tree ([#338](https://github.com/agent-sh/computer-use-linux/issues/338)).
+
+### Changed
+
+- Accessibility trees in `get_app_state`, `get_tree_page`, `include_tree` results and spill files use a compact node encoding: null, empty, zero and false fields are left out, containers drop the U+FFFC placeholder text, and `actions` lists action names. `get_app_state` with `verbose: true` returns the full encoding. Compaction also drops containers whose only text is that placeholder and whose only actions are the `doDefault`, `showContextMenu` and `clickAncestor` that Chromium lists on every element ([#338](https://github.com/agent-sh/computer-use-linux/issues/338)).
+- A `title` or `window_id` target narrows the tree to that window when the app exposes several windows under one AT-SPI application root, as Chromium does ([#338](https://github.com/agent-sh/computer-use-linux/issues/338)).
+
 ### Fixed
 
 - Give `perform_action` and `set_value` the optional app target `click` takes (`pid`, `window_id`, `app_id`, `wm_class`, `window_title`). With a target, an `element_index` or selector from another app's `get_app_state` snapshot is refused with the message `click` returns, instead of acting on that app. When the window backend reports no pid for the target window (i3, sway, COSMIC), all four tools compare the snapshot's window instead and refuse when they differ or when the snapshot was not taken for a window. An `element_identifier` whose bus owner is a different pid than the target is refused. The window is not focused. Calls without a target behave as before ([#337](https://github.com/agent-sh/computer-use-linux/issues/337)).

@@ -206,7 +206,8 @@ does not yet forward the flag or include the tool in its catalog.
   a document that holds focus itself still gets a warning, which no longer
   claims the text was lost. An editor can carry the `editable` state without the
   EditableText interface (`supports_editable_text: false`): `type_text` can
-  reach it, `set_value` cannot. Verify its text or a screenshot before
+  reach it, `set_value` cannot. Compact nodes leave a false
+  `supports_editable_text` out. Verify its text or a screenshot before
   submitting or retrying. Embedded browser documents can use up an app-scoped
   snapshot's node budget before the app's own controls; when
   `accessibility_tree_truncated` is true, a missing editor proves nothing. Raise
@@ -223,3 +224,13 @@ does not yet forward the flag or include the tool in its catalog.
   private, otherwise `~/.cache`). Search it instead of requesting the tree
   again; hosts that cannot read files page through it with `get_tree_page`. The
   file lasts until the next snapshot or until the server exits.
+
+  Tree nodes use a compact encoding: null, empty, zero and false fields are
+  left out, containers do not carry the U+FFFC placeholder text Chromium gives
+  them, and `actions` lists action names. `verbose: true` returns the full
+  encoding with action descriptions and keybindings. `interactive_only: true`
+  returns only nodes with an action, editable text or a value, plus headings,
+  status and live regions, windows and dialogs, with containers collapsed and
+  the same `element_index` values as the full tree. When `title` or
+  `window_id` names one of several windows under one AT-SPI application root,
+  as in Chromium, the tree covers only that window.
