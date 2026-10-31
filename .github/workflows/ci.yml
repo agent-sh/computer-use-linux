@@ -385,16 +385,17 @@ jobs:
           version="$(node -p "require('./package.json').version")"
           test "v$version" = "$GITHUB_REF_NAME"
           # The registry can lag the publish job. Wait for the version to be
-          # visible, at most 10 tries 15s apart, then install once.
-          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+          # visible, at most 40 tries 15s apart (npm says processing "may take a
+          # few minutes"; v0.7.34 took more than 2.5), then install once.
+          for attempt in $(seq 1 40); do
             if npm view "${name}@${version}" version >/dev/null 2>&1; then
               break
             fi
-            if [ "$attempt" = 10 ]; then
-              echo "${name}@${version} is not visible on npm after 10 tries" >&2
+            if [ "$attempt" = 40 ]; then
+              echo "${name}@${version} is not visible on npm after 40 tries" >&2
               exit 1
             fi
-            echo "waiting for ${name}@${version} on npm (try ${attempt}/10)"
+            echo "waiting for ${name}@${version} on npm (try ${attempt}/40)"
             sleep 15
           done
           npm install --prefix "$RUNNER_TEMP/published" -g "${name}@${version}"
