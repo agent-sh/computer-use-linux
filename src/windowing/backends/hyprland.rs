@@ -244,13 +244,16 @@ pub async fn activate_window(window_id: u64) -> Result<()> {
 
 /// Sends key presses to a window without focusing it, through Hyprland's
 /// `send_key_state` dispatcher. Every press is a down and an up event; all
-/// events go in one `hyprctl --batch` request per chunk.
+/// events go in one `[[BATCH]]` socket request per chunk. A failure after
+/// any key arrived says how many did, so the caller does not resend them.
 pub async fn send_key_events(
     window_id: u64,
     presses: &[crate::hyprland_input::KeyPress],
 ) -> Result<()> {
     const PRESSES_PER_BATCH: usize = 64;
     let address = format!("address:0x{window_id:x}");
+    let total = presses.len();
+    let mut delivered = 0;
     for chunk in presses.chunks(PRESSES_PER_BATCH) {
         let batch = chunk
             .iter()
@@ -264,25 +267,54 @@ pub async fn send_key_events(
             })
             .collect::<Vec<_>>()
             .join(" ; ");
-        let reply = socket_request(&format!("[[BATCH]]{batch}"))
-            .await
-            .context("failed to send send_key_state through the Hyprland socket")?;
-        let replies = reply.split_whitespace().collect::<Vec<_>>();
-        if replies.len() != chunk.len() * 2 || replies.iter().any(|reply| *reply != "ok") {
+        let stream = match socket_connect().await {
+            Ok(stream) => stream,
+            Err(error) if delivered == 0 => {
+                return Err(error.context("No keys were sent: could not reach the Hyprland socket"))
+            }
+            Err(error) => bail!(
+                "Hyprland send_key_state stopped for {address}: {delivered} of {total} key presses were delivered, the rest were not sent. Inspect the target before retrying, and send only the remainder: {error:#}"
+            ),
+        };
+        let reply = match socket_exchange(stream, &format!("[[BATCH]]{batch}")).await {
+            Ok(reply) => reply,
+            Err(error) => bail!(
+                "Hyprland send_key_state failed for {address}: {delivered} of {total} key presses were delivered, and up to {} more may have been. Inspect the target before retrying: {error:#}",
+                chunk.len()
+            ),
+        };
+        // Hyprland runs a batch in order and answers each dispatch.
+        let accepted = reply
+            .split("\n\n\n")
+            .take_while(|reply| reply.trim() == "ok")
+            .count();
+        if accepted != chunk.len() * 2 {
+            let done = delivered + accepted / 2;
+            let held = if accepted % 2 == 1 {
+                " The last key went down without its release."
+            } else {
+                ""
+            };
+            if done == 0 && accepted == 0 {
+                bail!(
+                    "No keys were sent: Hyprland send_key_state refused {address}: {}",
+                    reply.trim()
+                );
+            }
             bail!(
-                "Hyprland send_key_state failed for {address}: {}",
+                "Hyprland send_key_state stopped for {address}: {done} of {total} key presses were delivered.{held} Inspect the target before retrying, and send only the remainder: {}",
                 reply.trim()
             );
         }
+        delivered += chunk.len();
     }
     Ok(())
 }
 
-/// Sends one request over Hyprland's control socket and returns the reply.
-/// Unlike `hyprctl`, the request never appears in a process's argv, so text
-/// spelled as key names cannot be read from `/proc/<pid>/cmdline`.
-async fn socket_request(request: &str) -> Result<String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+/// Connects to Hyprland's control socket. Requests written here never
+/// appear in a process's argv, unlike `hyprctl`, so text spelled as key
+/// names cannot be read from `/proc/<pid>/cmdline`.
+async fn socket_connect() -> Result<tokio::net::UnixStream> {
     let signature = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -293,19 +325,29 @@ async fn socket_request(request: &str) -> Result<String> {
         .join("hypr")
         .join(signature)
         .join(".socket.sock");
+    tokio::time::timeout(SOCKET_TIMEOUT, tokio::net::UnixStream::connect(&path))
+        .await
+        .with_context(|| format!("timed out connecting to {}", path.display()))?
+        .with_context(|| format!("failed to connect to {}", path.display()))
+}
+
+/// Writes one request and reads the reply until Hyprland closes the stream.
+async fn socket_exchange(mut stream: tokio::net::UnixStream, request: &str) -> Result<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let exchange = async {
-        let mut stream = tokio::net::UnixStream::connect(&path).await?;
         stream.write_all(request.as_bytes()).await?;
         stream.shutdown().await?;
         let mut reply = String::new();
         stream.read_to_string(&mut reply).await?;
         std::io::Result::Ok(reply)
     };
-    tokio::time::timeout(std::time::Duration::from_secs(5), exchange)
+    tokio::time::timeout(SOCKET_TIMEOUT, exchange)
         .await
-        .with_context(|| format!("timed out on {}", path.display()))?
-        .with_context(|| format!("failed to talk to {}", path.display()))
+        .context("timed out waiting for the Hyprland socket reply")?
+        .context("Hyprland socket request failed")
 }
+
+const SOCKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A PNG of one window, captured without focusing or raising it.
 pub struct WindowCapture {

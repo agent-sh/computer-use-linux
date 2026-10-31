@@ -78,15 +78,23 @@ class HyprlandSocket(socketserver.ThreadingMixIn, socketserver.UnixStreamServer)
     daemon_threads = True
 
 
-def serve_hyprland_socket(path, log):
-    """Answers each [[BATCH]] request with one ok per command, as Hyprland does."""
+def serve_hyprland_socket(path, log, fail):
+    """Answers each [[BATCH]] request with one ok per command, as Hyprland does.
+
+    When the fail file holds [request, command], that request's replies turn
+    to errors from that command index on, like a window that closed mid-batch.
+    """
     class Handler(socketserver.StreamRequestHandler):
         def handle(self):
             request = self.rfile.read().decode()
             with open(log, 'a') as out:
                 out.write(json.dumps(request)+'\n')
+            number = len(Path(log).read_text().splitlines())
+            failing, at = json.loads(fail.read_text()) if fail.exists() else (0, 0)
             commands = request.removeprefix('[[BATCH]]').split(' ; ')
-            self.wfile.write('\n\n\n'.join('ok' for _ in commands).encode())
+            replies = ['ok' if number != failing or i < at else 'window not found'
+                       for i in range(len(commands))]
+            self.wfile.write('\n\n\n'.join(replies).encode())
     server = HyprlandSocket(str(path), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
@@ -100,7 +108,9 @@ class BackgroundModeTests(unittest.TestCase):
         self.portal_log = self.root/'gnome-screenshot.log'
         self.socket_log = self.root/'socket.log'
         (self.root/'hypr'/'fixture').mkdir(parents=True)
-        hyprland = serve_hyprland_socket(self.root/'hypr'/'fixture'/'.socket.sock', self.socket_log)
+        self.socket_fail = self.root/'socket-fail.json'
+        hyprland = serve_hyprland_socket(self.root/'hypr'/'fixture'/'.socket.sock', self.socket_log,
+                                         self.socket_fail)
         self.addCleanup(hyprland.server_close)
         self.addCleanup(hyprland.shutdown)
         self.keymap = self.root/'keymap'
@@ -209,6 +219,21 @@ class BackgroundModeTests(unittest.TestCase):
                 self.assertIn(f'mods = "{mods}", key = "{key}", state = "{state}", window = "{address}"', batch)
         self.assertEqual(self.argv_leaks(), [], 'keys were exposed in hyprctl argv')
         self.assertEqual(self.focus_dispatches(), [])
+
+    def test_failure_reports_how_many_presses_arrived(self):
+        proc = self.server()
+        # Second batch (presses 65-70): press 66 goes down, then the target fails.
+        self.socket_fail.write_text(json.dumps([2, 3]))
+        result, text = self.call(proc, 'type_text', dict(window_id=TARGET, text='a'*70))
+        self.assertTrue(result.get('isError') or '"ok":false' in text, text)
+        self.assertIn('65 of 70 key presses were delivered', text)
+        self.assertIn('went down without its release', text)
+        self.assertIn('send only the remainder', text)
+        self.assertEqual(len(self.batches()), 2)
+        self.socket_log.unlink()
+        self.socket_fail.write_text(json.dumps([1, 0]))
+        _, text = self.call(proc, 'type_text', dict(window_id=TARGET, text='abc'))
+        self.assertIn('No keys were sent', text)
 
     def test_indicator_shows_background_input_masked_when_field_unknown(self):
         overlay = self.indicator()
