@@ -532,6 +532,12 @@ impl ComputerUseLinux {
         let (screenshot, screenshot_error) = if include_screenshot {
             let result: Result<ScreenshotCapture> = async {
                 let _pipeline = crate::screenshot_impl::screenshot_pipeline_permit().await?;
+                // Refuse an unfocused target before capturing: the call must
+                // not grab the desktop (and raise a portal prompt) only to
+                // discard it.
+                if let Some(window) = window_context.as_ref() {
+                    ensure_readonly_screenshot_target_is_visible(window)?;
+                }
                 let raw = {
                     let _hold = self.indicator.hold_for_capture().await?;
                     capture_screenshot_raw().await
@@ -540,7 +546,6 @@ impl ComputerUseLinux {
                 let raw = raw?;
                 self.cache_desktop_size(raw.width, raw.height);
                 let crop = if let Some(window) = window_context.as_ref() {
-                    ensure_readonly_screenshot_target_is_visible(window)?;
                     Some(self.window_crop_rect_for_capture(window, &raw).await?)
                 } else {
                     None
