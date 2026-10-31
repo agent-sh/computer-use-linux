@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `get_app_state` refuses a screenshot of a targeted window that is not focused before it captures anything. It used to capture the whole desktop first and then refuse, so on a portal session the call raised a consent prompt and grabbed every monitor only to discard the image.
+
 ## [0.7.34] - 2026-10-31
 
 ### Added
