@@ -3,9 +3,11 @@
 """Hyprland background mode: input and capture without focusing the target.
 
 Drives the real MCP server against a fixture hyprctl that logs every request
-and a fixture grim that logs every capture, on a private D-Bus session. With
-COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND=1, type_text and press_key must reach
-the target through send_key_state and never dispatch a focus change, and a
+a fixture Hyprland socket and a fixture grim that log every request and
+capture, on a private D-Bus session. With COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND=1,
+type_text and press_key must reach the target through send_key_state over the
+socket (never in a process's argv), show on the indicator, never dispatch a
+focus change, and a
 target on a hidden workspace must be captured with grim -T until two frames
 match, never through the portal. No host input or screenshots.
 """
@@ -13,11 +15,14 @@ import json
 import os
 from pathlib import Path
 import select
+import socket
+import socketserver
 import signal
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import zlib
@@ -69,12 +74,35 @@ def png():
     return image+chunk(b'IDAT', zlib.compress(b'\0'+b'\0'*6+b'\0'+b'\0'*6))+chunk(b'IEND', b'')
 
 
+class HyprlandSocket(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+
+def serve_hyprland_socket(path, log):
+    """Answers each [[BATCH]] request with one ok per command, as Hyprland does."""
+    class Handler(socketserver.StreamRequestHandler):
+        def handle(self):
+            request = self.rfile.read().decode()
+            with open(log, 'a') as out:
+                out.write(json.dumps(request)+'\n')
+            commands = request.removeprefix('[[BATCH]]').split(' ; ')
+            self.wfile.write('\n\n\n'.join('ok' for _ in commands).encode())
+    server = HyprlandSocket(str(path), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
 class BackgroundModeTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory(dir=sys.argv[3])))
         self.hyprctl_log = self.root/'hyprctl.log'
         self.grim_log = self.root/'grim.log'
         self.portal_log = self.root/'gnome-screenshot.log'
+        self.socket_log = self.root/'socket.log'
+        (self.root/'hypr'/'fixture').mkdir(parents=True)
+        hyprland = serve_hyprland_socket(self.root/'hypr'/'fixture'/'.socket.sock', self.socket_log)
+        self.addCleanup(hyprland.server_close)
+        self.addCleanup(hyprland.shutdown)
         self.keymap = self.root/'keymap'
         self.keymap.write_text('English (US)')
         self.env = dict(os.environ, XDG_RUNTIME_DIR=str(self.root),
@@ -112,7 +140,6 @@ class BackgroundModeTests(unittest.TestCase):
             '"specialWorkspace":{"id":0}}]))\n'
             f'elif plain==["devices"]: print(json.dumps({{"keyboards":[{{"name":"kb","main":True,'
             f'"active_keymap":open({str(self.keymap)!r}).read()}}]}}))\n'
-            'elif args[:1]=="--batch".split(): print("\\n".join("ok" for _ in args[1].split(" ; ")))\n'
             'elif args[:1]==["dispatch"]: print("ok")\n'
             'else: sys.exit(1)\n')
 
@@ -144,7 +171,27 @@ class BackgroundModeTests(unittest.TestCase):
         return [json.loads(line) for line in self.hyprctl_log.read_text().splitlines()]
 
     def batches(self):
-        return [r[r.index('--batch')+1] for r in self.requests() if '--batch' in r]
+        if not self.socket_log.exists():
+            return []
+        return [json.loads(line) for line in self.socket_log.read_text().splitlines()]
+
+    def argv_leaks(self):
+        return [r for r in self.requests() if any('send_key_state' in part for part in r)]
+
+    def indicator(self):
+        """Binds the overlay socket so the server's indicator events land here."""
+        self.env.pop('COMPUTER_USE_LINUX_INDICATOR')
+        overlay = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        overlay.bind(str(self.root/'computer-use-linux-indicator.sock'))
+        overlay.settimeout(5)
+        self.addCleanup(overlay.close)
+        return overlay
+
+    def indicator_event(self, overlay, tool):
+        while True:
+            event = json.loads(overlay.recv(65536))
+            if event.get('tool') == tool:
+                return event
 
     def focus_dispatches(self):
         return [r for r in self.requests()
@@ -155,16 +202,31 @@ class BackgroundModeTests(unittest.TestCase):
         _, text = self.call(proc, 'type_text', dict(window_id=TARGET, text='Hi!'))
         self.assertIn('send_key_state', text)
         batch = ' ; '.join(self.batches())
+        self.assertTrue(batch.startswith('[[BATCH]]'), batch)
         address = f'address:{hex(TARGET)}'
         for mods, key in (('SHIFT', 'h'), ('', 'i'), ('SHIFT', '1')):
             for state in ('down', 'up'):
                 self.assertIn(f'mods = "{mods}", key = "{key}", state = "{state}", window = "{address}"', batch)
+        self.assertEqual(self.argv_leaks(), [], 'keys were exposed in hyprctl argv')
         self.assertEqual(self.focus_dispatches(), [])
+
+    def test_indicator_shows_background_input_masked_when_field_unknown(self):
+        overlay = self.indicator()
+        proc = self.server()
+        self.call(proc, 'type_text', dict(window_id=TARGET, text='hunter2'))
+        event = self.indicator_event(overlay, 'type_text')
+        # The fixture app has no accessibility tree, so the field may be secret.
+        self.assertNotIn('hunter2', event['text'])
+        self.assertIn('•', event['text'])
+        self.call(proc, 'press_key', dict(window_id=TARGET, key='Ctrl+L'))
+        self.assertEqual(self.indicator_event(overlay, 'press_key')['keys'], ['••••••••'])
+        self.assertEqual(len(self.batches()), 2)
 
     def test_press_key_chord_without_focusing(self):
         proc = self.server()
         self.call(proc, 'press_key', dict(window_id=TARGET, key='Ctrl+Shift+T'))
         self.assertIn('mods = "CTRL SHIFT", key = "t"', ' ; '.join(self.batches()))
+        self.assertEqual(self.argv_leaks(), [])
         self.assertEqual(self.focus_dispatches(), [])
 
     def test_unmappable_text_and_non_us_keymap_send_nothing(self):

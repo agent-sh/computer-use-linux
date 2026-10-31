@@ -2300,6 +2300,7 @@ impl ComputerUseLinux {
             .hyprland_background_input(
                 "press_key",
                 &params.window_target(),
+                &params.key,
                 crate::hyprland_input::chord_to_key_press(&params.key)
                     .map(|press| vec![press])
                     .ok_or_else(|| {
@@ -2528,6 +2529,7 @@ impl ComputerUseLinux {
             .hyprland_background_input(
                 "type_text",
                 &window_target,
+                &params.text,
                 crate::hyprland_input::text_to_key_presses(&params.text),
                 received.clone(),
             )
@@ -5396,6 +5398,7 @@ impl ComputerUseLinux {
         &self,
         action: &str,
         target: &WindowTarget,
+        shown: &str,
         presses: std::result::Result<Vec<crate::hyprland_input::KeyPress>, String>,
         received: Option<serde_json::Value>,
     ) -> Option<ActionOutput> {
@@ -5433,6 +5436,24 @@ impl ComputerUseLinux {
                 )
             }
             Err(error) => return fail(format!("Did not send input: {error:#}")),
+        }
+        // The target is not focused, so probe its own app. Anything that is
+        // not a confirmed non-secret field is masked on the indicator.
+        // Without a pid the probe would read the user's focused app instead.
+        let probe = match window.pid {
+            Some(pid) if self.indicator.enabled() => {
+                timeout(Duration::from_millis(250), probe_focused_element(Some(pid)))
+                    .await
+                    .ok()
+                    .and_then(|probe| probe.ok())
+            }
+            _ => None,
+        };
+        let secret = probe.as_ref().is_none_or(focus_requires_secret_protection);
+        if action == "press_key" {
+            self.indicator.keys(shown, secret).await;
+        } else {
+            self.indicator.text(action, shown, secret).await;
         }
         let result =
             crate::windowing::backends::hyprland::send_key_events(window.window_id, &presses).await;

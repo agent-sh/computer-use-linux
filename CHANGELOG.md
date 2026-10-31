@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Hyprland background mode: with `COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND=1`, `type_text` and `press_key` calls that name a target window send keys through Hyprland's `send_key_state` dispatcher without focusing it, and `get_app_state` and `screenshot` capture an unfocused target alone with `grim -T` instead of raising it or using the portal. Targets on hidden workspaces are captured until two frames match, because Hyprland repaints them only when captured. The user's focus, cursor and workspace stay put, so an agent can work on a window on another workspace. Text is mapped for a US layout and refused whole otherwise.
+- Hyprland background mode: with `COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND=1`, `type_text` and `press_key` calls that name a target window send keys through Hyprland's `send_key_state` dispatcher without focusing it, and `get_app_state` and `screenshot` capture an unfocused target alone with `grim -T` instead of raising it or using the portal. Targets on hidden workspaces are captured until two frames match, because Hyprland repaints them only when captured. The user's focus, cursor and workspace stay put, so an agent can work on a window on another workspace. Keys go over Hyprland's control socket, never in a process's arguments, and show on the action indicator (masked unless the target's field is known not to be secret). Text is mapped for a US layout and refused whole otherwise.
 
 ### Fixed
 

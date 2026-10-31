@@ -264,22 +264,47 @@ pub async fn send_key_events(
             })
             .collect::<Vec<_>>()
             .join(" ; ");
-        let output = hyprctl_output_async(&["--batch", &batch])
+        let reply = socket_request(&format!("[[BATCH]]{batch}"))
             .await
-            .context("failed to run hyprctl --batch for send_key_state")?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let replies = stdout.split_whitespace().collect::<Vec<_>>();
-        if !output.status.success()
-            || replies.len() != chunk.len() * 2
-            || replies.iter().any(|reply| *reply != "ok")
-        {
+            .context("failed to send send_key_state through the Hyprland socket")?;
+        let replies = reply.split_whitespace().collect::<Vec<_>>();
+        if replies.len() != chunk.len() * 2 || replies.iter().any(|reply| *reply != "ok") {
             bail!(
                 "Hyprland send_key_state failed for {address}: {}",
-                command_detail(&output)
+                reply.trim()
             );
         }
     }
     Ok(())
+}
+
+/// Sends one request over Hyprland's control socket and returns the reply.
+/// Unlike `hyprctl`, the request never appears in a process's argv, so text
+/// spelled as key names cannot be read from `/proc/<pid>/cmdline`.
+async fn socket_request(request: &str) -> Result<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let signature = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(infer_hyprland_instance_signature)
+        .context("no Hyprland instance signature")?;
+    let path = xdg_runtime_dir()
+        .context("XDG_RUNTIME_DIR is unset")?
+        .join("hypr")
+        .join(signature)
+        .join(".socket.sock");
+    let exchange = async {
+        let mut stream = tokio::net::UnixStream::connect(&path).await?;
+        stream.write_all(request.as_bytes()).await?;
+        stream.shutdown().await?;
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await?;
+        std::io::Result::Ok(reply)
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), exchange)
+        .await
+        .with_context(|| format!("timed out on {}", path.display()))?
+        .with_context(|| format!("failed to talk to {}", path.display()))
 }
 
 /// A PNG of one window, captured without focusing or raising it.
