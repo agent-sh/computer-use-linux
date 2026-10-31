@@ -242,6 +242,186 @@ pub async fn activate_window(window_id: u64) -> Result<()> {
     }
 }
 
+/// Sends key presses to a window without focusing it, through Hyprland's
+/// `send_key_state` dispatcher. Every press is a down and an up event; all
+/// events go in one `hyprctl --batch` request per chunk.
+pub async fn send_key_events(
+    window_id: u64,
+    presses: &[crate::hyprland_input::KeyPress],
+) -> Result<()> {
+    const PRESSES_PER_BATCH: usize = 64;
+    let address = format!("address:0x{window_id:x}");
+    for chunk in presses.chunks(PRESSES_PER_BATCH) {
+        let batch = chunk
+            .iter()
+            .flat_map(|press| {
+                ["down", "up"].map(|state| {
+                    format!(
+                        "dispatch hl.dsp.send_key_state({{ mods = \"{}\", key = \"{}\", state = \"{state}\", window = \"{address}\" }})",
+                        press.mods, press.key
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+            .join(" ; ");
+        let output = hyprctl_output_async(&["--batch", &batch])
+            .await
+            .context("failed to run hyprctl --batch for send_key_state")?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let replies = stdout.split_whitespace().collect::<Vec<_>>();
+        if !output.status.success()
+            || replies.len() != chunk.len() * 2
+            || replies.iter().any(|reply| *reply != "ok")
+        {
+            bail!(
+                "Hyprland send_key_state failed for {address}: {}",
+                command_detail(&output)
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A PNG of one window, captured without focusing or raising it.
+pub struct WindowCapture {
+    pub png: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    /// Set when the window was on a hidden workspace. Hyprland stops sending
+    /// frame callbacks to off-screen windows, so their buffer holds the last
+    /// frame drawn while visible. Each capture makes the compositor send one
+    /// and the client repaints; some clients (Chromium) need several rounds.
+    pub hidden_workspace: Option<HiddenWorkspaceCapture>,
+}
+
+pub struct HiddenWorkspaceCapture {
+    pub workspace: i64,
+    /// Captures taken before two consecutive frames matched or the cap hit.
+    pub captures: u32,
+    /// False when frames were still changing at the cap: an animation, a
+    /// blinking caret, or a page that is still loading.
+    pub settled: bool,
+}
+
+/// Captures a window through `grim -T <stableId>` (ext-foreign-toplevel
+/// image capture). Works for unfocused windows and windows on hidden
+/// workspaces, needs no portal consent and never changes focus.
+pub async fn capture_window(window_id: u64) -> Result<WindowCapture> {
+    let address = format!("0x{window_id:x}");
+    let clients = hyprctl_output_async(&["clients", "-j"])
+        .await
+        .context("failed to run hyprctl clients -j")?;
+    let clients: serde_json::Value =
+        serde_json::from_slice(&clients.stdout).context("failed to parse hyprctl clients -j")?;
+    let client = clients
+        .as_array()
+        .and_then(|clients| {
+            clients
+                .iter()
+                .find(|client| client.get("address").and_then(|a| a.as_str()) == Some(&address))
+        })
+        .with_context(|| format!("Hyprland window {address} is no longer listed"))?;
+    let stable_id = match client.get("stableId") {
+        Some(serde_json::Value::String(id)) => id.clone(),
+        Some(serde_json::Value::Number(id)) => id.to_string(),
+        _ => bail!("Hyprland window {address} has no stableId; this Hyprland is too old for per-window capture"),
+    };
+    if stable_id.is_empty() || !stable_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        bail!("Hyprland window {address} has an unexpected stableId {stable_id:?}");
+    }
+    let workspace_id = client
+        .get("workspace")
+        .and_then(|workspace| workspace.get("id"))
+        .and_then(|id| id.as_i64());
+    let workspace_visible = match (workspace_id, visible_workspace_ids().await) {
+        (Some(id), Some(visible)) => Some(visible.contains(&id)),
+        _ => None,
+    };
+
+    const MAX_CAPTURES: u32 = 8;
+    const SETTLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
+    let mut png = grim_toplevel(&stable_id, &address).await?;
+    let hidden_workspace = match (workspace_visible, workspace_id) {
+        (Some(false), Some(workspace)) => {
+            // Capture until two consecutive frames match: the first capture
+            // only wakes the client, and Chromium takes several rounds.
+            let mut captures = 1;
+            let mut settled = false;
+            while captures < MAX_CAPTURES {
+                tokio::time::sleep(SETTLE_INTERVAL).await;
+                let next = grim_toplevel(&stable_id, &address).await?;
+                captures += 1;
+                let same = next == png;
+                png = next;
+                if same && captures > 2 {
+                    settled = true;
+                    break;
+                }
+            }
+            Some(HiddenWorkspaceCapture {
+                workspace,
+                captures,
+                settled,
+            })
+        }
+        _ => None,
+    };
+    let (width, height) = crate::screenshot_impl::png_dimensions(&png)
+        .context("grim -T did not return a usable PNG image")?;
+    Ok(WindowCapture {
+        png,
+        width,
+        height,
+        hidden_workspace,
+    })
+}
+
+async fn grim_toplevel(stable_id: &str, address: &str) -> Result<Vec<u8>> {
+    let mut command = Command::new("grim");
+    command.args(["-t", "png", "-T", stable_id, "-"]);
+    let output = command_runner::output(command, "capture a Hyprland window with grim -T")
+        .await
+        .context("grim is required for Hyprland background capture")?;
+    if !output.status.success() {
+        bail!(
+            "grim -T {stable_id} failed for {address}: {}",
+            command_detail(&output)
+        );
+    }
+    Ok(output.stdout)
+}
+
+async fn visible_workspace_ids() -> Option<Vec<i64>> {
+    let output = hyprctl_output_async(&["monitors", "-j"]).await.ok()?;
+    let monitors: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let ids = monitors
+        .as_array()?
+        .iter()
+        .flat_map(|monitor| {
+            ["activeWorkspace", "specialWorkspace"].map(|key| {
+                monitor
+                    .get(key)
+                    .and_then(|workspace| workspace.get("id"))
+                    .and_then(|id| id.as_i64())
+                    .filter(|id| *id != 0)
+            })
+        })
+        .flatten()
+        .collect();
+    Some(ids)
+}
+
+/// Raw `hyprctl devices -j` output, used to check the active keymap.
+pub async fn devices_json() -> Result<Vec<u8>> {
+    let output = hyprctl_output_async(&["devices", "-j"])
+        .await
+        .context("failed to run hyprctl devices -j")?;
+    if !output.status.success() {
+        bail!("hyprctl devices -j failed: {}", command_detail(&output));
+    }
+    Ok(output.stdout)
+}
+
 fn dispatch_succeeded(output: &std::process::Output) -> bool {
     output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "ok"
 }
