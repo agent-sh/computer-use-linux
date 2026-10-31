@@ -182,6 +182,10 @@ does not yet forward the flag or include the tool in its catalog.
 - **X11 text input**: X11 text input sends LF and CRLF line endings as Return. Focused terminals
   accept keyboard input even when AT-SPI does not expose EditableText. Focus
   feedback describes the target; re-observe its contents to confirm input.
+- **Hyprland background mode**: Set `COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND=1` to type into and
+  capture a targeted window without focusing it (`send_key_state` and `grim -T`), so the
+  target can stay on a hidden workspace. Text is mapped for a US layout; other keymaps
+  and non-ASCII characters are refused before any key is sent.
 - **Hyprland `type_text`**: On Hyprland, `type_text` passes one literal wtype argument after `--` for a
   classified nonsecret field, avoiding stdin keymap-refresh corruption in Electron.
   Argument text is visible in process listings, so confirmed password roles are

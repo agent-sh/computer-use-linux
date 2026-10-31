@@ -10,6 +10,7 @@ mod diagnostics_cache;
 mod diagnostics_impl;
 mod ei_input;
 mod gnome_extension;
+mod hyprland_input;
 mod identity;
 pub mod indicator;
 mod keyboard_keymap;

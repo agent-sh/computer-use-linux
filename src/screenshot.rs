@@ -982,7 +982,7 @@ fn cleanup_gnome_requested_path(path: &Path) {
     let _ = fs::remove_file(path);
 }
 
-fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+pub(crate) fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
     const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
     if bytes.len() < 24 || &bytes[..8] != PNG_SIGNATURE || &bytes[12..16] != b"IHDR" {
         bail!("screenshot file was not a valid PNG");
