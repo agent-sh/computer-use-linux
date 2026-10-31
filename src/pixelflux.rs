@@ -12,6 +12,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 const TYPE_MS_PER_CHAR: u64 = 40;
 // A single request must not wait forever no matter how long the text is.
 const MAX_SEND_TIMEOUT: Duration = Duration::from_secs(120);
+// Longest `Type` text that still finishes inside `MAX_SEND_TIMEOUT` at
+// `TYPE_MS_PER_CHAR` per character: (120 s - 5 s) / 40 ms = 2875.
+const MAX_TYPE_CHARS: usize = 2_875;
 const MAX_BODY: usize = 64 * 1024 * 1024;
 const MAX_HEADERS: usize = 64 * 1024;
 
@@ -94,6 +97,17 @@ pub(crate) async fn send(
     config: &PixelfluxConfig,
     action: &PixelfluxAction,
 ) -> Result<PixelfluxReply> {
+    // Refuse over-budget text before anything is sent. Timing out partway
+    // through typing would release the input lock while pixelflux is still
+    // typing, letting the next call interleave its keystrokes.
+    if let PixelfluxAction::Type { text } = action {
+        let chars = text.chars().count();
+        if chars > MAX_TYPE_CHARS {
+            return Err(anyhow!(DispatchError::Rejected(format!(
+                "text is {chars} characters; split it into chunks of at most {MAX_TYPE_CHARS} characters"
+            ))));
+        }
+    }
     exchange(config, &action_body(action)?, send_timeout(action)).await
 }
 
@@ -820,5 +834,35 @@ mod tests {
             chord: "ctrl+l".to_string(),
         };
         assert_eq!(send_timeout(&key), SEND_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn over_budget_text_is_rejected_before_sending() {
+        // No listener: rejection must happen before any connection attempt,
+        // so nothing is typed and the failure is clean, not "may have run".
+        let error = send(
+            &config(1),
+            &PixelfluxAction::Type {
+                text: "x".repeat(MAX_TYPE_CHARS + 1),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(!outcome_unknown(&error), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("split it into chunks"),
+            "{error:#}"
+        );
+        // At exactly the budget the request still goes out (and fails here
+        // only because nothing listens).
+        let error = send(
+            &config(1),
+            &PixelfluxAction::Type {
+                text: "x".repeat(MAX_TYPE_CHARS),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(is_unreachable(&error), "{error:#}");
     }
 }
