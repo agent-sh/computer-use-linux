@@ -3864,7 +3864,11 @@ fn optional_window_target(
 /// cached element_index or selector must come from.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct ElementActionTarget {
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::windowing::types::deserialize_window_id"
+    )]
+    #[schemars(range(max = crate::windowing::types::MAX_WINDOW_ID))]
     window_id: Option<u64>,
     #[serde(default)]
     pid: Option<u32>,
