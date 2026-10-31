@@ -81,8 +81,10 @@ class HyprlandSocket(socketserver.ThreadingMixIn, socketserver.UnixStreamServer)
 def serve_hyprland_socket(path, log, fail):
     """Answers each [[BATCH]] request with one ok per command, as Hyprland does.
 
-    When the fail file holds [request, command], that request's replies turn
-    to errors from that command index on, like a window that closed mid-batch.
+    When the fail file holds [request, command, mode], that request goes
+    wrong from that command index on: "error" answers errors (a window that
+    closed mid-batch), "truncate" closes the stream without the remaining
+    answers, and "resume" answers one error and then ok again.
     """
     class Handler(socketserver.StreamRequestHandler):
         def handle(self):
@@ -90,10 +92,14 @@ def serve_hyprland_socket(path, log, fail):
             with open(log, 'a') as out:
                 out.write(json.dumps(request)+'\n')
             number = len(Path(log).read_text().splitlines())
-            failing, at = json.loads(fail.read_text()) if fail.exists() else (0, 0)
+            failing, at, mode = json.loads(fail.read_text()) if fail.exists() else (0, 0, '')
             commands = request.removeprefix('[[BATCH]]').split(' ; ')
             replies = ['ok' if number != failing or i < at else 'window not found'
                        for i in range(len(commands))]
+            if number == failing and mode == 'truncate':
+                replies = replies[:at]
+            elif number == failing and mode == 'resume':
+                replies[at+1:] = ['ok']*len(replies[at+1:])
             self.wfile.write('\n\n\n'.join(replies).encode())
     server = HyprlandSocket(str(path), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -223,7 +229,7 @@ class BackgroundModeTests(unittest.TestCase):
     def test_failure_reports_how_many_presses_arrived(self):
         proc = self.server()
         # Second batch (presses 65-70): press 66 goes down, then the target fails.
-        self.socket_fail.write_text(json.dumps([2, 3]))
+        self.socket_fail.write_text(json.dumps([2, 3, 'error']))
         result, text = self.call(proc, 'type_text', dict(window_id=TARGET, text='a'*70))
         self.assertTrue(result.get('isError') or '"ok":false' in text, text)
         self.assertIn('65 of 70 key presses were delivered', text)
@@ -231,9 +237,25 @@ class BackgroundModeTests(unittest.TestCase):
         self.assertIn('send only the remainder', text)
         self.assertEqual(len(self.batches()), 2)
         self.socket_log.unlink()
-        self.socket_fail.write_text(json.dumps([1, 0]))
+        self.socket_fail.write_text(json.dumps([1, 0, 'error']))
         _, text = self.call(proc, 'type_text', dict(window_id=TARGET, text='abc'))
         self.assertIn('No keys were sent', text)
+
+    def test_incomplete_reply_is_uncertain_delivery(self):
+        proc = self.server()
+        # The stream closes before any answer, after an ok prefix, or answers
+        # ok again after an error: none of these says what ran.
+        for request, at, mode, confirmed in ((1, 0, 'truncate', 0), (2, 3, 'truncate', 64),
+                                             (1, 2, 'resume', 0)):
+            with self.subTest(mode=mode, at=at):
+                self.socket_log.unlink(missing_ok=True)
+                self.socket_fail.write_text(json.dumps([request, at, mode]))
+                _, text = self.call(proc, 'type_text', dict(window_id=TARGET, text='a'*70))
+                self.assertIn(f'{confirmed} of 70 key presses were confirmed', text)
+                self.assertIn('may have been delivered', text)
+                self.assertIn('Inspect the target before retrying', text)
+                self.assertNotIn('No keys were sent', text)
+                self.assertNotIn('send only the remainder', text)
 
     def test_indicator_shows_background_input_masked_when_field_unknown(self):
         overlay = self.indicator()

@@ -283,24 +283,39 @@ pub async fn send_key_events(
                 chunk.len()
             ),
         };
-        // Hyprland runs a batch in order and answers each dispatch.
-        let accepted = reply
-            .split("\n\n\n")
-            .take_while(|reply| reply.trim() == "ok")
-            .count();
-        if accepted != chunk.len() * 2 {
+        // Hyprland runs a batch in order and answers each dispatch. Only a
+        // complete answer says what ran: an empty or short reply (the stream
+        // closed early) or an ok after an error leaves the batch uncertain.
+        let expected = chunk.len() * 2;
+        let replies = if reply.trim().is_empty() {
+            Vec::new()
+        } else {
+            reply.split("\n\n\n").map(str::trim).collect::<Vec<_>>()
+        };
+        let first_error = replies.iter().position(|reply| *reply != "ok");
+        let exact = replies.len() == expected
+            && first_error.is_none_or(|at| replies[at..].iter().all(|reply| *reply != "ok"));
+        if !exact {
+            bail!(
+                "Hyprland send_key_state failed for {address}: {delivered} of {total} key presses were confirmed, and up to {} more may have been delivered (Hyprland answered {} of {expected} dispatches). Inspect the target before retrying: {}",
+                chunk.len(),
+                replies.len(),
+                reply.trim()
+            );
+        }
+        if let Some(accepted) = first_error {
             let done = delivered + accepted / 2;
-            let held = if accepted % 2 == 1 {
-                " The last key went down without its release."
-            } else {
-                ""
-            };
             if done == 0 && accepted == 0 {
                 bail!(
                     "No keys were sent: Hyprland send_key_state refused {address}: {}",
                     reply.trim()
                 );
             }
+            let held = if accepted % 2 == 1 {
+                " The last key went down without its release."
+            } else {
+                ""
+            };
             bail!(
                 "Hyprland send_key_state stopped for {address}: {done} of {total} key presses were delivered.{held} Inspect the target before retrying, and send only the remainder: {}",
                 reply.trim()
