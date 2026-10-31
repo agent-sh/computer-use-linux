@@ -1833,7 +1833,7 @@ mod adapter_tests {
         assert!(full_hash > MAX_WINDOW_ID);
 
         let window_id = kwin_window_id_from_uuid(uuid);
-        assert!(window_id <= MAX_WINDOW_ID, "{window_id}");
+        assert!(window_id <= MAX_WINDOW_ID);
         assert_eq!(window_id as f64 as u64, window_id);
         assert_eq!(window_id, full_hash & MAX_WINDOW_ID);
         assert_eq!(
