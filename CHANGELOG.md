@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Build the release binaries with cargo-zigbuild against glibc 2.28, so they run on RHEL 8, Debian 10, Ubuntu 20.04 and newer. v0.7.33 needed glibc 2.38 and failed to start on Ubuntu 22.04. The release job now fails if a binary needs a newer glibc.
+- Build the release binaries with cargo-zigbuild against glibc 2.28, so they run on RHEL 8, Debian 10, Ubuntu 20.04 and newer. v0.7.33 needed glibc 2.38 for the main binary and 2.43 for the indicator, so it failed on Ubuntu 22.04, and the indicator also failed on Ubuntu 24.04 and Debian 13. The release job now fails if a binary needs a newer glibc.
 
 ## [0.7.33] - 2026-10-30
 
