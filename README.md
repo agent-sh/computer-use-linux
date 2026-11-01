@@ -437,6 +437,10 @@ For one-off installs without adding the tap first, Hermes also accepts `hermes s
 
 Spawn the binary with `["mcp"]` as the argv tail. It speaks JSON-RPC over stdio per the rmcp 2024-11-05 protocol; capability discovery happens through `tools/list` and the `doctor` tool. The server normally needs no MCP-specific configuration, but desktop runtime environment still matters (`DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, portals, AT-SPI, `ydotoold`, and optionally `COMPUTER_USE_LINUX_COSMIC_HELPER`).
 
+### Selkies containers (linuxserver.io)
+
+linuxserver.io's Selkies desktop images (`webtop`, `chrome`, and others) can run the server inside the container, with the host's MCP client connecting over stdio through `docker exec`. Start the container with `PELORUS=true` so pixelflux serves screenshots and input. A small launcher joins the desktop session, because `docker exec` starts outside it. See the [Selkies container guide](skills/computer-use-linux/references/selkies-setup.md).
+
 ## First-run checklist
 
 1. **Run `doctor`.**
