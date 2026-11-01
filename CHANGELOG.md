@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.36] - 2026-11-01
+
 ### Added
 
 - List and focus windows through `zwlr_foreign_toplevel_manager_v1` on wlroots compositors without a dedicated backend, such as stock labwc, phoc and river-classic. Windows carry no pids or bounds, and focus requires a unique app id and title match.
@@ -22,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A compositor title that decorates the accessibility frame name, such as `PlanetScale - Chromium (Profile 1)` for the frame `PlanetScale - Chromium`, now narrows the tree to that window: the longest frame name the title starts with, followed by ` (...)` or ` - ...`.
 - Hyprland background mode checks that the target is a Hyprland window before it refuses input it cannot map, and takes the `press_key` grammar of every other backend, so modifiers with no key (`Ctrl+Shift`) are refused. Background window capture reads the window's `stableId` from the listing that resolved it instead of listing every client again.
 - `perform_action` and `set_value` with a window-style target and a `pid` fall back to the pid for the ownership check when the window listing is unavailable, as on GNOME without the Shell extension. Without a pid they still refuse.
+
+Thanks @joshuadavidthomas for the wlr foreign toplevel backend ([#359](https://github.com/agent-sh/computer-use-linux/pull/359)) and the wtype chord route ([#360](https://github.com/agent-sh/computer-use-linux/pull/360)), and @berney for the Selkies container guide ([#361](https://github.com/agent-sh/computer-use-linux/pull/361)).
 
 ## [0.7.35] - 2026-10-31
 
@@ -1014,7 +1018,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.35...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.36...HEAD
+[0.7.36]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.35...v0.7.36
 [0.7.35]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.34...v0.7.35
 [0.7.34]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.33...v0.7.34
 [0.7.33]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.32...v0.7.33
