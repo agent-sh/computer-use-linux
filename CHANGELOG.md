@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Selkies container guide: run the server inside a linuxserver.io Selkies desktop container, reached from the host's MCP client over `docker exec`, with a launcher that joins the desktop session (`skills/computer-use-linux/references/selkies-setup.md`).
 - `press_key` sends chords through `wtype` on Wayland sessions without ydotool whose session bus answers that no RemoteDesktop portal exists, as on wlroots compositors with xdg-desktop-portal-wlr (Sway, labwc, river, phoc, cage). Chords used to fail there. The portal stays preferred when it exists, when a keyboard session is already active, or with `COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD=1`. A missing or unreachable bus, a timeout or any other error keeps the portal route, and a failed or denied portal request is never replayed through wtype.
 
+### Fixed
+
+- Hyprland background input releases a key left down when a `send_key_state` batch stops between its down and up events, or when the batch's outcome is unknown, so the target app does not start its own key repeat. The error says whether the release went through.
+- An element action whose target window shares its pid with another window of the same app (Chromium) is refused when the cached snapshot was taken for the other window. Before, a matching pid passed the check.
+- A post-action tree keeps the window it was taken for, so a follow-up action on the same window with an index from that tree passes the ownership check on i3, sway and COSMIC instead of asking for a new `get_app_state`. The snapshot's window, encoding and window scope are now stored together, so a concurrent call can no longer stamp one snapshot's window scope onto another.
+- `perform_action` and `set_value` with `screenshot_after: "window"` refuse the crop when the target window is not focused, since they do not raise it and the crop could show whatever covers it.
+- A window title from the compositor that decorates the accessibility frame name, such as `PlanetScale - Chromium (Profile 1)` for the frame `PlanetScale - Chromium`, now narrows the tree to that window.
+- Hyprland background mode checks that the target is a Hyprland window before it refuses input it cannot map, and refuses modifiers with no key (`Ctrl+Shift`) as `press_key` does on every other backend.
+
 ## [0.7.35] - 2026-10-31
 
 ### Added

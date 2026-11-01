@@ -125,6 +125,23 @@ impl ElementOwnerTarget {
     }
 }
 
+/// How a cached tree was returned: its node encoding, which get_tree_page
+/// pages in, and the AT-SPI window it was narrowed to.
+#[derive(Debug, Clone, Default)]
+struct TreeShape {
+    detail: NodeDetail,
+    window_scope: Option<String>,
+}
+
+/// Whether an action brought its target window to the front, so a
+/// post-action `screenshot_after: "window"` crop shows that window.
+/// perform_action and set_value act through AT-SPI and leave it where it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetRaised {
+    Yes,
+    No,
+}
+
 #[derive(Clone)]
 struct AccessibilityRecoveryScope {
     params: GetAppStateParams,
@@ -683,10 +700,12 @@ impl ComputerUseLinux {
                 window_context.as_ref(),
                 &params,
                 tree_scoped,
-                detail,
+                TreeShape {
+                    detail,
+                    window_scope: window_scope.clone(),
+                },
             )
             .await;
-            self.remember_window_scope(window_scope.clone());
         } else {
             self.commit_snapshot(&[], None).await;
         }
@@ -1107,7 +1126,7 @@ impl ComputerUseLinux {
         let capture = params.capture.clone();
         let target = params.window_target();
         let Json(output) = self.dispatch_click(params).await;
-        self.finish_action_output(output, &capture, target.as_ref())
+        self.finish_action_output(output, &capture, target.as_ref(), TargetRaised::Yes)
             .await
     }
 
@@ -1590,7 +1609,7 @@ impl ComputerUseLinux {
         let Json(output) = self
             .perform_element_action(&params, Some(requested_action))
             .await;
-        self.finish_action_output(output, &capture, target.as_ref())
+        self.finish_action_output(output, &capture, target.as_ref(), TargetRaised::No)
             .await
     }
 
@@ -1707,7 +1726,7 @@ impl ComputerUseLinux {
         let capture = params.capture.clone();
         let target = params.window_target();
         let Json(output) = self.dispatch_scroll(params).await;
-        self.finish_action_output(output, &capture, target.as_ref())
+        self.finish_action_output(output, &capture, target.as_ref(), TargetRaised::Yes)
             .await
     }
 
@@ -2117,7 +2136,8 @@ impl ComputerUseLinux {
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
         let Json(output) = self.dispatch_drag(params).await;
-        self.finish_action_output(output, &capture, None).await
+        self.finish_action_output(output, &capture, None, TargetRaised::Yes)
+            .await
     }
 
     async fn dispatch_drag(&self, params: DragParams) -> Json<ActionOutput> {
@@ -2289,7 +2309,7 @@ impl ComputerUseLinux {
         let capture = params.capture.clone();
         let target = params.window_target();
         let Json(output) = self.dispatch_press_key(params).await;
-        self.finish_action_output(output, &capture, Some(&target))
+        self.finish_action_output(output, &capture, Some(&target), TargetRaised::Yes)
             .await
     }
 
@@ -2544,7 +2564,7 @@ impl ComputerUseLinux {
                 " Field contents were not verified; re-observe the target before retrying.",
             );
         }
-        self.finish_action_output(output, &capture, Some(&target))
+        self.finish_action_output(output, &capture, Some(&target), TargetRaised::Yes)
             .await
     }
 
@@ -4753,6 +4773,7 @@ impl ComputerUseLinux {
         capture: &PostActionCaptureParams,
         target: Option<&WindowTarget>,
         fallback_window: Option<&WindowInfo>,
+        raised: TargetRaised,
     ) -> (
         PostActionObservation,
         Option<ScreenshotCapture>,
@@ -4780,6 +4801,7 @@ impl ComputerUseLinux {
                             .resolve_post_action_window(target, fallback_window)
                             .await
                             .context("targeted post-action screenshot failed")?;
+                        ensure_post_action_crop_shows_target(raised, target, &window)?;
                         resolved_window = Some(window.clone());
                         Some(window)
                     }
@@ -4960,8 +4982,20 @@ impl ComputerUseLinux {
                         snapshot.scoped,
                         snapshot.truncated,
                     );
-                    self.commit_snapshot(&nodes, snapshot.root_pid).await;
-                    self.remember_window_scope(snapshot.window_scope.clone());
+                    // Record the window the tree was taken for, so a follow-up
+                    // action on the same window passes the ownership check. A
+                    // focused-window guess is not a target and is not recorded.
+                    let tree_window = resolved_window.as_ref().filter(|window| {
+                        (target.is_some_and(WindowTarget::has_target) || fallback_window.is_some())
+                            && window.pid.is_none_or(|pid| snapshot.root_pid == Some(pid))
+                    });
+                    self.commit_observed_snapshot(
+                        &nodes,
+                        snapshot.root_pid,
+                        tree_window,
+                        snapshot.window_scope.clone(),
+                    )
+                    .await;
                     if let Some(warning) = unscoped_accessibility_tree_warning(
                         snapshot.scoped,
                         true,
@@ -5031,6 +5065,7 @@ impl ComputerUseLinux {
         mut output: ActionOutput,
         capture: &PostActionCaptureParams,
         target: Option<&WindowTarget>,
+        raised: TargetRaised,
     ) -> Result<CallToolResult, ErrorData> {
         if !output.ok {
             return self.action_tool_result(
@@ -5042,7 +5077,7 @@ impl ComputerUseLinux {
             );
         }
         let (observation, screenshot, notes) = self
-            .capture_post_action_observation(capture, target, None)
+            .capture_post_action_observation(capture, target, None, raised)
             .await;
         output = with_notes(output, notes);
         self.action_tool_result(
@@ -5072,7 +5107,7 @@ impl ComputerUseLinux {
             );
         }
         let (observation, screenshot, notes) = self
-            .capture_post_action_observation(capture, target, None)
+            .capture_post_action_observation(capture, target, None, TargetRaised::No)
             .await;
         output = with_notes(output, notes);
         self.action_tool_result(
@@ -5107,7 +5142,12 @@ impl ComputerUseLinux {
             .and_then(|focus| focus.focused_window.as_ref())
             .or_else(|| output.focus.as_ref().map(|focus| &focus.requested_window));
         let (observation, screenshot, notes) = self
-            .capture_post_action_observation(capture, Some(target), fallback_window)
+            .capture_post_action_observation(
+                capture,
+                Some(target),
+                fallback_window,
+                TargetRaised::Yes,
+            )
             .await;
         let message = (!notes.is_empty()).then(|| notes.join(" "));
         self.action_tool_result(
@@ -5137,7 +5177,12 @@ impl ComputerUseLinux {
         }
         let fallback_window = output.window.as_ref();
         let (observation, screenshot, notes) = self
-            .capture_post_action_observation(capture, Some(target), fallback_window)
+            .capture_post_action_observation(
+                capture,
+                Some(target),
+                fallback_window,
+                TargetRaised::Yes,
+            )
             .await;
         for note in notes {
             if !output.message.is_empty() {
@@ -5459,10 +5504,6 @@ impl ComputerUseLinux {
             return None;
         }
         let fail = |message: String| Some(action_result(action, Err(message), received.clone()));
-        let presses = match presses {
-            Ok(presses) => presses,
-            Err(message) => return fail(message),
-        };
         let windows = match list_windows().await {
             Ok(windows) => windows,
             Err(error) => return fail(format!("Did not send input: {error:#}")),
@@ -5474,6 +5515,12 @@ impl ComputerUseLinux {
         if window.backend != registry::HYPRLAND_BACKEND {
             return None;
         }
+        // Background mode never moves focus, so input it cannot map for the
+        // target is refused rather than typed through the focusing path.
+        let presses = match presses {
+            Ok(presses) => presses,
+            Err(message) => return fail(message),
+        };
         match crate::windowing::backends::hyprland::devices_json().await {
             Ok(json) if crate::hyprland_input::keymap_is_us(&json) => {}
             Ok(_) => {
@@ -5973,10 +6020,26 @@ impl ComputerUseLinux {
         self.cache_snapshot(nodes, target_pid);
     }
 
-    fn remember_window_scope(&self, window_scope: Option<String>) {
-        if let Ok(mut cached) = self.last_snapshot.lock() {
-            cached.window_scope = window_scope;
-        }
+    /// Commit a post-action tree with the window it was taken for and its
+    /// window scope, under the same guard as the nodes.
+    async fn commit_observed_snapshot(
+        &self,
+        nodes: &[AccessibilityNode],
+        target_pid: Option<u32>,
+        window: Option<&WindowInfo>,
+        window_scope: Option<String>,
+    ) {
+        let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        self.store_snapshot(
+            nodes,
+            target_pid,
+            None,
+            window,
+            TreeShape {
+                detail: NodeDetail::Compact,
+                window_scope,
+            },
+        );
     }
 
     async fn commit_app_state_snapshot(
@@ -5986,17 +6049,14 @@ impl ComputerUseLinux {
         window: Option<&WindowInfo>,
         params: &GetAppStateParams,
         scoped: bool,
-        detail: NodeDetail,
+        shape: TreeShape,
     ) {
         let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let recovery_scope = scoped.then(|| AccessibilityRecoveryScope {
             params: params.clone(),
             target_pid,
         });
-        self.cache_snapshot_with_window(nodes, target_pid, recovery_scope, window);
-        if let Ok(mut cached) = self.last_snapshot.lock() {
-            cached.detail = detail;
-        }
+        self.store_snapshot(nodes, target_pid, recovery_scope, window, shape);
     }
 
     fn cache_snapshot(&self, nodes: &[AccessibilityNode], target_pid: Option<u32>) {
@@ -6019,6 +6079,25 @@ impl ComputerUseLinux {
         recovery_scope: Option<AccessibilityRecoveryScope>,
         window: Option<&WindowInfo>,
     ) {
+        self.store_snapshot(
+            nodes,
+            target_pid,
+            recovery_scope,
+            window,
+            TreeShape::default(),
+        );
+    }
+
+    /// Replace the cached snapshot in one write, so its nodes, ownership,
+    /// encoding and window scope always come from the same tree.
+    fn store_snapshot(
+        &self,
+        nodes: &[AccessibilityNode],
+        target_pid: Option<u32>,
+        recovery_scope: Option<AccessibilityRecoveryScope>,
+        window: Option<&WindowInfo>,
+        shape: TreeShape,
+    ) {
         // A spilled file matches only the snapshot it was written from.
         self.tree_spiller.remove_current();
         if let Ok(mut cached) = self.last_snapshot.lock() {
@@ -6028,8 +6107,8 @@ impl ComputerUseLinux {
                 window_id: window.map(|window| window.window_id),
                 window_backend: window.map(|window| window.backend.clone()),
                 recovery_scope,
-                detail: NodeDetail::Compact,
-                window_scope: None,
+                detail: shape.detail,
+                window_scope: shape.window_scope,
             };
         }
     }
@@ -6039,12 +6118,22 @@ impl ComputerUseLinux {
         self.cache_snapshot(&[], None);
     }
 
+    /// The window the cached snapshot was taken for, with its backend.
+    fn snapshot_window(&self) -> Option<(u64, String)> {
+        self.last_snapshot
+            .lock()
+            .ok()
+            .and_then(|snapshot| snapshot.window_id.zip(snapshot.window_backend.clone()))
+    }
+
     /// Reject an element-targeted action whose cached node belongs to a
     /// different app or window than the action's target. With a target pid,
     /// a snapshot taken for a pid is judged by that pid; an untargeted
     /// snapshot mixes apps, so its node is judged by the pid that owns it on
     /// the accessibility bus. When neither is known the action proceeds, since
-    /// a mismatch cannot be shown. A window target with no known pid (i3,
+    /// a mismatch cannot be shown. When the pids match and both the target
+    /// and the snapshot name a window, the windows must match too, since an
+    /// app's windows share its pid. A window target with no known pid (i3,
     /// sway and COSMIC report none) is judged by the snapshot's window and
     /// fails closed when the snapshot recorded no comparable window.
     async fn check_node_target(
@@ -6062,22 +6151,33 @@ impl ComputerUseLinux {
                 Some(pid) => Some(pid),
                 None => object_ref_owner_pid(&node.object_ref).await.ok().flatten(),
             };
-            return match owner_pid {
-                Some(owner_pid) if owner_pid != target_pid => Err(node_target_mismatch_message(
+            if let Some(owner_pid) = owner_pid.filter(|owner_pid| *owner_pid != target_pid) {
+                return Err(node_target_mismatch_message(
                     node.index, owner_pid, target_pid,
-                )),
+                ));
+            }
+            // Windows of one app share its pid. A snapshot taken for another
+            // window of the same app is still refused.
+            let Some((target_window, target_backend)) = target.window.as_ref() else {
+                return Ok(());
+            };
+            return match self.snapshot_window() {
+                Some((window_id, backend))
+                    if backend == *target_backend && window_id != *target_window =>
+                {
+                    Err(node_window_mismatch_message(
+                        node.index,
+                        window_id,
+                        *target_window,
+                    ))
+                }
                 _ => Ok(()),
             };
         }
         let Some((target_window, target_backend)) = target.window.as_ref() else {
             return Ok(());
         };
-        let snapshot_window = self
-            .last_snapshot
-            .lock()
-            .ok()
-            .and_then(|snapshot| snapshot.window_id.zip(snapshot.window_backend.clone()));
-        match snapshot_window {
+        match self.snapshot_window() {
             Some((window_id, backend)) if backend == *target_backend => {
                 if window_id == *target_window {
                     Ok(())
@@ -7752,6 +7852,22 @@ fn prepare_app_state_screenshot(
         };
     }
     prepare_screenshot_payload(raw, options)
+}
+
+/// A crop of a targeted window the action did not raise could show whatever
+/// covers it, so it needs the window to be focused already.
+fn ensure_post_action_crop_shows_target(
+    raised: TargetRaised,
+    target: Option<&WindowTarget>,
+    window: &WindowInfo,
+) -> Result<()> {
+    if raised == TargetRaised::No && target.is_some_and(WindowTarget::has_target) && !window.focused
+    {
+        anyhow::bail!(
+            "targeted post-action screenshot needs the target window to be focused, and this action does not raise it; use screenshot_after=\"screen\" or the screenshot tool"
+        );
+    }
+    Ok(())
 }
 
 fn ensure_readonly_screenshot_target_is_visible(window: &WindowInfo) -> Result<()> {
@@ -14903,7 +15019,7 @@ mod action_recovery_tests {
                 None,
                 &params,
                 true,
-                NodeDetail::Compact,
+                TreeShape::default(),
             )
             .await;
         let scope = backend
@@ -14932,7 +15048,7 @@ mod action_recovery_tests {
                 None,
                 &params,
                 false,
-                NodeDetail::Compact,
+                TreeShape::default(),
             )
             .await;
         assert!(backend
@@ -15075,7 +15191,7 @@ mod action_recovery_tests {
                     Some(&recovery_window(42, 1234)),
                     &serde_json::from_value(params).unwrap(),
                     true,
-                    NodeDetail::Compact,
+                    TreeShape::default(),
                 )
                 .await;
             let dispatches = Arc::new(AtomicUsize::new(0));
@@ -15126,7 +15242,7 @@ mod action_recovery_tests {
                 None,
                 &serde_json::from_value(serde_json::json!({"window_id": 42})).unwrap(),
                 true,
-                NodeDetail::Compact,
+                TreeShape::default(),
             )
             .await;
         let refreshes = Arc::new(AtomicUsize::new(0));
@@ -15180,7 +15296,7 @@ mod action_recovery_tests {
                     Some(&original_window),
                     &serde_json::from_value(serde_json::json!({"window_id": 42})).unwrap(),
                     true,
-                    NodeDetail::Compact,
+                    TreeShape::default(),
                 )
                 .await;
             let dispatches = Arc::new(AtomicUsize::new(0));
@@ -15360,7 +15476,7 @@ mod action_recovery_tests {
                     }))
                     .unwrap(),
                     true,
-                    NodeDetail::Compact,
+                    TreeShape::default(),
                 )
                 .await;
             let fresh_window = fresh_window_id.map(|window_id| WindowInfo {
@@ -15697,7 +15813,7 @@ mod action_recovery_tests {
                 Some(&recovery_window(42, 5678)),
                 &serde_json::from_value(serde_json::json!({"window_id": 42})).unwrap(),
                 true,
-                NodeDetail::Compact,
+                TreeShape::default(),
             )
             .await;
 
@@ -16359,6 +16475,85 @@ mod node_target_scope_tests {
                 .unwrap_err(),
             node_window_unverified_message(2, 10)
         );
+    }
+
+    #[test]
+    fn unraised_target_window_crop_needs_focus() {
+        let target = WindowTarget {
+            window_id: Some(20),
+            ..Default::default()
+        };
+        let mut window = pidless_window(20);
+        assert!(
+            ensure_post_action_crop_shows_target(TargetRaised::No, Some(&target), &window).is_err()
+        );
+        assert!(
+            ensure_post_action_crop_shows_target(TargetRaised::Yes, Some(&target), &window).is_ok()
+        );
+        // No target: the crop is of the focused window anyway.
+        assert!(ensure_post_action_crop_shows_target(TargetRaised::No, None, &window).is_ok());
+        window.focused = true;
+        assert!(
+            ensure_post_action_crop_shows_target(TargetRaised::No, Some(&target), &window).is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn same_pid_window_target_refuses_another_windows_snapshot() {
+        // Chromium: windows 20 and 10 share pid 7. get_app_state of window 20,
+        // then an action that targets window 10.
+        let backend = ComputerUseLinux::default();
+        let node = cached_node(2, ":1.9/org/a11y/atspi/accessible/42");
+        let mut window_20 = pidless_window(20);
+        window_20.pid = Some(7);
+        let mut window_10 = pidless_window(10);
+        window_10.pid = Some(7);
+        backend.cache_snapshot_with_window(
+            std::slice::from_ref(&node),
+            Some(7),
+            None,
+            Some(&window_20),
+        );
+
+        assert_eq!(
+            backend
+                .check_node_target(&node, &ElementOwnerTarget::window(&window_10, None))
+                .await
+                .unwrap_err(),
+            node_window_mismatch_message(2, 20, 10)
+        );
+        assert!(backend
+            .check_node_target(&node, &ElementOwnerTarget::window(&window_20, None))
+            .await
+            .is_ok());
+        // A pid-only target cannot tell the windows apart and passes.
+        assert!(backend
+            .check_node_target(&node, &ElementOwnerTarget::pid(Some(7)))
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn post_action_tree_keeps_its_window_for_the_next_action() {
+        // sway: click(window_id=20, include_tree=true), then an action on
+        // window 20 with an index from that tree.
+        let backend = ComputerUseLinux::default();
+        let node = cached_node(2, ":1.9/org/a11y/atspi/accessible/42");
+        backend
+            .commit_observed_snapshot(
+                std::slice::from_ref(&node),
+                None,
+                Some(&pidless_window(20)),
+                Some("Window 20".to_string()),
+            )
+            .await;
+
+        assert!(backend
+            .check_node_target(&node, &pidless_owner(20))
+            .await
+            .is_ok());
+        let cached = backend.last_snapshot.lock().unwrap();
+        assert_eq!(cached.window_scope.as_deref(), Some("Window 20"));
     }
 
     #[test]
