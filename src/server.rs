@@ -108,19 +108,27 @@ struct CachedAccessibilitySnapshot {
 struct ElementOwnerTarget {
     pid: Option<u32>,
     window: Option<(u64, String)>,
+    /// The target names exactly this window: a `window_id`, or an app_id,
+    /// wm_class or title that matches one window. An `app_id` shared by
+    /// several windows resolves to the first, which the caller did not name.
+    exact_window: bool,
 }
 
 impl ElementOwnerTarget {
     fn pid(pid: Option<u32>) -> Self {
-        Self { pid, window: None }
+        Self {
+            pid,
+            ..Self::default()
+        }
     }
 
     /// A resolved window target. The window's own pid wins over `pid`, the
     /// one the caller passed.
-    fn window(window: &WindowInfo, pid: Option<u32>) -> Self {
+    fn window(window: &WindowInfo, pid: Option<u32>, exact_window: bool) -> Self {
         Self {
             pid: window.pid.or(pid),
             window: Some((window.window_id, window.backend.clone())),
+            exact_window,
         }
     }
 }
@@ -1181,7 +1189,7 @@ impl ComputerUseLinux {
                     });
                 }
             };
-            owner_target = focus_owner_target(focus.as_ref(), params.pid);
+            owner_target = focus_owner_target(focus.as_ref(), params.pid, params.window_id);
             tokio::time::sleep(Duration::from_millis(120)).await;
             // Window-relative coordinates: translate by the window's top-left so
             // the agent can click the pixel it saw in a window-cropped screenshot.
@@ -1772,7 +1780,7 @@ impl ComputerUseLinux {
                     });
                 }
             };
-            owner_target = focus_owner_target(focus.as_ref(), params.pid);
+            owner_target = focus_owner_target(focus.as_ref(), params.pid, params.window_id);
             tokio::time::sleep(Duration::from_millis(120)).await;
             if params.relative == Some(true) {
                 let Some(focus) = focus.as_ref() else {
@@ -6161,9 +6169,12 @@ impl ComputerUseLinux {
                 ));
             }
             // Windows of one app share its pid. A tree narrowed to another
-            // window of the same app is still refused; an app-wide tree holds
-            // every window, so its nodes pass on the pid.
-            let Some((target_window, target_backend)) = target.window.as_ref() else {
+            // window of the same app is still refused when the target names
+            // one window exactly; an app-wide tree holds every window, and an
+            // inexact target picked one arbitrarily, so both pass on the pid.
+            let Some((target_window, target_backend)) =
+                target.window.as_ref().filter(|_| target.exact_window)
+            else {
                 return Ok(());
             };
             let narrowed = self
@@ -8442,8 +8453,9 @@ fn element_action_owner_from(
     }
     windows
         .and_then(|windows| {
+            let exact = names_one_window(&windows, target);
             resolve_window_target(&windows, target)
-                .map(|window| ElementOwnerTarget::window(window, target.pid))
+                .map(|window| ElementOwnerTarget::window(window, target.pid, exact))
         })
         .map_err(|error| {
             let error = format!("{error:#}");
@@ -8458,10 +8470,26 @@ fn element_action_owner_from(
         })
 }
 
+/// Whether `target` names exactly one window of the listing: a `window_id`,
+/// or a selector that matches a single window on its own.
+fn names_one_window(windows: &[WindowInfo], target: &WindowTarget) -> bool {
+    target.window_id.is_some()
+        || windows
+            .iter()
+            .filter(|window| resolve_window_target(std::slice::from_ref(*window), target).is_ok())
+            .take(2)
+            .count()
+            == 1
+}
+
 /// The ownership target of a click or scroll: the focused window's pid, else
 /// the requested window's, else the pid the caller passed, plus the
-/// requested window.
-fn focus_owner_target(focus: Option<&WindowFocusResult>, pid: Option<u32>) -> ElementOwnerTarget {
+/// requested window. Only a `window_id` counts as naming that window exactly.
+fn focus_owner_target(
+    focus: Option<&WindowFocusResult>,
+    pid: Option<u32>,
+    window_id: Option<u64>,
+) -> ElementOwnerTarget {
     match focus {
         Some(focus) => ElementOwnerTarget {
             pid: focus_target_pid(Some(focus)).or(pid),
@@ -8469,6 +8497,7 @@ fn focus_owner_target(focus: Option<&WindowFocusResult>, pid: Option<u32>) -> El
                 focus.requested_window.window_id,
                 focus.requested_window.backend.clone(),
             )),
+            exact_window: window_id.is_some(),
         },
         None => ElementOwnerTarget::pid(pid),
     }
@@ -16603,13 +16632,13 @@ mod node_target_scope_tests {
 
         assert_eq!(
             backend
-                .check_node_target(&node, &ElementOwnerTarget::window(&window_10, None))
+                .check_node_target(&node, &ElementOwnerTarget::window(&window_10, None, true))
                 .await
                 .unwrap_err(),
             node_window_mismatch_message(2, 20, 10)
         );
         assert!(backend
-            .check_node_target(&node, &ElementOwnerTarget::window(&window_20, None))
+            .check_node_target(&node, &ElementOwnerTarget::window(&window_20, None, true))
             .await
             .is_ok());
         // A pid-only target cannot tell the windows apart and passes.
@@ -16625,9 +16654,64 @@ mod node_target_scope_tests {
             Some(&window_20),
         );
         assert!(backend
-            .check_node_target(&node, &ElementOwnerTarget::window(&window_10, None))
+            .check_node_target(&node, &ElementOwnerTarget::window(&window_10, None, true))
             .await
             .is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_inexact_window_target_passes_on_the_pid() {
+        // Chromium: windows 10 and 20 share pid 7 and app_id. The tree was
+        // narrowed to window 20; app_id resolves to the first window, 10.
+        let chromium = |window_id: u64, title: &str| {
+            let mut window = pidless_window(window_id);
+            window.pid = Some(7);
+            window.app_id = Some("chromium".to_string());
+            window.title = Some(title.to_string());
+            window
+        };
+        let windows = vec![chromium(10, "GitHub"), chromium(20, "PlanetScale")];
+        let backend = ComputerUseLinux::default();
+        let node = cached_node(2, ":1.9/org/a11y/atspi/accessible/42");
+        backend.store_snapshot(
+            std::slice::from_ref(&node),
+            Some(7),
+            None,
+            Some(&windows[1]),
+            TreeShape {
+                detail: NodeDetail::Compact,
+                window_scope: Some("PlanetScale".to_string()),
+            },
+        );
+
+        let by_app_id = element_action_owner_from(
+            Ok(windows.clone()),
+            &WindowTarget {
+                app_id: Some("chromium".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!by_app_id.exact_window);
+        assert!(backend.check_node_target(&node, &by_app_id).await.is_ok());
+
+        // A title that names window 10 alone is exact and still refused.
+        let by_title = element_action_owner_from(
+            Ok(windows),
+            &WindowTarget {
+                title: Some("GitHub".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(by_title.exact_window);
+        assert_eq!(
+            backend
+                .check_node_target(&node, &by_title)
+                .await
+                .unwrap_err(),
+            node_window_mismatch_message(2, 20, 10)
+        );
     }
 
     #[test]
