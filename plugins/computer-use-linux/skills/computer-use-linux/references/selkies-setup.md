@@ -17,7 +17,7 @@ docker run -d --name desktop --shm-size=1gb -e PELORUS=true -p 3001:3001 lscr.io
 
 ## Install the binary
 
-Install as `abc`, the desktop user, into `/config`, which survives container restarts:
+Install as `abc`, the desktop user, into `/config`, which survives container restarts. Re-run the same block to update to a newer release:
 
 ```bash
 docker exec -u abc desktop sh -c '
@@ -34,7 +34,7 @@ Release binaries need glibc. Alpine-based tags such as `webtop:alpine-kde` use m
 
 ## Add the session launcher
 
-`docker exec` starts outside the desktop session, with no session bus and no `WAYLAND_DISPLAY`. Selkies saves the variables its own services use (`XDG_RUNTIME_DIR`, `PIXELFLUX_CU`, `PIXELFLUX_CU_TOKEN`) in `/run/s6/container_environment`, where s6's `with-contenv` loads them. The launcher does that, then takes the session bus from a desktop process: `plasmashell` on KDE webtops, which also gives it the display, or `labwc` on app images. labwc's own `WAYLAND_DISPLAY` is `wayland-1`, Selkies' display, so the launcher points at the desktop's `wayland-0` instead.
+`docker exec` starts outside the desktop session, with no session bus and no `WAYLAND_DISPLAY`. Selkies saves the variables its own services use (`XDG_RUNTIME_DIR`, `PIXELFLUX_CU`, `PIXELFLUX_CU_TOKEN`) in `/run/s6/container_environment`, where s6's `with-contenv` loads them. The launcher does that, then takes the session bus from a desktop process: `plasmashell` on KDE webtops, which also gives it the display, or `labwc` on app images. labwc's own `WAYLAND_DISPLAY` is `wayland-1`, Selkies' display, so the launcher points at the desktop's `wayland-0` instead. The remaining desktop variables already come from `with-contenv`, so on labwc the bus is the only thing taken from the desktop process.
 
 ```bash
 docker exec -i -u abc desktop sh -c 'cat > /config/.local/bin/computer-use-linux-selkies && chmod +x /config/.local/bin/computer-use-linux-selkies' <<'EOF'
@@ -55,6 +55,10 @@ fi
 while IFS= read -r var; do
     export "${var?}"
 done < <(tr '\0' '\n' < "/proc/${session}/environ" | grep -E "^(${vars})=")
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    echo "computer-use-linux-selkies: could not read the session bus from /proc/${session}/environ" >&2
+    exit 1
+fi
 exec /config/.local/bin/computer-use-linux "${@:-mcp}"
 EOF
 ```
