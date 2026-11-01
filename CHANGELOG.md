@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Selkies container guide: run the server inside a linuxserver.io Selkies desktop container, reached from the host's MCP client over `docker exec`, with a launcher that joins the desktop session (`skills/computer-use-linux/references/selkies-setup.md`).
+
 ## [0.7.35] - 2026-10-31
 
 ### Added

@@ -134,6 +134,7 @@ Pi native tools skip this MCP `command` config; see [Pi setup](references/pi-set
 
 - [Hermes setup](references/hermes-setup.md)
 - [Pi coding agent setup](references/pi-setup.md)
+- [Selkies container setup](references/selkies-setup.md)
 
 ## Procedure
 
