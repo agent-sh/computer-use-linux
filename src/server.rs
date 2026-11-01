@@ -133,6 +133,15 @@ impl ElementOwnerTarget {
     }
 }
 
+/// The previous snapshot's window scope, pid and window, for a post-action
+/// tree that narrows through that scope.
+#[derive(Debug, Clone)]
+struct CachedTreeWindow {
+    scope: String,
+    pid: Option<u32>,
+    window: Option<(u64, String)>,
+}
+
 /// How a cached tree was returned: its node encoding, which get_tree_page
 /// pages in, and the AT-SPI window it was narrowed to.
 #[derive(Debug, Clone, Default)]
@@ -4957,29 +4966,24 @@ impl ComputerUseLinux {
                 || target_pid.is_some()
                 || app_filter.is_some();
             let (max_nodes, max_depth) = crate::atspi_tree::snapshot_limits(None, None);
-            let (cached_window_scope, cached_window) = self
-                .last_snapshot
-                .lock()
-                .ok()
-                .map(|snapshot| {
-                    (
-                        snapshot
-                            .window_scope
-                            .clone()
-                            .map(|scope| (scope, snapshot.pid)),
-                        snapshot.window_id.zip(snapshot.window_backend.clone()),
-                    )
+            let cached_tree = self.last_snapshot.lock().ok().and_then(|snapshot| {
+                Some(CachedTreeWindow {
+                    scope: snapshot.window_scope.clone()?,
+                    pid: snapshot.pid,
+                    window: snapshot.window_id.zip(snapshot.window_backend.clone()),
                 })
-                .unwrap_or_default();
+            });
             let window_title = post_action_window_title(
                 target,
                 resolved_window.as_ref(),
                 target_pid,
-                cached_window_scope,
+                cached_tree
+                    .as_ref()
+                    .map(|cached| (cached.scope.clone(), cached.pid)),
             );
-            // Without a window_id or title of its own, the tree is narrowed to
-            // the previous snapshot's window, so it is that window's tree.
-            let inherited_window = cached_window.filter(|_| {
+            // Without a window_id or title of its own, a narrowed tree was
+            // narrowed through the previous snapshot's window scope.
+            let narrowed_through_cache = cached_tree.filter(|_| {
                 window_title.is_some()
                     && !target
                         .is_some_and(|target| target.window_id.is_some() || target.title.is_some())
@@ -5022,7 +5026,7 @@ impl ComputerUseLinux {
                         resolved_window.as_ref().filter(|_| window_targeted),
                         snapshot.root_pid,
                         snapshot.window_scope.as_deref(),
-                        inherited_window,
+                        narrowed_through_cache.as_ref(),
                     );
                     self.commit_observed_snapshot(
                         &nodes,
@@ -7939,20 +7943,25 @@ fn keyboard_target_raised(target: &WindowTarget) -> TargetRaised {
 /// a pid needs the tree to come from that pid. A window without one (i3,
 /// sway, COSMIC) needs the tree narrowed to the frame its title names; an
 /// app-wide tree may hold another app's nodes, and recording it would let
-/// them pass. A focused-window guess is never passed in. A tree narrowed
-/// through the previous snapshot's window scope (`inherited`, for a target
-/// with no window_id or title) is that window's tree, whatever window the
-/// target resolved to.
+/// them pass. A focused-window guess is never passed in.
+///
+/// A target with no window_id or title narrows through the previous
+/// snapshot's window scope (`cached`). That tree is the cached window's only
+/// when it came from the cached pid and matched the very frame the cache
+/// named; then it inherits the cached window. Otherwise it is recorded as no
+/// window, never as the window the target resolved to, which can be another
+/// window of the app.
 fn post_action_tree_window(
     window: Option<&WindowInfo>,
     root_pid: Option<u32>,
     window_scope: Option<&str>,
-    inherited: Option<(u64, String)>,
+    cached: Option<&CachedTreeWindow>,
 ) -> Option<(u64, String)> {
-    if window_scope.is_some() {
-        if let Some(inherited) = inherited {
-            return Some(inherited);
-        }
+    if let Some(cached) = cached {
+        let same_tree = root_pid.is_some()
+            && root_pid == cached.pid
+            && window_scope == Some(cached.scope.as_str());
+        return cached.window.clone().filter(|_| same_tree);
     }
     window
         .filter(|window| match window.pid {
@@ -16774,22 +16783,30 @@ mod node_target_scope_tests {
         // cached scope of window 20: it is window 20's tree.
         let mut window_10 = pidless_window(10);
         window_10.pid = Some(7);
-        let inherited = Some((20, "i3".to_string()));
+        let cached = CachedTreeWindow {
+            scope: "Window 20".to_string(),
+            pid: Some(7),
+            window: Some((20, "i3".to_string())),
+        };
+        let record = |root_pid, scope, cached: &CachedTreeWindow| {
+            post_action_tree_window(Some(&window_10), root_pid, scope, Some(cached))
+        };
         assert_eq!(
-            post_action_tree_window(
-                Some(&window_10),
-                Some(7),
-                Some("Window 20"),
-                inherited.clone()
-            ),
-            inherited
+            record(Some(7), Some("Window 20"), &cached),
+            Some((20, "i3".to_string()))
         );
-        // The cached frame no longer matched: an app-wide tree, recorded
-        // under the resolved window on its pid.
-        assert_eq!(
-            post_action_tree_window(Some(&window_10), Some(7), None, inherited),
-            Some((10, "i3".to_string()))
-        );
+        // A tree from no pid or another pid is not the cached window's.
+        assert_eq!(record(None, Some("Window 20"), &cached), None);
+        assert_eq!(record(Some(8), Some("Window 20"), &cached), None);
+        // Another frame matched this time, or none did: record nothing.
+        assert_eq!(record(Some(7), Some("Window 2"), &cached), None);
+        assert_eq!(record(Some(7), None, &cached), None);
+        // A cached scope with no cached window never falls back to window 10.
+        let no_window = CachedTreeWindow {
+            window: None,
+            ..cached.clone()
+        };
+        assert_eq!(record(Some(7), Some("Window 20"), &no_window), None);
     }
 
     #[tokio::test]
