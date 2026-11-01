@@ -4957,18 +4957,33 @@ impl ComputerUseLinux {
                 || target_pid.is_some()
                 || app_filter.is_some();
             let (max_nodes, max_depth) = crate::atspi_tree::snapshot_limits(None, None);
-            let cached_window_scope = self.last_snapshot.lock().ok().and_then(|snapshot| {
-                snapshot
-                    .window_scope
-                    .clone()
-                    .map(|scope| (scope, snapshot.pid))
-            });
+            let (cached_window_scope, cached_window) = self
+                .last_snapshot
+                .lock()
+                .ok()
+                .map(|snapshot| {
+                    (
+                        snapshot
+                            .window_scope
+                            .clone()
+                            .map(|scope| (scope, snapshot.pid)),
+                        snapshot.window_id.zip(snapshot.window_backend.clone()),
+                    )
+                })
+                .unwrap_or_default();
             let window_title = post_action_window_title(
                 target,
                 resolved_window.as_ref(),
                 target_pid,
                 cached_window_scope,
             );
+            // Without a window_id or title of its own, the tree is narrowed to
+            // the previous snapshot's window, so it is that window's tree.
+            let inherited_window = cached_window.filter(|_| {
+                window_title.is_some()
+                    && !target
+                        .is_some_and(|target| target.window_id.is_some() || target.title.is_some())
+            });
             match snapshot_accessibility_tree(
                 app_filter.as_deref(),
                 target_pid,
@@ -5007,6 +5022,7 @@ impl ComputerUseLinux {
                         resolved_window.as_ref().filter(|_| window_targeted),
                         snapshot.root_pid,
                         snapshot.window_scope.as_deref(),
+                        inherited_window,
                     );
                     self.commit_observed_snapshot(
                         &nodes,
@@ -6038,11 +6054,11 @@ impl ComputerUseLinux {
         &self,
         nodes: &[AccessibilityNode],
         target_pid: Option<u32>,
-        window: Option<&WindowInfo>,
+        window: Option<(u64, String)>,
         window_scope: Option<String>,
     ) {
         let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
-        self.store_snapshot(
+        self.store_snapshot_for(
             nodes,
             target_pid,
             None,
@@ -6110,14 +6126,32 @@ impl ComputerUseLinux {
         window: Option<&WindowInfo>,
         shape: TreeShape,
     ) {
+        self.store_snapshot_for(
+            nodes,
+            target_pid,
+            recovery_scope,
+            window.map(|window| (window.window_id, window.backend.clone())),
+            shape,
+        );
+    }
+
+    /// store_snapshot for a window given as its id and backend.
+    fn store_snapshot_for(
+        &self,
+        nodes: &[AccessibilityNode],
+        target_pid: Option<u32>,
+        recovery_scope: Option<AccessibilityRecoveryScope>,
+        window: Option<(u64, String)>,
+        shape: TreeShape,
+    ) {
         // A spilled file matches only the snapshot it was written from.
         self.tree_spiller.remove_current();
         if let Ok(mut cached) = self.last_snapshot.lock() {
             *cached = CachedAccessibilitySnapshot {
                 nodes: nodes.to_vec(),
                 pid: target_pid,
-                window_id: window.map(|window| window.window_id),
-                window_backend: window.map(|window| window.backend.clone()),
+                window_id: window.as_ref().map(|(window_id, _)| *window_id),
+                window_backend: window.map(|(_, backend)| backend),
                 recovery_scope,
                 detail: shape.detail,
                 window_scope: shape.window_scope,
@@ -7905,16 +7939,27 @@ fn keyboard_target_raised(target: &WindowTarget) -> TargetRaised {
 /// a pid needs the tree to come from that pid. A window without one (i3,
 /// sway, COSMIC) needs the tree narrowed to the frame its title names; an
 /// app-wide tree may hold another app's nodes, and recording it would let
-/// them pass. A focused-window guess is never passed in.
-fn post_action_tree_window<'a>(
-    window: Option<&'a WindowInfo>,
+/// them pass. A focused-window guess is never passed in. A tree narrowed
+/// through the previous snapshot's window scope (`inherited`, for a target
+/// with no window_id or title) is that window's tree, whatever window the
+/// target resolved to.
+fn post_action_tree_window(
+    window: Option<&WindowInfo>,
     root_pid: Option<u32>,
     window_scope: Option<&str>,
-) -> Option<&'a WindowInfo> {
-    window.filter(|window| match window.pid {
-        Some(pid) => root_pid == Some(pid),
-        None => window_scope.is_some(),
-    })
+    inherited: Option<(u64, String)>,
+) -> Option<(u64, String)> {
+    if window_scope.is_some() {
+        if let Some(inherited) = inherited {
+            return Some(inherited);
+        }
+    }
+    window
+        .filter(|window| match window.pid {
+            Some(pid) => root_pid == Some(pid),
+            None => window_scope.is_some(),
+        })
+        .map(|window| (window.window_id, window.backend.clone()))
 }
 
 /// A crop of a targeted window the action did not raise could show whatever
@@ -16718,13 +16763,33 @@ mod node_target_scope_tests {
     fn post_action_tree_records_only_a_window_it_holds() {
         let mut with_pid = pidless_window(20);
         with_pid.pid = Some(7);
-        assert!(post_action_tree_window(Some(&with_pid), Some(7), None).is_some());
-        assert!(post_action_tree_window(Some(&with_pid), Some(8), None).is_none());
+        assert!(post_action_tree_window(Some(&with_pid), Some(7), None, None).is_some());
+        assert!(post_action_tree_window(Some(&with_pid), Some(8), None, None).is_none());
         // No pid: only a tree narrowed to the window's frame is recorded.
         let pidless = pidless_window(20);
-        assert!(post_action_tree_window(Some(&pidless), Some(8), None).is_none());
-        assert!(post_action_tree_window(Some(&pidless), None, Some("Window 20")).is_some());
-        assert!(post_action_tree_window(None, Some(7), Some("Window 20")).is_none());
+        assert!(post_action_tree_window(Some(&pidless), Some(8), None, None).is_none());
+        assert!(post_action_tree_window(Some(&pidless), None, Some("Window 20"), None).is_some());
+        assert!(post_action_tree_window(None, Some(7), Some("Window 20"), None).is_none());
+        // app_id resolved window 10, but the tree was narrowed through the
+        // cached scope of window 20: it is window 20's tree.
+        let mut window_10 = pidless_window(10);
+        window_10.pid = Some(7);
+        let inherited = Some((20, "i3".to_string()));
+        assert_eq!(
+            post_action_tree_window(
+                Some(&window_10),
+                Some(7),
+                Some("Window 20"),
+                inherited.clone()
+            ),
+            inherited
+        );
+        // The cached frame no longer matched: an app-wide tree, recorded
+        // under the resolved window on its pid.
+        assert_eq!(
+            post_action_tree_window(Some(&window_10), Some(7), None, inherited),
+            Some((10, "i3".to_string()))
+        );
     }
 
     #[tokio::test]
@@ -16737,7 +16802,7 @@ mod node_target_scope_tests {
             .commit_observed_snapshot(
                 std::slice::from_ref(&node),
                 None,
-                Some(&pidless_window(20)),
+                Some((20, "i3".to_string())),
                 Some("Window 20".to_string()),
             )
             .await;
