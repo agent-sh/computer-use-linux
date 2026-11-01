@@ -207,7 +207,31 @@ impl HyprlandCaptureLayout {
     }
 }
 
+/// `grim -T` ids of the windows in the last listing, by window_id. A stableId
+/// lasts as long as its window, so per-window capture reads it here instead
+/// of listing every client again.
+static STABLE_IDS: std::sync::Mutex<Option<std::collections::HashMap<u64, String>>> =
+    std::sync::Mutex::new(None);
+
+fn stable_id_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(id) => Some(id.clone()),
+        serde_json::Value::Number(id) => Some(id.to_string()),
+        _ => None,
+    }
+}
+
 fn windows_from_hyprland_clients(clients: Vec<HyprlandClient>) -> Result<Vec<WindowInfo>> {
+    let stable_ids = clients
+        .iter()
+        .filter_map(|client| {
+            let window_id = parse_hyprland_address(&client.address).ok()?;
+            Some((window_id, stable_id_text(client.stable_id.as_ref()?)?))
+        })
+        .collect();
+    if let Ok(mut cache) = STABLE_IDS.lock() {
+        *cache = Some(stable_ids);
+    }
     let mut windows = clients
         .into_iter()
         .filter(|client| client.mapped.unwrap_or(true))
@@ -398,7 +422,9 @@ async fn release_held_keys(
         .map(|press| key_state_dispatch(address, press, "up"))
         .collect::<Vec<_>>()
         .join(" ; ");
-    let outcome = async {
+    // The caller still holds the input lock, and the batch may have failed
+    // on a stalled compositor, so the release gets a short budget of its own.
+    let release = async {
         let stream = socket_connect(socket).await?;
         let reply = socket_exchange(stream, &format!("[[BATCH]]{batch}")).await?;
         let replies = reply.split("\n\n\n").map(str::trim).collect::<Vec<_>>();
@@ -407,8 +433,14 @@ async fn release_held_keys(
         } else {
             bail!("Hyprland answered: {}", reply.trim())
         }
-    }
-    .await;
+    };
+    let outcome = match tokio::time::timeout(RELEASE_TIMEOUT, release).await {
+        Ok(outcome) => outcome,
+        Err(_) => Err(anyhow::anyhow!(
+            "no answer within {} ms",
+            RELEASE_TIMEOUT.as_millis()
+        )),
+    };
     match outcome {
         Ok(()) => " A release was sent for every key that may have been left down.".to_string(),
         Err(error) => format!(
@@ -459,6 +491,7 @@ async fn socket_exchange(mut stream: tokio::net::UnixStream, request: &str) -> R
 }
 
 const SOCKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// A PNG of one window, captured without focusing or raising it.
 pub struct WindowCapture {
@@ -484,33 +517,32 @@ pub struct HiddenWorkspaceCapture {
 /// Captures a window through `grim -T <stableId>` (ext-foreign-toplevel
 /// image capture). Works for unfocused windows and windows on hidden
 /// workspaces, needs no portal consent and never changes focus.
-pub async fn capture_window(window_id: u64) -> Result<WindowCapture> {
+/// `window` comes from the listing the caller just resolved, which also
+/// recorded its stableId; a window missing from it is listed once more.
+pub async fn capture_window(window: &WindowInfo) -> Result<WindowCapture> {
+    let window_id = window.window_id;
     let address = format!("0x{window_id:x}");
-    let clients = hyprctl_output_async(&["clients", "-j"])
-        .await
-        .context("failed to run hyprctl clients -j")?;
-    let clients: serde_json::Value =
-        serde_json::from_slice(&clients.stdout).context("failed to parse hyprctl clients -j")?;
-    let client = clients
-        .as_array()
-        .and_then(|clients| {
-            clients
-                .iter()
-                .find(|client| client.get("address").and_then(|a| a.as_str()) == Some(&address))
-        })
-        .with_context(|| format!("Hyprland window {address} is no longer listed"))?;
-    let stable_id = match client.get("stableId") {
-        Some(serde_json::Value::String(id)) => id.clone(),
-        Some(serde_json::Value::Number(id)) => id.to_string(),
-        _ => bail!("Hyprland window {address} has no stableId; this Hyprland is too old for per-window capture"),
+    let cached = STABLE_IDS
+        .lock()
+        .ok()
+        .and_then(|cache| cache.as_ref()?.get(&window_id).cloned());
+    let stable_id = match cached {
+        Some(id) => id,
+        None => {
+            list_windows().await?;
+            STABLE_IDS
+                .lock()
+                .ok()
+                .and_then(|cache| cache.as_ref()?.get(&window_id).cloned())
+                .with_context(|| {
+                    format!("Hyprland window {address} has no stableId; it is no longer listed, or this Hyprland is too old for per-window capture")
+                })?
+        }
     };
     if stable_id.is_empty() || !stable_id.chars().all(|c| c.is_ascii_alphanumeric()) {
         bail!("Hyprland window {address} has an unexpected stableId {stable_id:?}");
     }
-    let workspace_id = client
-        .get("workspace")
-        .and_then(|workspace| workspace.get("id"))
-        .and_then(|id| id.as_i64());
+    let workspace_id = window.workspace.map(i64::from);
     let workspace_visible = match (workspace_id, visible_workspace_ids().await) {
         (Some(id), Some(visible)) => Some(visible.contains(&id)),
         _ => None,
@@ -753,6 +785,8 @@ struct HyprlandClient {
     xwayland: Option<bool>,
     #[serde(rename = "focusHistoryID")]
     focus_history_id: Option<i32>,
+    #[serde(rename = "stableId")]
+    stable_id: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]

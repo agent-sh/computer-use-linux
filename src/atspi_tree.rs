@@ -558,11 +558,12 @@ pub(crate) fn is_window_role(role: &str) -> bool {
 /// Index of the one window among an app root's children (`(role, name)`)
 /// that `title` names, when the root has at least two windows. An exact name
 /// wins, then a case-insensitive one, then the one name that contains
-/// `title`, then the one name that `title` contains, both ignoring case. The
-/// last rule matches a compositor title that decorates the AT-SPI name, such
-/// as Chromium's "PlanetScale - Chromium (Profile 1)" for the frame
-/// "PlanetScale - Chromium". A tie at the first rule that matches, or no
-/// match, returns `None`, which keeps every window.
+/// `title`, ignoring case. A tie at the first rule that matches returns
+/// `None`, which keeps every window. With no match at all, the longest name
+/// that `title` starts with, followed by a decoration (` (...)` or
+/// ` - ...`), wins: a compositor title such as Chromium's
+/// "PlanetScale - Chromium (Profile 1)" decorates the AT-SPI frame name
+/// "PlanetScale - Chromium".
 fn matching_window(children: &[(String, Option<String>)], title: &str) -> Option<usize> {
     let windows: Vec<(usize, &str)> = children
         .iter()
@@ -575,11 +576,10 @@ fn matching_window(children: &[(String, Option<String>)], title: &str) -> Option
     }
     let title = title.trim();
     let lowered = title.to_lowercase();
-    let rules: [&dyn Fn(&str) -> bool; 4] = [
+    let rules: [&dyn Fn(&str) -> bool; 3] = [
         &|name| name == title,
         &|name| name.to_lowercase() == lowered,
         &|name| name.to_lowercase().contains(&lowered),
-        &|name| !name.is_empty() && lowered.contains(&name.to_lowercase()),
     ];
     for rule in rules {
         let mut matches = windows.iter().filter(|(_, name)| rule(name));
@@ -587,7 +587,21 @@ fn matching_window(children: &[(String, Option<String>)], title: &str) -> Option
             return matches.next().is_none().then_some(*index);
         }
     }
-    None
+    let decorated = |name: &str| {
+        let name = name.to_lowercase();
+        !name.is_empty()
+            && lowered.strip_prefix(&name).is_some_and(|rest| {
+                rest.starts_with(" (") || rest.starts_with(" - ") || rest.starts_with(" \u{2014} ")
+            })
+    };
+    let decorated_matches = windows.iter().filter(|(_, name)| decorated(name));
+    let longest = decorated_matches
+        .clone()
+        .map(|(_, name)| name.len())
+        .max()?;
+    let mut longest_matches = decorated_matches.filter(|(_, name)| name.len() == longest);
+    let (index, _) = longest_matches.next()?;
+    longest_matches.next().is_none().then_some(*index)
 }
 
 /// Compact description of the AT-SPI element that currently holds keyboard
@@ -2655,7 +2669,7 @@ mod tests {
     }
 
     #[test]
-    fn a_decorated_compositor_title_picks_the_window_it_contains() {
+    fn a_decorated_compositor_title_picks_the_frame_it_decorates() {
         let chromium = app_children(&[
             ("frame", "GitHub - Chromium"),
             ("frame", "PlanetScale - Chromium"),
@@ -2664,12 +2678,19 @@ mod tests {
             matching_window(&chromium, "PlanetScale - Chromium (Profile 1)"),
             Some(1)
         );
-        // Contains both names: keep them all.
+        // Both names are decorated prefixes: the longest wins.
         let nested = app_children(&[("frame", "Docs"), ("frame", "Docs - Settings")]);
         assert_eq!(
             matching_window(&nested, "Docs - Settings (Profile 1)"),
+            Some(1)
+        );
+        // A name inside the title but not its prefix is not a decoration.
+        let generic = app_children(&[("frame", "Settings"), ("frame", "Mail")]);
+        assert_eq!(
+            matching_window(&generic, "Docs - Settings (Profile 1)"),
             None
         );
+        assert_eq!(matching_window(&generic, "Mailbox"), None);
     }
 
     #[test]

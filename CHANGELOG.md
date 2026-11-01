@@ -15,12 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Hyprland background input releases a key left down when a `send_key_state` batch stops between its down and up events, or when the batch's outcome is unknown, so the target app does not start its own key repeat. The error says whether the release went through.
-- An element action whose target window shares its pid with another window of the same app (Chromium) is refused when the cached snapshot was taken for the other window. Before, a matching pid passed the check.
-- A post-action tree keeps the window it was taken for, so a follow-up action on the same window with an index from that tree passes the ownership check on i3, sway and COSMIC instead of asking for a new `get_app_state`. The snapshot's window, encoding and window scope are now stored together, so a concurrent call can no longer stamp one snapshot's window scope onto another.
-- `perform_action` and `set_value` with `screenshot_after: "window"` refuse the crop when the target window is not focused, since they do not raise it and the crop could show whatever covers it.
-- A window title from the compositor that decorates the accessibility frame name, such as `PlanetScale - Chromium (Profile 1)` for the frame `PlanetScale - Chromium`, now narrows the tree to that window.
-- Hyprland background mode checks that the target is a Hyprland window before it refuses input it cannot map, and refuses modifiers with no key (`Ctrl+Shift`) as `press_key` does on every other backend.
+- Hyprland background input releases a key left down when a `send_key_state` batch stops between its down and up events, or when the batch's outcome is unknown, so the target app does not start its own key repeat. The error says whether the release went through, and the release waits at most a second.
+- An element action whose target window shares its pid with another window of the same app (Chromium) is refused when the cached tree was narrowed to the other window. Before, a matching pid passed the check. An app-wide tree holds every window, so its nodes still pass on the pid.
+- A post-action tree keeps the window it was taken for, so a follow-up action on the same window with an index from that tree passes the ownership check instead of asking for a new `get_app_state`. A window with no pid (i3, sway, COSMIC) is recorded only when the tree was narrowed to its frame, and its tree no longer borrows the previous snapshot's app. The snapshot's window, encoding and window scope are now stored together, so a concurrent call can no longer stamp one snapshot's window scope onto another.
+- `perform_action`, `set_value`, and `press_key` and `type_text` in Hyprland background mode refuse a `screenshot_after: "window"` crop when the target window is not focused, since they do not raise it and the crop could show whatever covers it.
+- A compositor title that decorates the accessibility frame name, such as `PlanetScale - Chromium (Profile 1)` for the frame `PlanetScale - Chromium`, now narrows the tree to that window: the longest frame name the title starts with, followed by ` (...)` or ` - ...`.
+- Hyprland background mode checks that the target is a Hyprland window before it refuses input it cannot map, and takes the `press_key` grammar of every other backend, so modifiers with no key (`Ctrl+Shift`) are refused. Background window capture reads the window's `stableId` from the listing that resolved it instead of listing every client again.
+- `perform_action` and `set_value` with a window-style target and a `pid` fall back to the pid for the ownership check when the window listing is unavailable, as on GNOME without the Shell extension. Without a pid they still refuse.
 
 ## [0.7.35] - 2026-10-31
 

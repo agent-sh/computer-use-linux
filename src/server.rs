@@ -2309,7 +2309,8 @@ impl ComputerUseLinux {
         let capture = params.capture.clone();
         let target = params.window_target();
         let Json(output) = self.dispatch_press_key(params).await;
-        self.finish_action_output(output, &capture, Some(&target), TargetRaised::Yes)
+        let raised = keyboard_target_raised(&target);
+        self.finish_action_output(output, &capture, Some(&target), raised)
             .await
     }
 
@@ -2321,7 +2322,10 @@ impl ComputerUseLinux {
                 "press_key",
                 &params.window_target(),
                 &params.key,
-                crate::hyprland_input::chord_to_key_press(&params.key)
+                // The shared press_key grammar decides what is a key, so
+                // background mode accepts exactly what every backend accepts.
+                key_chord(&params.key)
+                    .and_then(|_| crate::hyprland_input::chord_to_key_press(&params.key))
                     .map(|press| vec![press])
                     .ok_or_else(|| {
                         "Unsupported key. Use names like Enter, Escape, Tab, ArrowLeft, Super, Ctrl+L, or a single US keyboard letter/digit.".to_string()
@@ -2564,7 +2568,8 @@ impl ComputerUseLinux {
                 " Field contents were not verified; re-observe the target before retrying.",
             );
         }
-        self.finish_action_output(output, &capture, Some(&target), TargetRaised::Yes)
+        let raised = keyboard_target_raised(&target);
+        self.finish_action_output(output, &capture, Some(&target), raised)
             .await
     }
 
@@ -4912,11 +4917,19 @@ impl ComputerUseLinux {
                         .flatten()
                 };
             }
+            // A tree for a named window must not borrow the previous
+            // snapshot's app: on i3, sway and COSMIC the window has no pid, and
+            // that app may not be the one holding it.
+            let window_targeted = resolved_window.is_some()
+                && (target.is_some_and(WindowTarget::has_target) || fallback_window.is_some());
             let target_pid = resolved_window
                 .as_ref()
                 .and_then(|window| window.pid)
                 .or_else(|| target.and_then(|target| target.pid))
                 .or_else(|| {
+                    if window_targeted {
+                        return None;
+                    }
                     self.last_snapshot
                         .lock()
                         .ok()
@@ -4982,13 +4995,11 @@ impl ComputerUseLinux {
                         snapshot.scoped,
                         snapshot.truncated,
                     );
-                    // Record the window the tree was taken for, so a follow-up
-                    // action on the same window passes the ownership check. A
-                    // focused-window guess is not a target and is not recorded.
-                    let tree_window = resolved_window.as_ref().filter(|window| {
-                        (target.is_some_and(WindowTarget::has_target) || fallback_window.is_some())
-                            && window.pid.is_none_or(|pid| snapshot.root_pid == Some(pid))
-                    });
+                    let tree_window = post_action_tree_window(
+                        resolved_window.as_ref().filter(|_| window_targeted),
+                        snapshot.root_pid,
+                        snapshot.window_scope.as_deref(),
+                    );
                     self.commit_observed_snapshot(
                         &nodes,
                         snapshot.root_pid,
@@ -5446,7 +5457,7 @@ impl ComputerUseLinux {
         Some(
             async {
                 let capture =
-                    crate::windowing::backends::hyprland::capture_window(window.window_id).await?;
+                    crate::windowing::backends::hyprland::capture_window(window).await?;
                 let note = capture.hidden_workspace.as_ref().map(|hidden| {
                     let state = if hidden.settled {
                         "the last two frames matched, so the image is current"
@@ -5493,14 +5504,7 @@ impl ComputerUseLinux {
         presses: std::result::Result<Vec<crate::hyprland_input::KeyPress>, String>,
         received: Option<serde_json::Value>,
     ) -> Option<ActionOutput> {
-        if !crate::hyprland_input::background_enabled()
-            || !target.has_target()
-            || !env::var("XDG_CURRENT_DESKTOP").is_ok_and(|desktop| {
-                desktop
-                    .split(':')
-                    .any(|part| part.eq_ignore_ascii_case("hyprland"))
-            })
-        {
+        if !hyprland_background_applies(target) {
             return None;
         }
         let fail = |message: String| Some(action_result(action, Err(message), received.clone()));
@@ -6131,9 +6135,9 @@ impl ComputerUseLinux {
     /// a snapshot taken for a pid is judged by that pid; an untargeted
     /// snapshot mixes apps, so its node is judged by the pid that owns it on
     /// the accessibility bus. When neither is known the action proceeds, since
-    /// a mismatch cannot be shown. When the pids match and both the target
-    /// and the snapshot name a window, the windows must match too, since an
-    /// app's windows share its pid. A window target with no known pid (i3,
+    /// a mismatch cannot be shown. When the pids match and the snapshot's tree
+    /// was narrowed to one window of the app, a window target must name that
+    /// window, since an app's windows share its pid. A window target with no known pid (i3,
     /// sway and COSMIC report none) is judged by the snapshot's window and
     /// fails closed when the snapshot recorded no comparable window.
     async fn check_node_target(
@@ -6156,11 +6160,20 @@ impl ComputerUseLinux {
                     node.index, owner_pid, target_pid,
                 ));
             }
-            // Windows of one app share its pid. A snapshot taken for another
-            // window of the same app is still refused.
+            // Windows of one app share its pid. A tree narrowed to another
+            // window of the same app is still refused; an app-wide tree holds
+            // every window, so its nodes pass on the pid.
             let Some((target_window, target_backend)) = target.window.as_ref() else {
                 return Ok(());
             };
+            let narrowed = self
+                .last_snapshot
+                .lock()
+                .ok()
+                .is_some_and(|snapshot| snapshot.window_scope.is_some());
+            if !narrowed {
+                return Ok(());
+            }
             return match self.snapshot_window() {
                 Some((window_id, backend))
                     if backend == *target_backend && window_id != *target_window =>
@@ -7854,6 +7867,45 @@ fn prepare_app_state_screenshot(
     prepare_screenshot_payload(raw, options)
 }
 
+/// Whether targeted keyboard input goes through Hyprland background mode,
+/// which never raises or focuses the target.
+fn hyprland_background_applies(target: &WindowTarget) -> bool {
+    crate::hyprland_input::background_enabled()
+        && target.has_target()
+        && env::var("XDG_CURRENT_DESKTOP").is_ok_and(|desktop| {
+            desktop
+                .split(':')
+                .any(|part| part.eq_ignore_ascii_case("hyprland"))
+        })
+}
+
+/// What a targeted keyboard action did to its window, for the post-action
+/// window crop.
+fn keyboard_target_raised(target: &WindowTarget) -> TargetRaised {
+    if hyprland_background_applies(target) {
+        TargetRaised::No
+    } else {
+        TargetRaised::Yes
+    }
+}
+
+/// The window a post-action tree can be recorded as taken for, so a
+/// follow-up action on that window passes the ownership check. A window with
+/// a pid needs the tree to come from that pid. A window without one (i3,
+/// sway, COSMIC) needs the tree narrowed to the frame its title names; an
+/// app-wide tree may hold another app's nodes, and recording it would let
+/// them pass. A focused-window guess is never passed in.
+fn post_action_tree_window<'a>(
+    window: Option<&'a WindowInfo>,
+    root_pid: Option<u32>,
+    window_scope: Option<&str>,
+) -> Option<&'a WindowInfo> {
+    window.filter(|window| match window.pid {
+        Some(pid) => root_pid == Some(pid),
+        None => window_scope.is_some(),
+    })
+}
+
 /// A crop of a targeted window the action did not raise could show whatever
 /// covers it, so it needs the window to be focused already.
 fn ensure_post_action_crop_shows_target(
@@ -8377,10 +8429,17 @@ fn check_identifier_owner(
 }
 
 /// Resolve a window-style element action target against a window listing.
+///
+/// When the window listing itself is unavailable (GNOME without the Shell
+/// extension) and the call also passed a pid, the pid still proves
+/// ownership, so the check falls back to it. Without a pid it fails closed.
 fn element_action_owner_from(
     windows: Result<Vec<WindowInfo>>,
     target: &WindowTarget,
 ) -> std::result::Result<ElementOwnerTarget, String> {
+    if windows.is_err() && target.pid.is_some() {
+        return Ok(ElementOwnerTarget::pid(target.pid));
+    }
     windows
         .and_then(|windows| {
             resolve_window_target(&windows, target)
@@ -16478,6 +16537,29 @@ mod node_target_scope_tests {
     }
 
     #[test]
+    fn unlisted_windows_fall_back_to_a_passed_pid_only() {
+        let with_pid = WindowTarget {
+            app_id: Some("org.gnome.TextEditor".to_string()),
+            pid: Some(7),
+            ..Default::default()
+        };
+        assert_eq!(
+            element_action_owner_from(Err(anyhow::anyhow!("no window backend")), &with_pid),
+            Ok(ElementOwnerTarget::pid(Some(7)))
+        );
+        let without_pid = WindowTarget {
+            app_id: Some("org.gnome.TextEditor".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            element_action_owner_from(Err(anyhow::anyhow!("no window backend")), &without_pid)
+                .is_err()
+        );
+        // A listing that works but does not match still fails closed.
+        assert!(element_action_owner_from(Ok(vec![pidless_window(20)]), &with_pid).is_err());
+    }
+
+    #[test]
     fn unraised_target_window_crop_needs_focus() {
         let target = WindowTarget {
             window_id: Some(20),
@@ -16508,11 +16590,15 @@ mod node_target_scope_tests {
         window_20.pid = Some(7);
         let mut window_10 = pidless_window(10);
         window_10.pid = Some(7);
-        backend.cache_snapshot_with_window(
+        backend.store_snapshot(
             std::slice::from_ref(&node),
             Some(7),
             None,
             Some(&window_20),
+            TreeShape {
+                detail: NodeDetail::Compact,
+                window_scope: Some("Window 20".to_string()),
+            },
         );
 
         assert_eq!(
@@ -16531,6 +16617,30 @@ mod node_target_scope_tests {
             .check_node_target(&node, &ElementOwnerTarget::pid(Some(7)))
             .await
             .is_ok());
+        // An app-wide tree holds every window: its nodes pass on the pid.
+        backend.cache_snapshot_with_window(
+            std::slice::from_ref(&node),
+            Some(7),
+            None,
+            Some(&window_20),
+        );
+        assert!(backend
+            .check_node_target(&node, &ElementOwnerTarget::window(&window_10, None))
+            .await
+            .is_ok());
+    }
+
+    #[test]
+    fn post_action_tree_records_only_a_window_it_holds() {
+        let mut with_pid = pidless_window(20);
+        with_pid.pid = Some(7);
+        assert!(post_action_tree_window(Some(&with_pid), Some(7), None).is_some());
+        assert!(post_action_tree_window(Some(&with_pid), Some(8), None).is_none());
+        // No pid: only a tree narrowed to the window's frame is recorded.
+        let pidless = pidless_window(20);
+        assert!(post_action_tree_window(Some(&pidless), Some(8), None).is_none());
+        assert!(post_action_tree_window(Some(&pidless), None, Some("Window 20")).is_some());
+        assert!(post_action_tree_window(None, Some(7), Some("Window 20")).is_none());
     }
 
     #[tokio::test]
