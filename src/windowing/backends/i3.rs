@@ -80,7 +80,7 @@ pub(crate) fn parse_i3_tree(json: &str) -> Result<Vec<WindowInfo>> {
 }
 
 pub async fn activate_window(window_id: u64) -> Result<()> {
-    let selector = format!(r#"[id="0x{window_id:x}"] focus"#);
+    let selector = i3_focus_command(window_id);
     let mut command = i3_msg_command_async();
     command.arg(&selector);
     let output = command_runner::output(command, &format!("run i3-msg {selector}")).await?;
@@ -110,6 +110,12 @@ pub async fn activate_window(window_id: u64) -> Result<()> {
             }
         );
     }
+}
+
+/// Sway parses the `id` criterion as a decimal number and rejects hex.
+/// i3 accepts both forms, so decimal works with either compositor.
+pub(crate) fn i3_focus_command(window_id: u64) -> String {
+    format!(r#"[id="{window_id}"] focus"#)
 }
 
 fn collect_i3_windows(

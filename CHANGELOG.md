@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `activate_window` with the i3 backend on Sway focuses Xwayland windows. The backend sent the window id in hex, which Sway rejects with `The value for 'id' should be numeric`; it now sends the decimal id, which i3 also accepts ([#357](https://github.com/agent-sh/computer-use-linux/issues/357)).
+
 ## [0.7.36] - 2026-11-01
 
 ### Added

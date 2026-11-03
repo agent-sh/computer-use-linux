@@ -24,7 +24,7 @@ pub use types::{WindowBounds, WindowFocusResult, WindowInfo, WindowTarget};
 mod tests {
     use super::backends::gnome::window_from_properties;
     use super::backends::hyprland::{parse_hyprland_clients, HYPRLAND_BACKEND};
-    use super::backends::i3::{parse_i3_tree, parse_xprop_pid, I3_BACKEND};
+    use super::backends::i3::{i3_focus_command, parse_i3_tree, parse_xprop_pid, I3_BACKEND};
     use super::registry::{
         descriptors, list_note, COSMIC_WAYLAND_BACKEND, GNOME_SHELL_EXTENSION_BACKEND,
         GNOME_SHELL_INTROSPECT_BACKEND,
@@ -716,6 +716,12 @@ mod tests {
         assert_eq!(windows[0].bounds.as_ref().unwrap().x, Some(0));
         assert_eq!(windows[1].title.as_deref(), Some("Save File"));
         assert_eq!(windows[1].bounds.as_ref().unwrap().width, 600);
+    }
+
+    #[test]
+    fn i3_focus_command_uses_decimal_window_id() {
+        // Sway rejects `[id="0x40000c"]` with "The value for 'id' should be numeric".
+        assert_eq!(i3_focus_command(0x40000c), r#"[id="4194316"] focus"#);
     }
 
     #[test]
