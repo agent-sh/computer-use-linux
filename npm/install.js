@@ -23,8 +23,16 @@ const indicatorPath = path.join(binDir, 'computer-use-linux-indicator');
 // MCP client's startup open and outlive it when the client gives up.
 const IDLE_TIMEOUT_MS = 30_000;
 
+// Messages can carry paths and URLs from the environment. JSON string
+// escaping turns CR, LF and the other C0 control characters (U+0000-U+001F)
+// into visible escapes, so a value with a newline cannot forge a log line.
+function say(write, message) {
+  const safe = JSON.stringify(String(message)).slice(1, -1);
+  write(`[computer-use-linux] ${safe}`);
+}
+
 function fail(message) {
-  console.error(`[computer-use-linux] ${message}`);
+  say(console.error, message);
   process.exit(1);
 }
 
@@ -53,7 +61,7 @@ function copyLocalBinary(source) {
     place(process.env.COMPUTER_USE_LINUX_LOCAL_INDICATOR, indicatorPath);
   }
   place(source, binaryPath);
-  console.log(`[computer-use-linux] installed local binary from ${source}`);
+  say(console.log, `installed local binary from ${source}`);
 }
 
 function download(url, destination, redirects = 5) {
@@ -141,7 +149,7 @@ function sha256File(filePath) {
 
 async function main() {
   if (process.env.COMPUTER_USE_LINUX_SKIP_DOWNLOAD === '1') {
-    console.log('[computer-use-linux] skipping binary download');
+    say(console.log, 'skipping binary download');
     return;
   }
 
@@ -182,7 +190,7 @@ async function main() {
   const tmpIndicatorSha = path.join(tmpDir, `${indicatorAsset}.sha256`);
 
   try {
-    console.log(`[computer-use-linux] downloading ${asset} from ${baseUrl}`);
+    say(console.log, `downloading ${asset} from ${baseUrl}`);
     await download(`${baseUrl}/${asset}`, tmpBinary);
     await download(`${baseUrl}/${asset}.sha256`, tmpSha);
     await download(`${baseUrl}/${cosmicAsset}`, tmpCosmic);
@@ -222,7 +230,10 @@ async function main() {
       fs.rmSync(indicatorPath, { force: true });
     }
     place(tmpBinary, binaryPath);
-    console.log(`[computer-use-linux] installed ${asset} and ${cosmicAsset}${hasIndicator ? ` and ${indicatorAsset}` : ' (release has no indicator)'}`);
+    say(
+      console.log,
+      `installed ${asset} and ${cosmicAsset}${hasIndicator ? ` and ${indicatorAsset}` : ' (release has no indicator)'}`
+    );
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

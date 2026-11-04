@@ -103,6 +103,8 @@ def check(kind, scenario):
             indicator.with_name(indicator.name + ".sha256").unlink()
         elif scenario in ("http500", "network-error", "stall"):
             indicator.with_name(indicator.name + "." + scenario).touch()
+        elif scenario == "log-injection":
+            (release / f"{NAMES[0]}-{TARGET}").unlink()
         elif scenario.startswith("missing-"):
             (release / f"{NAMES[int(scenario[-1])]}-{TARGET}").unlink()
 
@@ -138,6 +140,9 @@ def check(kind, scenario):
             mock = base / "https.cjs"
             mock.write_text(HTTPS)
             env["COMPUTER_USE_LINUX_DOWNLOAD_BASE"] = "https://fixture.invalid/release"
+            if scenario == "log-injection":
+                # A newline in an env value must not start a forged log line.
+                env["COMPUTER_USE_LINUX_DOWNLOAD_BASE"] += "\n[computer-use-linux] forged"
             destination = package / "npm/bin"
             if kind == "npm-wrapper":
                 # npm 12 skipped the postinstall: the wrapper installs on first launch.
@@ -180,6 +185,10 @@ def check(kind, scenario):
         if scenario in ("read-only", "skip-download"):
             requested = (base / "requests").read_text() if (base / "requests").exists() else ""
             assert requested == "", f"{scenario} downloaded {requested!r}"
+        if scenario == "log-injection":
+            lines = (result.stdout + result.stderr).splitlines()
+            assert not any(line.startswith("[computer-use-linux] forged") for line in lines), detail
+            assert "\\n[computer-use-linux] forged" in result.stdout + result.stderr, detail
         if scenario == "stall":
             assert "no data for" in result.stderr, detail
         if not success:
@@ -220,6 +229,7 @@ def main():
     check("plugin-wget", "http500")
     check("npm", "network-error")
     check("npm", "stall")
+    check("npm", "log-injection")
     for scenario in ("present", "old-release", "missing-0", "bad-sha", "stall", "network-error", "read-only", "skip-download"):
         check("npm-wrapper", scenario)
     print("indicator packaging: old releases, verified optional assets, failure isolation, cache reuse and Codex env OK")
