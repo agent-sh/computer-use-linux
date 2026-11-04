@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Window bounds from the i3 backend on Sway are scaled from Sway's layout coordinates to capture pixels when every active output has the same scale (never below 1, as grim captures), with edges rounded outward, and left out with mixed scales. Disabled and non-desktop outputs, which Sway lists without a scale, no longer make the output layout unreadable. On a scaled output, a window-cropped screenshot or a window-relative click used the layout rect as pixels and hit the wrong region ([#375](https://github.com/agent-sh/computer-use-linux/issues/375)).
+- The i3 backend works on Sway without the i3 package: it runs `swaymsg` when `i3-msg` is missing, and takes the first live socket of `I3SOCK` and `SWAYSOCK`, then the newest i3 socket, then the newest `sway-ipc.*.sock` in `XDG_RUNTIME_DIR`. A failed `swaymsg` command reports the error it printed on stdout ([#376](https://github.com/agent-sh/computer-use-linux/issues/376)).
+
 ## [0.7.37] - 2026-11-04
 
 ### Fixed
