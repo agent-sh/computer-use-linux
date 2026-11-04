@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.38] - 2026-11-04
+
 ### Fixed
 
 - Window bounds from the i3 backend on Sway are scaled from Sway's layout coordinates to capture pixels when every active output has the same scale (never below 1, as grim captures), with edges rounded outward, and left out with mixed scales. Disabled and non-desktop outputs, which Sway lists without a scale, no longer make the output layout unreadable. On a scaled output, a window-cropped screenshot or a window-relative click used the layout rect as pixels and hit the wrong region ([#375](https://github.com/agent-sh/computer-use-linux/issues/375)).
@@ -1034,7 +1036,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.37...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.38...HEAD
+[0.7.38]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.37...v0.7.38
 [0.7.37]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.36...v0.7.37
 [0.7.36]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.35...v0.7.36
 [0.7.35]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.34...v0.7.35
