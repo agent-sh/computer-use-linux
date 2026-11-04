@@ -11,6 +11,25 @@ documentation = "https://github.com/agent-sh/computer-use-linux#readme"
 readme = "README.md"
 keywords = ["mcp", "computer-use", "accessibility", "linux", "wayland"]
 categories = ["accessibility", "command-line-utilities", "os::linux-apis"]
+# Publish only what building and testing the crate reads, so files that are
+# not part of the crate (the npm wrapper, Pi extension, plugins, CI config or
+# a stray local file) never reach crates.io.
+include = [
+    "/src/**",
+    "/tests/**",
+    "/examples/**",
+    "/gnome-shell-extension/**",
+    "/scripts/app_state_capture_order_test.py",
+    "/scripts/cosmic_focus_test.py",
+    "/scripts/gnome_indicator_test.py",
+    "/scripts/hyprland_background_test.py",
+    "/scripts/mcp_safety_check.py",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+]
 
 [[bin]]
 name = "computer-use-linux"
