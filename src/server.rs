@@ -206,13 +206,17 @@ struct CaptureLayout {
     monitors: CaptureMonitors,
 }
 
+/// Monitor rectangles (x, y, width, height), tagged with their space.
 #[derive(Debug, Clone, Default, PartialEq)]
 enum CaptureMonitors {
     #[default]
     Unread,
     Unknown,
-    /// Logical monitor rectangles (x, y, width, height).
-    Known(Vec<(i32, i32, i32, i32)>),
+    /// Wayland logical pixels. The capture spans their bounding box.
+    Logical(Vec<(i32, i32, i32, i32)>),
+    /// X11 root-window pixels, the space of an X11 capture, which also
+    /// holds framebuffer area no monitor shows.
+    Root(Vec<(i32, i32, i32, i32)>),
 }
 
 /// The route a coordinate click or scroll took, for the off-screen note.
@@ -6190,10 +6194,10 @@ impl ComputerUseLinux {
     }
 
     /// The cached capture's monitors in capture pixels, or None when the
-    /// layout is unknown or does not scale evenly onto the capture. The
-    /// layout is read at most once per capture: from the portal session
-    /// when one is cached, as the portal checks points against it, otherwise
-    /// from the compositor, or from RandR on X11.
+    /// layout is unknown or a Wayland layout does not scale evenly onto the
+    /// capture. The layout is read at most once per capture: from the portal
+    /// session when one is cached, as the portal checks points against it,
+    /// otherwise from the compositor, or from RandR on X11.
     async fn capture_monitor_rects(
         &self,
         capture: (u32, u32),
@@ -6204,10 +6208,7 @@ impl ComputerUseLinux {
         };
         let monitors = match monitors {
             CaptureMonitors::Unread => {
-                let read = match self.read_monitor_layout().await {
-                    Some(layout) => CaptureMonitors::Known(layout),
-                    None => CaptureMonitors::Unknown,
-                };
+                let read = self.read_monitor_layout().await;
                 if let Ok(mut layout) = self.capture_layout.lock() {
                     if layout.generation == generation {
                         layout.monitors = read.clone();
@@ -6218,32 +6219,38 @@ impl ComputerUseLinux {
             read => read,
         };
         match monitors {
-            CaptureMonitors::Known(layout) => monitor_rects_in_capture(&layout, capture),
+            CaptureMonitors::Logical(rects) => monitor_rects_in_capture(&rects, capture),
+            CaptureMonitors::Root(rects) => root_monitor_rects(&rects),
             CaptureMonitors::Unread | CaptureMonitors::Unknown => None,
         }
     }
 
-    async fn read_monitor_layout(&self) -> Option<Vec<(i32, i32, i32, i32)>> {
+    async fn read_monitor_layout(&self) -> CaptureMonitors {
+        let wayland = self.is_wayland_session();
         let layout = match self
             .cached_portal_pointer_session()
             .and_then(|session| session.monitor_layout().map(<[_]>::to_vec))
         {
-            Some(layout) => layout,
+            Some(layout) => Some(layout),
             None => match crate::remote_desktop::kwin_desktop_layout().await {
-                Some(layout) => layout,
+                Some(layout) => Some(layout),
                 // An X client could make a Wayland compositor start Xwayland.
-                None if self.is_wayland_session() => {
-                    crate::remote_desktop::compositor_desktop_layout().await?
-                }
-                None => crate::remote_desktop::logical_desktop_layout().await?,
+                None if wayland => crate::remote_desktop::compositor_desktop_layout().await,
+                None => crate::remote_desktop::logical_desktop_layout().await,
             },
         };
-        Some(
-            layout
-                .iter()
-                .map(|monitor| (monitor.x, monitor.y, monitor.width, monitor.height))
-                .collect(),
-        )
+        let Some(layout) = layout else {
+            return CaptureMonitors::Unknown;
+        };
+        let rects = layout
+            .iter()
+            .map(|monitor| (monitor.x, monitor.y, monitor.width, monitor.height))
+            .collect();
+        if wayland {
+            CaptureMonitors::Logical(rects)
+        } else {
+            CaptureMonitors::Root(rects)
+        }
     }
 
     /// Post-input feedback: which AT-SPI element holds keyboard focus in the
@@ -8502,6 +8509,29 @@ fn monitor_rects_in_capture(
                     ((x + i64::from(width)) as f64 * scale_x).ceil() as i64,
                     ((y + i64::from(height)) as f64 * scale_y).ceil() as i64,
                 )
+            })
+            .collect(),
+    )
+}
+
+/// X11 monitor rectangles as (left, top, right, bottom) root pixels, the
+/// space of an X11 capture. They are not rebased or scaled: the root can be
+/// larger than the monitors' bounding box. None for an empty or invalid
+/// layout.
+fn root_monitor_rects(monitors: &[(i32, i32, i32, i32)]) -> Option<Vec<(i64, i64, i64, i64)>> {
+    if monitors.is_empty()
+        || monitors
+            .iter()
+            .any(|(_, _, width, height)| *width <= 0 || *height <= 0)
+    {
+        return None;
+    }
+    Some(
+        monitors
+            .iter()
+            .map(|&(x, y, width, height)| {
+                let (x, y) = (i64::from(x), i64::from(y));
+                (x, y, x + i64::from(width), y + i64::from(height))
             })
             .collect(),
     )
@@ -14353,7 +14383,7 @@ esac
     async fn monitor_gap_note_follows_the_route() {
         let backend = ComputerUseLinux::default();
         let known = |backend: &ComputerUseLinux, monitors: Vec<(i32, i32, i32, i32)>| {
-            backend.capture_layout.lock().unwrap().monitors = CaptureMonitors::Known(monitors);
+            backend.capture_layout.lock().unwrap().monitors = CaptureMonitors::Logical(monitors);
         };
         // A 2x capture of a logical 2240x720 layout with a gap under the
         // right monitor.
@@ -14434,6 +14464,36 @@ esac
             backend.capture_layout.lock().unwrap().monitors,
             CaptureMonitors::Unread
         );
+    }
+
+    /// An X11 capture is the whole root window, which can hold framebuffer
+    /// area no monitor shows, so RandR rectangles are used as they are.
+    #[tokio::test]
+    async fn x11_monitor_gap_note_uses_root_pixels() {
+        let backend = ComputerUseLinux::default();
+        backend.cache_desktop_size(4480, 3600);
+        backend.capture_layout.lock().unwrap().monitors =
+            CaptureMonitors::Root(vec![(0, 0, 1280, 720), (1280, 720, 960, 1080)]);
+        for (x, y) in [(100, 100), (1500, 1600), (2239, 1799)] {
+            assert_eq!(
+                backend
+                    .off_screen_note_for_point(x, y, PointerRoute::X11)
+                    .await,
+                None,
+                "{x},{y}"
+            );
+        }
+        for (x, y) in [(100, 1000), (2240, 1000), (4000, 3000)] {
+            assert!(
+                backend
+                    .off_screen_note_for_point(x, y, PointerRoute::X11)
+                    .await
+                    .is_some_and(|note| note.contains("is on no monitor")),
+                "{x},{y}"
+            );
+        }
+        assert_eq!(root_monitor_rects(&[]), None);
+        assert_eq!(root_monitor_rects(&[(0, 0, 0, 720)]), None);
     }
 
     #[test]
