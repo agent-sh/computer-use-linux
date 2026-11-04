@@ -9577,9 +9577,7 @@ where
     validate_wtype_text(text)?;
     validate_wtype_privacy(mode, secret)?;
     let available = if program.components().count() > 1 {
-        std::fs::metadata(program)
-            .map(|meta| meta.is_file())
-            .unwrap_or(false)
+        executable_file(program)
     } else {
         program.to_str().is_some_and(which_in_path)
     };
@@ -9596,7 +9594,7 @@ where
     // keys and shortcuts while wtype still exits successfully. Passing one
     // literal argument builds the complete keymap before the first key event.
     // `--` prevents option-looking text from becoming wtype commands.
-    let output = match mode {
+    let result = match mode {
         WtypeTextMode::Argument => {
             command.args(["--", text]);
             crate::command_runner::output_with_timeout(
@@ -9616,8 +9614,18 @@ where
             )
             .await
         }
-    }
-    .map_err(|error| format!("{error:#}"))?;
+    };
+    let output = match result {
+        Ok(output) => output,
+        // wtype never started, so nothing was typed: same as a missing wtype.
+        Err(error) if spawn_never_started(&error) => {
+            return fallback().await.map(|output| KeyboardCommandResult {
+                output,
+                backend: KeyboardCommandBackend::Ydotool,
+            });
+        }
+        Err(error) => return Err(format!("{error:#}")),
+    };
     if !output.status.success() {
         return Err(command_output_error("wtype", output));
     }
@@ -9900,12 +9908,29 @@ fn which_in_path(binary: &str) -> bool {
     let Ok(path) = env::var("PATH") else {
         return false;
     };
-    env::split_paths(&path).any(|dir| {
-        let candidate = dir.join(binary);
-        std::fs::metadata(&candidate)
-            .map(|meta| meta.is_file())
-            .unwrap_or(false)
-    })
+    env::split_paths(&path).any(|dir| executable_file(&dir.join(binary)))
+}
+
+/// True when the program never started: exec found no file, no permission,
+/// no usable format or interpreter, or the file stayed busy after
+/// `spawn_retrying_busy` gave up.
+fn spawn_never_started(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(|error| {
+            matches!(
+                error.raw_os_error(),
+                Some(libc::ENOENT | libc::EACCES | libc::ENOEXEC | libc::ETXTBSY)
+            )
+        })
+}
+
+/// A regular file with an execute bit set, which exec needs.
+fn executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 /// Map our key grammar onto an `xdotool key` spec such as `ctrl+a`, `Return`,
@@ -14079,16 +14104,13 @@ esac
         std::fs::create_dir_all(&dir).expect("create command test directory");
         let wtype = dir.join("wtype");
         let captured = dir.join("captured");
-        std::fs::write(
+        publish_fake_executable(
             &wtype,
-            format!(
+            &format!(
                 "#!/bin/sh\n[ \"$#\" -eq 2 ] && [ \"$1\" = -- ] || exit 42\nprintf '%s' \"$2\" > '{}'\n",
                 captured.display()
             ),
-        )
-        .expect("write fake wtype");
-        std::fs::set_permissions(&wtype, std::fs::Permissions::from_mode(0o700))
-            .expect("make fake wtype executable");
+        );
         let text =
             "--Türkçe PostgreSQL (W, g, m, v, f, ş, ü) / 0123456789 - ; 'İstanbul'\n".repeat(50);
 
@@ -14482,6 +14504,83 @@ esac
         assert!(validate_wtype_text("").is_ok());
     }
 
+    /// Write an executable script to `path` through a sibling file and a
+    /// rename, so no writable descriptor to `path` exists when it runs. A
+    /// child forked by another test thread while the script was open for
+    /// writing would otherwise make its exec fail with ETXTBSY.
+    fn publish_fake_executable(path: &Path, script: &str) {
+        let source = path.with_extension("source");
+        std::fs::write(&source, script).expect("write fake executable");
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o700))
+            .expect("make fake executable runnable");
+        std::fs::rename(&source, path).expect("publish fake executable");
+    }
+
+    async fn fallback_ran_instead_of_wtype(wtype: &Path) -> KeyboardCommandBackend {
+        run_wtype_type_text_or_fallback(wtype, "text", WtypeTextMode::Argument, false, || async {
+            TokioCommand::new("true")
+                .output()
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .expect("a wtype that cannot start should use the fallback")
+        .backend
+    }
+
+    #[tokio::test]
+    async fn non_executable_wtype_uses_ydotool_fallback() {
+        let dir = std::env::temp_dir().join(format!(
+            "computer-use-linux-wtype-nonexec-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).expect("create command test directory");
+        let wtype = dir.join("wtype");
+        std::fs::write(&wtype, "#!/bin/sh\nexit 0\n").expect("write fake wtype");
+
+        assert_eq!(
+            fallback_ran_instead_of_wtype(&wtype).await,
+            KeyboardCommandBackend::Ydotool
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn missing_wtype_interpreter_uses_ydotool_fallback() {
+        let dir = std::env::temp_dir().join(format!(
+            "computer-use-linux-wtype-interpreter-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).expect("create command test directory");
+        let wtype = dir.join("wtype");
+        publish_fake_executable(&wtype, "#!/definitely/missing/interpreter\n");
+
+        assert_eq!(
+            fallback_ran_instead_of_wtype(&wtype).await,
+            KeyboardCommandBackend::Ydotool
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn wtype_on_path_must_be_executable() {
+        let dir = std::env::temp_dir().join(format!(
+            "computer-use-linux-wtype-path-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).expect("create command test directory");
+        let wtype = dir.join("wtype");
+        std::fs::write(&wtype, "#!/bin/sh\nexit 0\n").expect("write fake wtype");
+        assert!(!executable_file(&wtype));
+        std::fs::set_permissions(&wtype, std::fs::Permissions::from_mode(0o700))
+            .expect("make fake wtype executable");
+        assert!(executable_file(&wtype));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn launched_wtype_failure_does_not_replay_through_ydotool() {
         let dir = std::env::temp_dir().join(format!(
@@ -14492,9 +14591,7 @@ esac
         std::fs::create_dir_all(&dir).expect("create command test directory");
         let wtype = dir.join("wtype");
         let fallback_marker = dir.join("ydotool-ran");
-        std::fs::write(&wtype, "#!/bin/sh\nexit 9\n").expect("write fake wtype");
-        std::fs::set_permissions(&wtype, std::fs::Permissions::from_mode(0o700))
-            .expect("make fake wtype executable");
+        publish_fake_executable(&wtype, "#!/bin/sh\nexit 9\n");
 
         let result = run_wtype_type_text_or_fallback(
             &wtype,
