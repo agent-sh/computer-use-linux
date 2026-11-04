@@ -28,6 +28,14 @@ pub(crate) struct PointerLanding {
     pub(crate) emitted: (i32, i32),
 }
 
+/// Where a drag pressed and where it released, after edge clamping.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use = "drag endpoints may be clamped; inspect requested and emitted coordinates"]
+pub(crate) struct DragLanding {
+    pub(crate) start: PointerLanding,
+    pub(crate) end: PointerLanding,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct AbsPointerGeometry {
     max_x: i32,
@@ -176,31 +184,36 @@ impl AbsPointer {
     }
 
     /// Press at `(start)`, move to `(end)`, release — a drag with `button`.
+    /// Reports where the press and the release were emitted after clamping.
     pub fn drag(
         &mut self,
         start: (i32, i32),
         end: (i32, i32),
         button: PointerButton,
-    ) -> Result<()> {
+    ) -> Result<DragLanding> {
         let code = button.key_code();
-        // Drag currently reports backend success only; retain the landing
-        // values explicitly so their intentional omission stays visible.
-        let _start_landing = self.move_to(start.0, start.1)?;
+        let start_landing = self.move_to(start.0, start.1)?;
         sleep(Duration::from_millis(30));
         if let Err(error) = self.press_button(code) {
             return Err(self.release_after_error(code, error));
         }
         sleep(Duration::from_millis(40));
+        // The path ends at `end`, so its last motion is where the release goes.
+        let mut end_landing = start_landing;
         for (x, y) in crate::pointer_path::drag_points(start, end) {
-            if let Err(error) = self.move_to(x, y) {
-                return Err(self.release_after_error(code, error));
+            match self.move_to(x, y) {
+                Ok(landing) => end_landing = landing,
+                Err(error) => return Err(self.release_after_error(code, error)),
             }
             sleep(crate::pointer_path::DRAG_STEP_DELAY);
         }
         if let Err(error) = self.release_button(code) {
             return Err(self.release_after_error(code, error));
         }
-        Ok(())
+        Ok(DragLanding {
+            start: start_landing,
+            end: end_landing,
+        })
     }
 
     fn press_button(&mut self, code: u16) -> Result<()> {
@@ -259,7 +272,7 @@ impl PointerButton {
 pub(crate) mod tests {
     use super::{
         AbsPointer, AbsPointerGeometry, EventType, InputEvent, KeyCode, PointerButton,
-        PointerEvents,
+        PointerEvents, PointerLanding,
     };
 
     #[test]
@@ -395,6 +408,43 @@ pub(crate) mod tests {
             error.contains("best-effort button release also failed"),
             "{error}"
         );
+    }
+
+    /// A drag reports both endpoints after the clamp, and its last motion,
+    /// where the release goes, is the clamped end (#398).
+    #[test]
+    fn drag_reports_where_both_endpoints_landed() {
+        let events = RecordedEvents::default();
+        let mut pointer = AbsPointer::with_events(events.clone(), 100, 100);
+
+        let landing = pointer
+            .drag((-5, 10), (150, 60), PointerButton::Left)
+            .unwrap();
+
+        assert_eq!(
+            landing.start,
+            PointerLanding {
+                requested: (-5, 10),
+                emitted: (0, 10),
+            }
+        );
+        assert_eq!(
+            landing.end,
+            PointerLanding {
+                requested: (150, 60),
+                emitted: (99, 60),
+            }
+        );
+        let motion: Vec<i32> = events
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(kind, _, _)| *kind == EventType::ABSOLUTE.0)
+            .map(|(_, _, value)| *value)
+            .collect();
+        assert_eq!(motion[..2], [0, 10]);
+        assert_eq!(motion[motion.len() - 2..], [99, 60]);
     }
 
     #[test]

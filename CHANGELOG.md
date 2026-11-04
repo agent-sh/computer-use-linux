@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `drag` results get the off-screen and monitor-gap warnings that `click` and `scroll` results get, one for each endpoint, naming the start or end coordinate. A drag used to get none on any route. On X11 and the uinput pointer it reported success with no warning when an endpoint off the screenshot had been moved to an edge, or an endpoint between monitors had landed at a monitor edge or on no visible pixel. A failed X11 or ydotool drag gets no warning, as a failed click does.
+- A uinput `drag` result says where an off-screen endpoint was clamped to, as a click result does, and checks the clamped point against the monitors.
+- A portal `drag` with an endpoint off the shared monitors still sends nothing. Its error now names each endpoint that stopped it and says whether that point is off the screenshot or on no monitor.
+
 ## [0.7.42] - 2026-11-05
 
 ### Fixed

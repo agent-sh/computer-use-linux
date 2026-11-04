@@ -202,6 +202,13 @@ def run_private(directory):
                      ('click', {'x': 10, 'y': 20, 'relative': True, 'window_id': 1}, False),
                      ('drag', {'start_x': 100, 'start_y': 100, 'end_x': 3820, 'end_y': 710}, False),
                      ('drag', {'start_x': 100, 'start_y': 50, 'end_x': 3820, 'end_y': 410}, False),
+                     # 3000,100 is above the right monitor, on no monitor; 5000,700 is off
+                     # the 4240x1440 capture. The portal sends nothing and names each endpoint.
+                     ('drag', {'start_x': 3000, 'start_y': 100, 'end_x': 5000, 'end_y': 700,
+                               '_notes': ['WARNING: start coordinate 3000,100 is on no monitor of the captured desktop (4240x1440).',
+                                          'WARNING: end coordinate 5000,700 is outside the captured desktop (4240x1440).']}, 'unsent'),
+                     ('drag', {'start_x': 100, 'start_y': 100, 'end_x': 3000, 'end_y': 100,
+                               '_notes': ['WARNING: end coordinate 3000,100 is on no monitor of the captured desktop (4240x1440).']}, 'unsent'),
                      ('type_text', {'text': 'implicit app focus', '_introspect': True, '_keep_focus': True}, False),
                      ('type_text', {'text': 'app focus', 'app_id': 'fixture.editor', '_introspect': True, '_keep_focus': True}, False),
                      ('press_key', {'key': 'Enter', '_introspect': True, '_keep_focus': True}, False),
@@ -211,6 +218,7 @@ def run_private(directory):
                      ('press_key', {'key': 'Enter', '_introspect': True}, 'changed')]
         for name, arguments, denied in scenarios:
             introspect = arguments.pop('_introspect', False)
+            notes = arguments.pop('_notes', [])
             overview = False
             os.environ['CUL_TEST_KEEP_FOCUS'] = '1' if arguments.pop('_keep_focus', False) else '0'
             env['CUL_TEST_INTROSPECT'] = '1' if introspect else '0'
@@ -233,12 +241,16 @@ def run_private(directory):
                         assert not log, log
                         if denied == 'cancel':
                             assert 'RemoteDesktop Start denied' in output['message'], output
+                        if notes:
+                            assert output['message'].endswith(' ' + ' '.join(notes)), output
                     else:
                         assert not result.get('isError') and output['ok'], output
                         assert log, 'no portal input recorded'
                         if name in ('type_text', 'press_key') or arguments.get('window_id') or arguments.get('app_id'):
                             assert all(item[1] == '1' for item in log), log
                         if name in ('click', 'drag', 'scroll'):
+                            # Every sent point is on a shared monitor, even where a drag crosses the gap.
+                            assert 'WARNING' not in output['message'], output
                             motions = [item[2] for item in log if item[0] == 'NotifyPointerMotionAbsolute']
                             expected = (20, 1260.0, 320.0) if not arguments.get('relative') else (20, 110.0, 70.0)
                             if name == 'drag':

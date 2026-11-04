@@ -219,7 +219,7 @@ enum CaptureMonitors {
     Root(Vec<(i32, i32, i32, i32)>),
 }
 
-/// The route a coordinate click or scroll took, for the off-screen note.
+/// The route a coordinate click, scroll or drag took, for the off-screen note.
 /// Each one treats a point on no monitor differently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PointerRoute {
@@ -2345,25 +2345,26 @@ impl ComputerUseLinux {
         }
         let input_guard = Arc::try_unwrap(input_guard)
             .expect("pixelflux fallback must not retain dispatched input");
+        let start = (params.start_x, params.start_y);
+        let end = (params.end_x, params.end_y);
 
         if self.should_prefer_xdotool_pointer() {
             let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
-                run_xdotool_drag(
-                    Path::new("xdotool"),
-                    (params.start_x, params.start_y),
-                    (params.end_x, params.end_y),
-                )
-                .await
+                run_xdotool_drag(Path::new("xdotool"), start, end).await
             })
             .await;
             let _input_guard = input_guard;
             let mut output = action_result("drag", result, received);
-            if output.ok {
-                output.message =
-                    "Drag dispatched through xdotool (X11 XTEST); verify the drop target."
-                        .to_string();
+            // A failed drag gets no note, as a failed click does.
+            if !output.ok {
+                return Json(output);
             }
-            return Json(output);
+            output.message =
+                "Drag dispatched through xdotool (X11 XTEST); verify the drop target.".to_string();
+            let notes = self
+                .drag_off_screen_notes(start, end, PointerRoute::X11)
+                .await;
+            return Json(with_notes(output, notes));
         }
         // Preferred backend: the uinput absolute pointer (accurate landing).
         let abs_pointer_ready = match self.ensure_abs_pointer().await {
@@ -2381,24 +2382,24 @@ impl ComputerUseLinux {
             let pointer = Arc::clone(&self.abs_pointer);
             let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
                 run_abs_pointer(pointer, move |pointer| {
-                    pointer.drag(
-                        (params.start_x, params.start_y),
-                        (params.end_x, params.end_y),
-                        crate::abs_pointer::PointerButton::Left,
-                    )
+                    pointer.drag(start, end, crate::abs_pointer::PointerButton::Left)
                 })
                 .await
             })
             .await;
             let _input_guard = input_guard;
+            let notes = self.uinput_drag_notes(&result).await;
             return Json(match result {
-                Ok(()) => ActionOutput {
-                    ok: true,
-                    implemented: true,
-                    action: "drag".to_string(),
-                    message: "Action sent through the uinput absolute pointer.".to_string(),
-                    received,
-                },
+                Ok(_) => with_notes(
+                    ActionOutput {
+                        ok: true,
+                        implemented: true,
+                        action: "drag".to_string(),
+                        message: "Action sent through the uinput absolute pointer.".to_string(),
+                        received,
+                    },
+                    notes,
+                ),
                 Err(error) => abs_pointer_error("drag", error, received),
             });
         }
@@ -2408,17 +2409,25 @@ impl ComputerUseLinux {
         let input_guard = InputOperationGuard::new(input_guard);
         if let Some(session) = self.cached_portal_pointer_session() {
             let _ = self.capture_space_rect().await;
-            let Some((start_x, start_y)) =
-                self.logical_portal_point(&session, params.start_x, params.start_y)
+            // The portal sends nothing unless both endpoints are on a shared
+            // monitor, so the notes say which endpoint stopped it.
+            let portal_notes = self
+                .drag_off_screen_notes(start, end, PointerRoute::Portal)
+                .await;
+            let Some((start_x, start_y)) = self.logical_portal_point(&session, start.0, start.1)
             else {
                 self.clear_portal_pointer_session(&session);
-                return Json(portal_coordinate_error("drag", received));
+                return Json(with_notes(
+                    portal_coordinate_error("drag", received),
+                    portal_notes,
+                ));
             };
-            let Some((end_x, end_y)) =
-                self.logical_portal_point(&session, params.end_x, params.end_y)
-            else {
+            let Some((end_x, end_y)) = self.logical_portal_point(&session, end.0, end.1) else {
                 self.clear_portal_pointer_session(&session);
-                return Json(portal_coordinate_error("drag", received));
+                return Json(with_notes(
+                    portal_coordinate_error("drag", received),
+                    portal_notes,
+                ));
             };
             match portal_drag(
                 &session,
@@ -2431,34 +2440,48 @@ impl ComputerUseLinux {
             .await
             {
                 Ok(()) => {
-                    return Json(ActionOutput {
-                        ok: true,
-                        implemented: true,
-                        action: "drag".to_string(),
-                        message: "Action sent through the remote desktop portal.".to_string(),
-                        received,
-                    });
+                    return Json(with_notes(
+                        ActionOutput {
+                            ok: true,
+                            implemented: true,
+                            action: "drag".to_string(),
+                            message: "Action sent through the remote desktop portal.".to_string(),
+                            received,
+                        },
+                        portal_notes,
+                    ));
                 }
                 Err(error) => {
                     self.clear_portal_pointer_session(&session);
-                    return Json(portal_action_error("drag", error, received));
+                    return Json(with_notes(
+                        portal_action_error("drag", error, received),
+                        portal_notes,
+                    ));
                 }
             }
         } else if self.should_prefer_portal_pointer_backend().await {
             let _ = self.capture_space_rect().await;
             match self.ensure_portal_pointer_session().await {
                 Ok(Some(session)) => {
+                    let portal_notes = self
+                        .drag_off_screen_notes(start, end, PointerRoute::Portal)
+                        .await;
                     let Some((start_x, start_y)) =
-                        self.logical_portal_point(&session, params.start_x, params.start_y)
+                        self.logical_portal_point(&session, start.0, start.1)
                     else {
                         self.clear_portal_pointer_session(&session);
-                        return Json(portal_coordinate_error("drag", received));
+                        return Json(with_notes(
+                            portal_coordinate_error("drag", received),
+                            portal_notes,
+                        ));
                     };
-                    let Some((end_x, end_y)) =
-                        self.logical_portal_point(&session, params.end_x, params.end_y)
+                    let Some((end_x, end_y)) = self.logical_portal_point(&session, end.0, end.1)
                     else {
                         self.clear_portal_pointer_session(&session);
-                        return Json(portal_coordinate_error("drag", received));
+                        return Json(with_notes(
+                            portal_coordinate_error("drag", received),
+                            portal_notes,
+                        ));
                     };
                     match portal_drag(
                         &session,
@@ -2471,18 +2494,24 @@ impl ComputerUseLinux {
                     .await
                     {
                         Ok(()) => {
-                            return Json(ActionOutput {
-                                ok: true,
-                                implemented: true,
-                                action: "drag".to_string(),
-                                message: "Action sent through the remote desktop portal."
-                                    .to_string(),
-                                received,
-                            });
+                            return Json(with_notes(
+                                ActionOutput {
+                                    ok: true,
+                                    implemented: true,
+                                    action: "drag".to_string(),
+                                    message: "Action sent through the remote desktop portal."
+                                        .to_string(),
+                                    received,
+                                },
+                                portal_notes,
+                            ));
                         }
                         Err(error) => {
                             self.clear_portal_pointer_session(&session);
-                            return Json(portal_action_error("drag", error, received));
+                            return Json(with_notes(
+                                portal_action_error("drag", error, received),
+                                portal_notes,
+                            ));
                         }
                     }
                 }
@@ -2494,11 +2523,19 @@ impl ComputerUseLinux {
             return Json(unsafe_pointer_fallback("drag", received));
         }
         let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
-            run_ydotool_drag(params.start_x, params.start_y, params.end_x, params.end_y).await
+            run_ydotool_drag(start.0, start.1, end.0, end.1).await
         })
         .await;
         let _input_guard = input_guard;
-        Json(action_result("drag", result, received))
+        let output = action_result("drag", result, received);
+        // Not Wayland, so this is the X11 route, as for click.
+        let notes = if output.ok {
+            self.drag_off_screen_notes(start, end, PointerRoute::X11)
+                .await
+        } else {
+            Vec::new()
+        };
+        Json(with_notes(output, notes))
     }
 
     #[tool(
@@ -6111,15 +6148,27 @@ impl ComputerUseLinux {
         ))
     }
 
-    /// Warn when a click/scroll coordinate is outside the captured desktop or
-    /// on none of its monitors. Click coordinates are capture pixels, so the
-    /// logical monitor layout is scaled onto the capture first; without a
-    /// layout that fits the capture, only the capture rectangle is checked.
-    /// The text says what `route` did with such a point. This is a
-    /// best-effort warning: never request a new capture (and possibly consent)
-    /// merely to decide whether to append a note to an input result.
+    /// The off-screen note for a click or scroll coordinate.
     async fn off_screen_note_for_point(
         &self,
+        x: i32,
+        y: i32,
+        route: PointerRoute,
+    ) -> Option<String> {
+        self.named_off_screen_note("coordinate", x, y, route).await
+    }
+
+    /// Warn when a point is outside the captured desktop or on none of its
+    /// monitors. `name` calls the point out, such as "coordinate" or "start
+    /// coordinate". Points are capture pixels, so the logical monitor layout
+    /// is scaled onto the capture first; without a layout that fits the
+    /// capture, only the capture rectangle is checked. The text says what
+    /// `route` did with such a point. This is a best-effort warning: never
+    /// request a new capture (and possibly consent) merely to decide whether
+    /// to append a note to an input result.
+    async fn named_off_screen_note(
+        &self,
+        name: &str,
         x: i32,
         y: i32,
         route: PointerRoute,
@@ -6142,12 +6191,12 @@ impl ComputerUseLinux {
                             });
                     Some(if in_gap {
                         format!(
-                            "WARNING: coordinate {x},{y} is outside the captured desktop ({mw}x{mh}); the X server keeps the pointer on the screen, but the nearest point there, {},{}, is on no monitor, so the input landed at a monitor edge or on no visible pixel.",
+                            "WARNING: {name} {x},{y} is outside the captured desktop ({mw}x{mh}); the X server keeps the pointer on the screen, but the nearest point there, {},{}, is on no monitor, so the input landed at a monitor edge or on no visible pixel.",
                             clamped.0, clamped.1
                         )
                     } else {
                         format!(
-                            "WARNING: coordinate {x},{y} is outside the captured desktop ({mw}x{mh}); the X server keeps the pointer on the screen, so the input landed at an edge instead."
+                            "WARNING: {name} {x},{y} is outside the captured desktop ({mw}x{mh}); the X server keeps the pointer on the screen, so the input landed at an edge instead."
                         )
                     })
                 }
@@ -6155,7 +6204,7 @@ impl ComputerUseLinux {
                 PointerRoute::Uinput => None,
                 // The portal sent nothing; its error says so.
                 PointerRoute::Portal => Some(format!(
-                    "WARNING: coordinate {x},{y} is outside the captured desktop ({mw}x{mh})."
+                    "WARNING: {name} {x},{y} is outside the captured desktop ({mw}x{mh})."
                 )),
             };
         }
@@ -6165,12 +6214,53 @@ impl ComputerUseLinux {
         }
         Some(match route {
             PointerRoute::Portal => format!(
-                "WARNING: coordinate {x},{y} is on no monitor of the captured desktop ({mw}x{mh})."
+                "WARNING: {name} {x},{y} is on no monitor of the captured desktop ({mw}x{mh})."
             ),
             PointerRoute::X11 | PointerRoute::Uinput => format!(
-                "WARNING: coordinate {x},{y} is on no monitor of the captured desktop ({mw}x{mh}); the input landed at a monitor edge or on no visible pixel."
+                "WARNING: {name} {x},{y} is on no monitor of the captured desktop ({mw}x{mh}); the input landed at a monitor edge or on no visible pixel."
             ),
         })
+    }
+
+    /// The off-screen note for each drag endpoint the route sent, naming the
+    /// start and the end. Only the endpoints are checked: the portal moves
+    /// intermediate motion onto the nearest shared monitor, and on X11 and
+    /// uinput the drop goes to the end point.
+    async fn drag_off_screen_notes(
+        &self,
+        start: (i32, i32),
+        end: (i32, i32),
+        route: PointerRoute,
+    ) -> Vec<String> {
+        let mut notes = Vec::new();
+        for (name, (x, y)) in [("start coordinate", start), ("end coordinate", end)] {
+            notes.extend(self.named_off_screen_note(name, x, y, route).await);
+        }
+        notes
+    }
+
+    /// The notes for a uinput drag: per endpoint, the clamp note, then the
+    /// monitor check of the point the device emitted.
+    async fn uinput_drag_notes(
+        &self,
+        result: &std::result::Result<crate::abs_pointer::DragLanding, String>,
+    ) -> Vec<String> {
+        let Ok(landing) = result else {
+            return Vec::new();
+        };
+        let mut notes = Vec::new();
+        for (name, landing) in [
+            ("start coordinate", landing.start),
+            ("end coordinate", landing.end),
+        ] {
+            notes.extend(abs_pointer_clamp_note(name, landing));
+            let (x, y) = landing.emitted;
+            notes.extend(
+                self.named_off_screen_note(name, x, y, PointerRoute::Uinput)
+                    .await,
+            );
+        }
+        notes
     }
 
     /// The off-screen note for a portal click or scroll at a capture point.
@@ -8856,7 +8946,7 @@ fn abs_pointer_result(
                 },
                 received,
             },
-            abs_pointer_clamp_note(landing),
+            abs_pointer_clamp_note("coordinate", landing),
         ),
         Err(error) => abs_pointer_error(action, error, received),
     }
@@ -9131,10 +9221,15 @@ fn with_notes(mut output: ActionOutput, notes: impl IntoIterator<Item = String>)
     output
 }
 
-fn abs_pointer_clamp_note(landing: crate::abs_pointer::PointerLanding) -> Option<String> {
+/// Where the device moved a point it clamped. `name` calls out the point,
+/// such as "coordinate" or "start coordinate".
+fn abs_pointer_clamp_note(
+    name: &str,
+    landing: crate::abs_pointer::PointerLanding,
+) -> Option<String> {
     (landing.requested != landing.emitted).then(|| {
         format!(
-            "Requested coordinate {},{} was clamped to {},{} by the uinput absolute pointer.",
+            "Requested {name} {},{} was clamped to {},{} by the uinput absolute pointer.",
             landing.requested.0, landing.requested.1, landing.emitted.0, landing.emitted.1
         )
     })
@@ -11021,12 +11116,13 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
         assert!(run.commands.is_empty(), "{}", run.commands);
     }
 
-    /// Two monitors of different heights leave 2560..4480 x 1080..1440 of
-    /// the capture uncovered. A coordinate there gets a note on the X11 and
-    /// uinput routes; a coordinate on either monitor does not. The note
-    /// reads the layout once per capture and takes no capture (#391).
-    fn run_monitor_gap_child(mode: &str) {
-        let harness = PointerChildHarness::new("cul-monitor-gap");
+    /// A harness whose xrandr and swaymsg report two monitors of different
+    /// heights, 2560x1440 at 0,0 and 1920x1080 at 2560,0, which leave
+    /// 2560..4480 x 1080..1440 of a 4480x1440 capture uncovered. Each layout
+    /// read is logged to the returned file. xdotool fails any command that
+    /// moves to 5001,1301, so a failed dispatch can be checked.
+    fn monitor_gap_harness(prefix: &str) -> (PointerChildHarness, std::path::PathBuf) {
+        let harness = PointerChildHarness::new(prefix);
         let xrandr = harness.dir.join("xrandr");
         std::fs::write(
             &xrandr,
@@ -11047,18 +11143,25 @@ printf '[{"active":true,"rect":{"x":0,"y":0,"width":2560,"height":1440},"scale":
         )
         .unwrap();
         std::fs::set_permissions(&swaymsg, std::fs::Permissions::from_mode(0o700)).unwrap();
-        // xdotool fails one click, so a failed dispatch can be checked.
         let xdotool = harness.dir.join("xdotool");
         std::fs::write(
             &xdotool,
             r#"#!/bin/sh
 printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
-case "$*" in *"-- 5001 1301 "*) echo "xdotool: test failure" >&2; exit 1 ;; esac
+case "$*" in *"-- 5001 1301"*) echo "xdotool: test failure" >&2; exit 1 ;; esac
 "#,
         )
         .unwrap();
         std::fs::set_permissions(&xdotool, std::fs::Permissions::from_mode(0o700)).unwrap();
         let layout_log = harness.dir.join("layout.log");
+        (harness, layout_log)
+    }
+
+    /// A coordinate in the gap of [`monitor_gap_harness`] gets a note on the
+    /// X11 and uinput routes; a coordinate on either monitor does not. The
+    /// note reads the layout once per capture and takes no capture (#391).
+    fn run_monitor_gap_child(mode: &str) {
+        let (harness, layout_log) = monitor_gap_harness("cul-monitor-gap");
         let run = harness.run("server::tests::pointer_dispatch_child", mode, |command| {
             command.env("CUL_POINTER_TEST_LAYOUT_LOG", &layout_log);
             if mode == "x11-monitor-gap" {
@@ -11100,6 +11203,78 @@ case "$*" in *"-- 5001 1301 "*) echo "xdotool: test failure" >&2; exit 1 ;; esac
     #[test]
     fn uinput_monitor_gap_coordinate_gets_a_note() {
         run_monitor_gap_child("uinput-monitor-gap");
+    }
+
+    /// A drag checks the two endpoints its route sent. With one endpoint off
+    /// the capture and the other in the gap of [`monitor_gap_harness`], the
+    /// result names both; a drag between two on-monitor points gets no note
+    /// (#398).
+    fn run_drag_gap_child(mode: &str) {
+        let (harness, layout_log) = monitor_gap_harness("cul-drag-gap");
+        let run = harness.run("server::tests::pointer_dispatch_child", mode, |command| {
+            command.env("CUL_POINTER_TEST_LAYOUT_LOG", &layout_log);
+            if mode == "uinput-drag-gap" {
+                command
+                    .env("CU_DISABLE_ABS_POINTER", "0")
+                    .env("SWAYSOCK", harness.dir.join("sway.sock"));
+            } else {
+                command
+                    .env("WAYLAND_DISPLAY", "")
+                    .env("XDG_SESSION_TYPE", "x11");
+            }
+            if mode == "ydotool-drag-gap" {
+                command.env("COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER", "1");
+            }
+        });
+        assert!(!run.captured, "{mode}: a note took a capture");
+        // One capture, one layout read; never xrandr on Wayland.
+        let read = if mode == "uinput-drag-gap" {
+            "swaymsg -t get_outputs -r\n"
+        } else {
+            "--listactivemonitors\n"
+        };
+        assert_eq!(
+            std::fs::read_to_string(&layout_log).unwrap_or_default(),
+            read,
+            "{mode}"
+        );
+        match mode {
+            "x11-drag-gap" => {
+                assert!(
+                    run.commands
+                        .starts_with("xdotool mousemove -- 5000 500\nxdotool mousedown 1\n"),
+                    "{}",
+                    run.commands
+                );
+                assert!(!run.commands.contains("ydotool"), "{}", run.commands);
+            }
+            "ydotool-drag-gap" => {
+                assert!(
+                    run.commands.starts_with(
+                        "ydotool mousemove --absolute -- 5000 500\nydotool click 0x40\n"
+                    ),
+                    "{}",
+                    run.commands
+                );
+                assert!(!run.commands.contains("xdotool"), "{}", run.commands);
+            }
+            _ => assert!(run.commands.is_empty(), "{}", run.commands),
+        }
+    }
+
+    #[test]
+    fn x11_drag_endpoints_get_off_screen_and_gap_notes() {
+        run_drag_gap_child("x11-drag-gap");
+    }
+
+    #[test]
+    fn ydotool_x11_drag_endpoints_get_off_screen_and_gap_notes() {
+        run_drag_gap_child("ydotool-drag-gap");
+    }
+
+    #[test]
+    fn uinput_drag_endpoints_get_off_screen_and_gap_notes() {
+        run_drag_gap_child("uinput-drag-gap");
     }
 
     #[tokio::test]
@@ -11304,6 +11479,82 @@ case "$*" in *"-- 5001 1301 "*) echo "xdotool: test failure" >&2; exit 1 ;; esac
                         backend.pointer_retry_route().await,
                         "it goes through the remote desktop portal"
                     );
+                }
+            }
+            "x11-drag-gap" | "ydotool-drag-gap" | "uinput-drag-gap" => {
+                use crate::abs_pointer::{tests::RecordedEvents, AbsPointer};
+                let uinput = mode == "uinput-drag-gap";
+                let drag = |start: (i32, i32), end: (i32, i32)| DragParams {
+                    start_x: start.0,
+                    start_y: start.1,
+                    end_x: end.0,
+                    end_y: end.1,
+                    ..Default::default()
+                };
+                backend.cache_desktop_size(4480, 1440);
+                if uinput {
+                    *backend.abs_pointer.lock().unwrap() = Some(AbsPointer::with_events(
+                        RecordedEvents::default(),
+                        4480,
+                        1440,
+                    ));
+                }
+                let gap = |name: &str| {
+                    format!("WARNING: {name} coordinate 3000,1200 is on no monitor of the captured desktop (4480x1440); the input landed at a monitor edge or on no visible pixel.")
+                };
+
+                // Off the capture, onto the right monitor, then into the gap.
+                let result = backend
+                    .dispatch_drag(drag((5000, 500), (3000, 1200)))
+                    .await
+                    .0;
+                assert!(result.ok, "{}", result.message);
+                let start = if uinput {
+                    "Requested start coordinate 5000,500 was clamped to 4479,500 by the uinput absolute pointer."
+                } else {
+                    "WARNING: start coordinate 5000,500 is outside the captured desktop (4480x1440); the X server keeps the pointer on the screen, so the input landed at an edge instead."
+                };
+                assert!(
+                    result.message.ends_with(&format!("{start} {}", gap("end"))),
+                    "{}",
+                    result.message
+                );
+
+                // From the gap, then off the capture, which lands in the gap.
+                let result = backend
+                    .dispatch_drag(drag((3000, 1200), (5000, 1300)))
+                    .await
+                    .0;
+                assert!(result.ok, "{}", result.message);
+                let end = if uinput {
+                    "Requested end coordinate 5000,1300 was clamped to 4479,1300 by the uinput absolute pointer. WARNING: end coordinate 4479,1300 is on no monitor of the captured desktop (4480x1440); the input landed at a monitor edge or on no visible pixel."
+                } else {
+                    "WARNING: end coordinate 5000,1300 is outside the captured desktop (4480x1440); the X server keeps the pointer on the screen, but the nearest point there, 4479,1300, is on no monitor, so the input landed at a monitor edge or on no visible pixel."
+                };
+                assert!(
+                    result.message.ends_with(&format!("{} {end}", gap("start"))),
+                    "{}",
+                    result.message
+                );
+
+                // The path crosses the gap, but both endpoints are on a
+                // monitor.
+                let result = backend
+                    .dispatch_drag(drag((2000, 1400), (4400, 1000)))
+                    .await
+                    .0;
+                assert!(result.ok, "{}", result.message);
+                assert!(!result.message.contains("WARNING"), "{}", result.message);
+                assert!(!result.message.contains("clamped"), "{}", result.message);
+
+                if mode == "x11-drag-gap" {
+                    // A failed drag gets no note.
+                    let result = backend
+                        .dispatch_drag(drag((5001, 1301), (3000, 1200)))
+                        .await
+                        .0;
+                    assert!(!result.ok, "{}", result.message);
+                    assert!(!result.message.contains("WARNING"), "{}", result.message);
                 }
             }
             other => panic!("unknown mode {other}"),
@@ -12674,7 +12925,9 @@ esac
     #[test]
     fn absolute_pointer_note_reports_the_emitted_coordinate() {
         assert_eq!(
-            abs_pointer_clamp_note(crate::abs_pointer::PointerLanding {
+            abs_pointer_clamp_note(
+                "coordinate",
+                crate::abs_pointer::PointerLanding {
                 requested: (1920, 1080),
                 emitted: (1919, 1079),
             }),
@@ -12684,10 +12937,13 @@ esac
             )
         );
         assert_eq!(
-            abs_pointer_clamp_note(crate::abs_pointer::PointerLanding {
-                requested: (640, 480),
-                emitted: (640, 480),
-            }),
+            abs_pointer_clamp_note(
+                "coordinate",
+                crate::abs_pointer::PointerLanding {
+                    requested: (640, 480),
+                    emitted: (640, 480),
+                }
+            ),
             None
         );
     }
@@ -14464,6 +14720,37 @@ esac
             backend.capture_layout.lock().unwrap().monitors,
             CaptureMonitors::Unread
         );
+    }
+
+    /// The portal sends no drag with an endpoint off its monitors, so its
+    /// notes name each endpoint that stopped it and claim no landing (#398).
+    #[tokio::test]
+    async fn portal_drag_notes_name_each_endpoint() {
+        let backend = ComputerUseLinux::default();
+        backend.cache_desktop_size(4480, 1440);
+        backend.capture_layout.lock().unwrap().monitors =
+            CaptureMonitors::Logical(vec![(0, 0, 1280, 720), (1280, 0, 960, 540)]);
+        assert_eq!(
+            backend
+                .drag_off_screen_notes((3000, 1200), (5000, 500), PointerRoute::Portal)
+                .await,
+            [
+                "WARNING: start coordinate 3000,1200 is on no monitor of the captured desktop (4480x1440).",
+                "WARNING: end coordinate 5000,500 is outside the captured desktop (4480x1440).",
+            ]
+        );
+        assert_eq!(
+            backend
+                .drag_off_screen_notes((100, 1300), (-1, 10), PointerRoute::Portal)
+                .await,
+            ["WARNING: end coordinate -1,10 is outside the captured desktop (4480x1440)."]
+        );
+        // The path from 2000,1400 to 4400,1000 crosses the gap; the portal
+        // moves that motion onto a monitor, so only endpoints count.
+        assert!(backend
+            .drag_off_screen_notes((2000, 1400), (4400, 1000), PointerRoute::Portal)
+            .await
+            .is_empty());
     }
 
     /// An X11 capture is the whole root window, which can hold framebuffer
