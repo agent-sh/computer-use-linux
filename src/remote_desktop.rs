@@ -82,6 +82,22 @@ pub struct PortalKeyboardSession {
     valid: Arc<AtomicBool>,
 }
 
+/// The server's cross-backend input lock, held by a portal release guard so
+/// no other backend sends input until a cancelled portal action's release
+/// cleanup has finished. Clones share the one lock.
+#[derive(Clone, Debug)]
+pub(crate) struct InputOperationGuard {
+    _guard: Arc<OwnedMutexGuard<()>>,
+}
+
+impl InputOperationGuard {
+    pub(crate) fn new(guard: OwnedMutexGuard<()>) -> Self {
+        Self {
+            _guard: Arc::new(guard),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PortalStream {
     node_id: u32,
@@ -115,6 +131,7 @@ struct PointerReleaseGuard {
     session_handle: OwnedObjectPath,
     button: Option<i32>,
     input_guard: Option<OwnedMutexGuard<()>>,
+    operation_guard: Option<InputOperationGuard>,
     valid: Arc<AtomicBool>,
 }
 
@@ -124,6 +141,7 @@ struct KeyboardReleaseGuard {
     session_handle: OwnedObjectPath,
     pressed: Vec<PortalKey>,
     input_guard: Option<OwnedMutexGuard<()>>,
+    operation_guard: Option<InputOperationGuard>,
     valid: Arc<AtomicBool>,
 }
 
@@ -631,12 +649,13 @@ pub fn keysyms_for_text(text: &str) -> Result<Vec<i32>> {
         .collect()
 }
 
-pub async fn click(
+pub(crate) async fn click(
     session: &PortalPointerSession,
     x: i32,
     y: i32,
     button: PointerButton,
     click_count: u32,
+    operation_guard: InputOperationGuard,
 ) -> Result<()> {
     let input_guard = Arc::clone(&session.input_lock).lock_owned().await;
     session.ensure_current_layout().await?;
@@ -646,7 +665,7 @@ pub async fn click(
         session.streams.clone(),
     )
     .await?;
-    let mut release_guard = PointerReleaseGuard::new(session, input_guard);
+    let mut release_guard = PointerReleaseGuard::new(session, input_guard, operation_guard);
     let (stream_id, x, y) = session.map_absolute_point(x, y)?;
     notify_pointer_motion_absolute(&proxy, &session.session_handle, stream_id, x, y).await?;
     for _ in 0..click_count.max(1) {
@@ -764,12 +783,13 @@ pub(crate) fn portal_scroll_axis_steps(
     (axis, signed)
 }
 
-pub async fn drag(
+pub(crate) async fn drag(
     session: &PortalPointerSession,
     start_x: i32,
     start_y: i32,
     end_x: i32,
     end_y: i32,
+    operation_guard: InputOperationGuard,
 ) -> Result<()> {
     let input_guard = Arc::clone(&session.input_lock).lock_owned().await;
     session.ensure_current_layout().await?;
@@ -779,7 +799,7 @@ pub async fn drag(
         session.streams.clone(),
     )
     .await?;
-    let mut release_guard = PointerReleaseGuard::new(session, input_guard);
+    let mut release_guard = PointerReleaseGuard::new(session, input_guard, operation_guard);
     let start = (start_x, start_y);
     let (start_stream, start_x, start_y) = session.map_absolute_point(start_x, start_y)?;
     // Endpoints must be shared. Intermediate motion may cross a monitor gap;
@@ -823,14 +843,15 @@ pub async fn drag(
     Ok(())
 }
 
-pub async fn type_text_with_keysyms(
+pub(crate) async fn type_text_with_keysyms(
     session: &PortalKeyboardSession,
     keysyms: &[i32],
+    operation_guard: Option<InputOperationGuard>,
 ) -> Result<()> {
     let input_guard = Arc::clone(&session.input_lock).lock_owned().await;
     session.ensure_valid()?;
     let proxy = input_proxy(&session.connection, session.ei.clone(), Vec::new()).await?;
-    let mut release_guard = KeyboardReleaseGuard::new(session, input_guard);
+    let mut release_guard = KeyboardReleaseGuard::new(session, input_guard, operation_guard);
     for keysym in keysyms {
         release_guard.push(PortalKey::Keysym(*keysym));
         notify_keyboard_keysym(&proxy, &session.session_handle, *keysym, KEY_PRESSED).await?;
@@ -842,27 +863,35 @@ pub async fn type_text_with_keysyms(
     Ok(())
 }
 
-pub async fn press_keycode_chord(
+pub(crate) async fn press_keycode_chord(
     session: &PortalKeyboardSession,
     modifiers: &[i32],
     keycode: i32,
+    operation_guard: Option<InputOperationGuard>,
 ) -> Result<()> {
     let modifiers: Vec<PortalKey> = modifiers.iter().copied().map(PortalKey::Keycode).collect();
-    press_key_chord(session, &modifiers, PortalKey::Keycode(keycode)).await
+    press_key_chord(
+        session,
+        &modifiers,
+        PortalKey::Keycode(keycode),
+        operation_guard,
+    )
+    .await
 }
 
 /// Press `key` while holding `modifiers`. Keysyms are resolved by the
 /// compositor against the live keymap, so remapped modifiers still act as
 /// the requested modifier; keycodes are physical positions.
-pub async fn press_key_chord(
+pub(crate) async fn press_key_chord(
     session: &PortalKeyboardSession,
     modifiers: &[PortalKey],
     key: PortalKey,
+    operation_guard: Option<InputOperationGuard>,
 ) -> Result<()> {
     let input_guard = Arc::clone(&session.input_lock).lock_owned().await;
     session.ensure_valid()?;
     let proxy = input_proxy(&session.connection, session.ei.clone(), Vec::new()).await?;
-    let mut release_guard = KeyboardReleaseGuard::new(session, input_guard);
+    let mut release_guard = KeyboardReleaseGuard::new(session, input_guard, operation_guard);
     for modifier in modifiers {
         release_guard.push(*modifier);
         notify_keyboard_key(&proxy, &session.session_handle, *modifier, KEY_PRESSED).await?;
@@ -880,13 +909,18 @@ pub async fn press_key_chord(
 }
 
 impl PointerReleaseGuard {
-    fn new(session: &PortalPointerSession, input_guard: OwnedMutexGuard<()>) -> Self {
+    fn new(
+        session: &PortalPointerSession,
+        input_guard: OwnedMutexGuard<()>,
+        operation_guard: InputOperationGuard,
+    ) -> Self {
         Self {
             ei: session.ei.clone(),
             connection: session.connection.clone(),
             session_handle: session.session_handle.clone(),
             button: None,
             input_guard: Some(input_guard),
+            operation_guard: Some(operation_guard),
             valid: Arc::clone(&session.valid),
         }
     }
@@ -903,6 +937,7 @@ impl PointerReleaseGuard {
 impl Drop for PointerReleaseGuard {
     fn drop(&mut self) {
         let input_guard = self.input_guard.take();
+        let operation_guard = self.operation_guard.take();
         let Some(button) = self.button else {
             return;
         };
@@ -910,39 +945,41 @@ impl Drop for PointerReleaseGuard {
         let connection = self.connection.clone();
         let ei = self.ei.clone();
         let session_handle = self.session_handle.clone();
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                let _ = tokio::time::timeout(RELEASE_TIMEOUT, async {
-                    if let Ok(proxy) = input_proxy(&connection, ei, Vec::new()).await {
-                        let _ = notify_pointer_button(
-                            &proxy,
-                            &session_handle,
-                            button,
-                            POINTER_BUTTON_RELEASED,
-                        )
-                        .await;
-                    }
-                })
-                .await;
-                let _ = tokio::time::timeout(
-                    RELEASE_TIMEOUT,
-                    close_portal_session(&connection, &session_handle),
-                )
-                .await;
-                drop(input_guard);
-            });
-        }
+        spawn_release_cleanup(input_guard, operation_guard, async move {
+            let _ = tokio::time::timeout(RELEASE_TIMEOUT, async {
+                if let Ok(proxy) = input_proxy(&connection, ei, Vec::new()).await {
+                    let _ = notify_pointer_button(
+                        &proxy,
+                        &session_handle,
+                        button,
+                        POINTER_BUTTON_RELEASED,
+                    )
+                    .await;
+                }
+            })
+            .await;
+            let _ = tokio::time::timeout(
+                RELEASE_TIMEOUT,
+                close_portal_session(&connection, &session_handle),
+            )
+            .await;
+        });
     }
 }
 
 impl KeyboardReleaseGuard {
-    fn new(session: &PortalKeyboardSession, input_guard: OwnedMutexGuard<()>) -> Self {
+    fn new(
+        session: &PortalKeyboardSession,
+        input_guard: OwnedMutexGuard<()>,
+        operation_guard: Option<InputOperationGuard>,
+    ) -> Self {
         Self {
             ei: session.ei.clone(),
             connection: session.connection.clone(),
             session_handle: session.session_handle.clone(),
             pressed: Vec::new(),
             input_guard: Some(input_guard),
+            operation_guard,
             valid: Arc::clone(&session.valid),
         }
     }
@@ -992,6 +1029,7 @@ impl Drop for PortalSessionCleanup {
 impl Drop for KeyboardReleaseGuard {
     fn drop(&mut self) {
         let input_guard = self.input_guard.take();
+        let operation_guard = self.operation_guard.take();
         if self.pressed.is_empty() {
             return;
         }
@@ -1000,25 +1038,38 @@ impl Drop for KeyboardReleaseGuard {
         let ei = self.ei.clone();
         let session_handle = self.session_handle.clone();
         let pressed = std::mem::take(&mut self.pressed);
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                let _ = tokio::time::timeout(RELEASE_TIMEOUT, async {
-                    if let Ok(proxy) = input_proxy(&connection, ei, Vec::new()).await {
-                        for key in pressed.into_iter().rev() {
-                            let _ = notify_keyboard_key(&proxy, &session_handle, key, KEY_RELEASED)
-                                .await;
-                        }
+        spawn_release_cleanup(input_guard, operation_guard, async move {
+            let _ = tokio::time::timeout(RELEASE_TIMEOUT, async {
+                if let Ok(proxy) = input_proxy(&connection, ei, Vec::new()).await {
+                    for key in pressed.into_iter().rev() {
+                        let _ =
+                            notify_keyboard_key(&proxy, &session_handle, key, KEY_RELEASED).await;
                     }
-                })
-                .await;
-                let _ = tokio::time::timeout(
-                    RELEASE_TIMEOUT,
-                    close_portal_session(&connection, &session_handle),
-                )
-                .await;
-                drop(input_guard);
-            });
-        }
+                }
+            })
+            .await;
+            let _ = tokio::time::timeout(
+                RELEASE_TIMEOUT,
+                close_portal_session(&connection, &session_handle),
+            )
+            .await;
+        });
+    }
+}
+
+fn spawn_release_cleanup<F>(
+    input_guard: Option<OwnedMutexGuard<()>>,
+    operation_guard: Option<InputOperationGuard>,
+    cleanup: F,
+) where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(async move {
+            cleanup.await;
+            drop(input_guard);
+            drop(operation_guard);
+        });
     }
 }
 
@@ -3041,6 +3092,36 @@ mod tests {
             map_capture_point_to_stream_layout(&streams, &layout, 5000, 1000, 7680, 2160),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn release_cleanup_retains_portal_and_cross_backend_guards() {
+        let portal_lock = Arc::new(AsyncMutex::new(()));
+        let operation_lock = Arc::new(AsyncMutex::new(()));
+        let portal_guard = Arc::clone(&portal_lock).lock_owned().await;
+        let operation_guard =
+            InputOperationGuard::new(Arc::clone(&operation_lock).lock_owned().await);
+        let caller_operation_guard = operation_guard.clone();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+
+        spawn_release_cleanup(Some(portal_guard), Some(operation_guard), async move {
+            let _ = finish_rx.await;
+            let _ = finished_tx.send(());
+        });
+
+        assert!(portal_lock.try_lock().is_err());
+        assert!(operation_lock.try_lock().is_err());
+        finish_tx.send(()).expect("release cleanup stopped early");
+        tokio::time::timeout(Duration::from_secs(1), finished_rx)
+            .await
+            .expect("release cleanup did not finish")
+            .expect("release cleanup dropped its completion marker");
+        tokio::task::yield_now().await;
+        assert!(portal_lock.try_lock().is_ok());
+        assert!(operation_lock.try_lock().is_err());
+        drop(caller_operation_guard);
+        assert!(operation_lock.try_lock().is_ok());
     }
 
     #[test]

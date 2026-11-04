@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A uinput absolute-pointer click whose press or release write fails sends one more release, so the button cannot stay held, and the error says whether that release went through. A drag reports its release the same way. A failed absolute-pointer action drops the device, and the next action creates a fresh one.
+- A cancelled remote desktop portal click, drag, key chord or keysym text keeps the server's input lock until its release cleanup has sent the pending button or key release, so another backend cannot send input while a button or key is still down. A cancelled portal scroll runs to the end under the lock.
+- A cancelled KDE clipboard paste still puts the user's clipboard back: the paste runs to the end with the input and clipboard locks held. When writing the text to the clipboard fails, the write may still have landed, so the previous contents are restored and the text is not retyped through ydotool.
+
 ## [0.7.39] - 2026-11-04
 
 ### Changed

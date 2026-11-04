@@ -14,8 +14,8 @@ use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetup
 use crate::remote_desktop::{
     click as portal_click, drag as portal_drag, keysyms_for_text, press_key_chord,
     press_keycode_chord, scroll as portal_scroll, start_portal_keyboard_session,
-    start_portal_pointer_session, type_text_with_keysyms, PointerButton, PortalKey,
-    PortalKeyboardSession, PortalPointerSession, ScrollDirection,
+    start_portal_pointer_session, type_text_with_keysyms, InputOperationGuard, PointerButton,
+    PortalKey, PortalKeyboardSession, PortalPointerSession, ScrollDirection,
 };
 use crate::screenshot::{
     capture_screenshot_raw, prepare_screenshot_payload, RawScreenshotCapture, ScreenshotCapture,
@@ -1498,6 +1498,7 @@ impl ComputerUseLinux {
                 portal_y,
                 PointerButton::from_name(params.button.as_deref()),
                 params.click_count.unwrap_or(1).clamp(1, 10),
+                InputOperationGuard::new(input_guard),
             )
             .await
             {
@@ -1549,6 +1550,7 @@ impl ComputerUseLinux {
                         portal_y,
                         PointerButton::from_name(params.button.as_deref()),
                         params.click_count.unwrap_or(1).clamp(1, 10),
+                        InputOperationGuard::new(input_guard),
                     )
                     .await
                     {
@@ -2038,7 +2040,15 @@ impl ComputerUseLinux {
                     off_screen_note.clone(),
                 ));
             };
-            match portal_scroll(&session, portal_target_point, direction, units).await {
+            let session_for_input = session.clone();
+            let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
+                portal_scroll(&session_for_input, portal_target_point, direction, units)
+                    .await
+                    .map_err(|error| format!("{error:#}"))
+            })
+            .await;
+            let _input_guard = input_guard;
+            match result {
                 Ok(()) => {
                     return Json(with_notes(
                         ActionOutput {
@@ -2054,7 +2064,7 @@ impl ComputerUseLinux {
                 Err(error) => {
                     self.clear_portal_pointer_session(&session);
                     return Json(with_notes(
-                        portal_action_error("scroll", error, received),
+                        portal_action_error("scroll", anyhow::anyhow!(error), received),
                         off_screen_note.clone(),
                     ));
                 }
@@ -2079,7 +2089,16 @@ impl ComputerUseLinux {
                             off_screen_note.clone(),
                         ));
                     };
-                    match portal_scroll(&session, portal_target_point, direction, units).await {
+                    let session_for_input = session.clone();
+                    let (input_guard, result) =
+                        run_cancellation_safe_input(input_guard, async move {
+                            portal_scroll(&session_for_input, portal_target_point, direction, units)
+                                .await
+                                .map_err(|error| format!("{error:#}"))
+                        })
+                        .await;
+                    let _input_guard = input_guard;
+                    match result {
                         Ok(()) => {
                             return Json(with_notes(
                                 ActionOutput {
@@ -2096,7 +2115,7 @@ impl ComputerUseLinux {
                         Err(error) => {
                             self.clear_portal_pointer_session(&session);
                             return Json(with_notes(
-                                portal_action_error("scroll", error, received),
+                                portal_action_error("scroll", anyhow::anyhow!(error), received),
                                 off_screen_note.clone(),
                             ));
                         }
@@ -2245,7 +2264,16 @@ impl ComputerUseLinux {
                 self.clear_portal_pointer_session(&session);
                 return Json(portal_coordinate_error("drag", received));
             };
-            match portal_drag(&session, start_x, start_y, end_x, end_y).await {
+            match portal_drag(
+                &session,
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                InputOperationGuard::new(input_guard),
+            )
+            .await
+            {
                 Ok(()) => {
                     return Json(ActionOutput {
                         ok: true,
@@ -2276,7 +2304,16 @@ impl ComputerUseLinux {
                         self.clear_portal_pointer_session(&session);
                         return Json(portal_coordinate_error("drag", received));
                     };
-                    match portal_drag(&session, start_x, start_y, end_x, end_y).await {
+                    match portal_drag(
+                        &session,
+                        start_x,
+                        start_y,
+                        end_x,
+                        end_y,
+                        InputOperationGuard::new(input_guard),
+                    )
+                    .await
+                    {
                         Ok(()) => {
                             return Json(ActionOutput {
                                 ok: true,
@@ -2333,7 +2370,8 @@ impl ComputerUseLinux {
 
     async fn dispatch_press_key(&self, params: PressKeyParams) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
-        let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        let input_guard =
+            InputOperationGuard::new(Arc::clone(&self.input_operation_lock).lock_owned().await);
         if let Some(output) = self
             .hyprland_background_input(
                 "press_key",
@@ -2459,7 +2497,12 @@ impl ComputerUseLinux {
                                 .collect();
                             (modifiers, PortalKey::Keycode(i32::from(chord_key)))
                         });
-                    match press_key_chord(&session, &modifiers, key).await {
+                    // The release cleanup holds a clone, so a cancelled chord
+                    // keeps the lock until its keys are up; this one keeps it
+                    // through the landing notes.
+                    match press_key_chord(&session, &modifiers, key, Some(input_guard.clone()))
+                        .await
+                    {
                         Ok(()) => {
                             let notes = self.input_landing_notes(focus.as_ref(), false).await;
                             return Json(with_notes(
@@ -2597,7 +2640,8 @@ impl ComputerUseLinux {
         if let Err(message) = preflight_type_text(&params.text, wtype_mode) {
             return Json(action_result("type_text", Err(message), received));
         }
-        let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        let input_guard =
+            InputOperationGuard::new(Arc::clone(&self.input_operation_lock).lock_owned().await);
         let window_target = params.window_target();
         if let Some(output) = self
             .hyprland_background_input(
@@ -2666,7 +2710,7 @@ impl ComputerUseLinux {
         {
             return Json(output);
         }
-        let input_guard = Arc::try_unwrap(input_guard)
+        let mut input_guard = Arc::try_unwrap(input_guard)
             .expect("pixelflux fallback must not retain dispatched input");
 
         if self.should_prefer_kde_clipboard_text_backend() {
@@ -2694,9 +2738,39 @@ impl ComputerUseLinux {
                     };
                     let paste_shortcut =
                         kde_clipboard_paste_shortcut(&window_target, kde_focus.as_ref()).await;
-                    let _clipboard_guard = self.kde_clipboard_lock.lock().await;
-                    match run_kde_clipboard_paste_text(&session, &params.text, paste_shortcut).await
-                    {
+                    let clipboard_guard = Arc::clone(&self.kde_clipboard_lock).lock_owned().await;
+                    let session_for_input = session.clone();
+                    let text = params.text.clone();
+                    let portal_operation_guard = input_guard.clone();
+                    // The paste puts the user's clipboard back after the
+                    // shortcut. Run it to the end even if this call is
+                    // cancelled, and hold both locks until it has.
+                    let (guards, guarded_result) =
+                        run_cancellation_safe_guarded((input_guard, clipboard_guard), async move {
+                            run_kde_clipboard_paste_text(
+                                &session_for_input,
+                                &text,
+                                paste_shortcut,
+                                portal_operation_guard,
+                            )
+                            .await
+                        })
+                        .await;
+                    let (returned_input_guard, clipboard_guard) = match guards {
+                        Some(guards) => guards,
+                        None => {
+                            return Json(action_result_with_focus(
+                                "type_text",
+                                Err(guarded_result.unwrap_err()),
+                                received,
+                                kde_focus,
+                            ));
+                        }
+                    };
+                    input_guard = returned_input_guard;
+                    drop(clipboard_guard);
+                    let result = guarded_result.expect("guarded task returned its guards");
+                    match result {
                         Ok(message) => {
                             let notes = self.input_landing_notes(kde_focus.as_ref(), true).await;
                             return Json(with_notes(
@@ -2750,7 +2824,7 @@ impl ComputerUseLinux {
                         "Portal keyboard input is unavailable; no text was sent.".to_string()
                     })?;
                 focus = self.focus_target_for_input(&portal_target).await?;
-                type_text_with_keysyms(&session, &keysyms)
+                type_text_with_keysyms(&session, &keysyms, Some(input_guard.clone()))
                     .await
                     .map_err(|error| {
                         self.clear_portal_keyboard_session(&session);
@@ -8981,27 +9055,47 @@ where
         let pointer = guard
             .as_mut()
             .ok_or_else(|| "absolute pointer is unavailable".to_string())?;
-        operation(pointer).map_err(|error| format!("{error:#}"))
+        let result = operation(pointer).map_err(|error| format!("{error:#}"));
+        if result.is_err() {
+            // A failed write may have left a button down or an event half
+            // sent. Drop the device, which the kernel releases, so the next
+            // action builds a fresh one.
+            guard.take();
+        }
+        result
     })
     .await
     .map_err(|error| format!("absolute pointer task failed: {error}"))?
 }
 
-async fn run_cancellation_safe_input<T, F, G>(
+async fn run_cancellation_safe_guarded<G, T, F>(
+    guard: G,
+    operation: F,
+) -> (Option<G>, std::result::Result<T, String>)
+where
+    G: Send + 'static,
+    T: Send + 'static,
+    F: Future<Output = T> + Send + 'static,
+{
+    // Dropping a JoinHandle detaches its task, retaining the guard until the
+    // stateful input operation has completed even if the caller is cancelled.
+    match tokio::spawn(async move { (guard, operation.await) }).await {
+        Ok((guard, result)) => (Some(guard), Ok(result)),
+        Err(error) => (None, Err(format!("stateful input task failed: {error}"))),
+    }
+}
+
+async fn run_cancellation_safe_input<G, T, F>(
     input_guard: G,
     operation: F,
 ) -> (Option<G>, std::result::Result<T, String>)
 where
-    T: Send + 'static,
     G: Send + 'static,
+    T: Send + 'static,
     F: Future<Output = std::result::Result<T, String>> + Send + 'static,
 {
-    // Dropping a JoinHandle detaches its task, retaining the guard until the
-    // stateful input operation has completed even if the caller is cancelled.
-    match tokio::spawn(async move { (input_guard, operation.await) }).await {
-        Ok((input_guard, result)) => (Some(input_guard), result),
-        Err(error) => (None, Err(format!("stateful input task failed: {error}"))),
-    }
+    let (input_guard, result) = run_cancellation_safe_guarded(input_guard, operation).await;
+    (input_guard, result.and_then(|result| result))
 }
 
 async fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
@@ -9110,22 +9204,60 @@ impl KdeClipboardPasteError {
             clear_portal_keyboard_session: true,
         }
     }
+
+    /// The clipboard write failed, but it may have taken effect (a timed out
+    /// call can still land). No paste was sent, yet the outcome is unknown,
+    /// so the text is not retyped through another backend.
+    fn ambiguous_clipboard_set(message: String) -> Self {
+        Self {
+            message,
+            can_fallback_to_ydotool: false,
+            clear_portal_keyboard_session: false,
+        }
+    }
+}
+
+/// Put `text` on the clipboard. A failed write may still have landed, so
+/// put `previous` back and refuse to retype the text another way.
+async fn replace_kde_clipboard<F, Fut>(
+    text: &str,
+    previous: &str,
+    set: F,
+) -> std::result::Result<(), KdeClipboardPasteError>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = std::result::Result<(), String>>,
+{
+    let Err(set_error) = set(text.to_string()).await else {
+        return Ok(());
+    };
+    let message = match set(previous.to_string()).await {
+        Ok(()) => format!(
+            "KDE clipboard replacement failed ambiguously and the previous contents were restored; text was not replayed through another backend: {set_error}"
+        ),
+        Err(restore_error) => format!(
+            "KDE clipboard replacement failed ambiguously; restoring the previous contents also failed, and text was not replayed through another backend: {set_error}; restore failed: {restore_error}"
+        ),
+    };
+    Err(KdeClipboardPasteError::ambiguous_clipboard_set(message))
 }
 
 async fn run_kde_clipboard_paste_text(
     session: &PortalKeyboardSession,
     text: &str,
     paste_shortcut: KdeClipboardPasteShortcut,
+    operation_guard: InputOperationGuard,
 ) -> std::result::Result<String, KdeClipboardPasteError> {
     let previous = kde_clipboard_contents()
         .await
         .map_err(KdeClipboardPasteError::before_text_input)?;
-    kde_set_clipboard_contents(text)
-        .await
-        .map_err(KdeClipboardPasteError::before_text_input)?;
+    replace_kde_clipboard(text, &previous, |value| async move {
+        kde_set_clipboard_contents(&value).await
+    })
+    .await?;
 
     let (modifiers, keycode) = kde_clipboard_paste_chord(paste_shortcut);
-    let paste_result = press_keycode_chord(session, modifiers, keycode)
+    let paste_result = press_keycode_chord(session, modifiers, keycode, Some(operation_guard))
         .await
         .map_err(|error| format!("{error:#}"));
 
@@ -11720,6 +11852,37 @@ esac
         );
     }
 
+    #[tokio::test]
+    async fn failed_absolute_pointer_action_drops_the_device() {
+        use crate::abs_pointer::{tests::RecordedEvents, AbsPointer, PointerButton};
+
+        // Call 1 is the press. The device may now hold the button, so the
+        // next action must build a fresh one instead of reusing it.
+        let pointer = Arc::new(Mutex::new(Some(AbsPointer::with_events(
+            RecordedEvents::failing_on(&[1]),
+            100,
+            100,
+        ))));
+        let result = run_abs_pointer(Arc::clone(&pointer), |pointer| {
+            pointer.click(10, 10, PointerButton::Left, 1)
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(pointer.lock().unwrap().is_none());
+
+        let pointer = Arc::new(Mutex::new(Some(AbsPointer::with_events(
+            RecordedEvents::default(),
+            100,
+            100,
+        ))));
+        let result = run_abs_pointer(Arc::clone(&pointer), |pointer| {
+            pointer.click(10, 10, PointerButton::Left, 1)
+        })
+        .await;
+        assert!(result.is_ok());
+        assert!(pointer.lock().unwrap().is_some());
+    }
+
     #[test]
     fn accessibility_filter_candidates_prefer_title_and_skip_synthetic_app_id() {
         let window = window_info(
@@ -12441,6 +12604,39 @@ esac
             kde_clipboard_restore_delay(&capped_text),
             Duration::from_millis(KDE_CLIPBOARD_RESTORE_MAX_DELAY_MS)
         );
+    }
+
+    #[tokio::test]
+    async fn failed_kde_clipboard_write_restores_the_old_contents_and_is_not_replayed() {
+        for restore_works in [true, false] {
+            let writes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorded = std::sync::Arc::clone(&writes);
+            let error = replace_kde_clipboard("secret text", "old contents", move |value| {
+                recorded.lock().unwrap().push(value.clone());
+                async move {
+                    if value == "secret text" || !restore_works {
+                        Err("klipper call timed out".to_string())
+                    } else {
+                        Ok(())
+                    }
+                }
+            })
+            .await
+            .unwrap_err();
+
+            // The write may have landed although it failed, so the user's
+            // clipboard is put back, and the text is not typed another way.
+            assert_eq!(*writes.lock().unwrap(), ["secret text", "old contents"]);
+            assert!(!error.can_fallback_to_ydotool);
+            assert!(!error.clear_portal_keyboard_session);
+            assert!(error.message.contains("not replayed"), "{}", error.message);
+            assert_eq!(
+                error.message.contains("previous contents were restored"),
+                restore_works,
+                "{}",
+                error.message
+            );
+        }
     }
 
     #[test]
@@ -14412,6 +14608,44 @@ esac
         )
         .await
         .expect("input lock remained held after the operation finished");
+    }
+
+    #[tokio::test]
+    async fn cancelled_clipboard_restore_keeps_both_operation_locks() {
+        let input_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let clipboard_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let input_guard = std::sync::Arc::clone(&input_lock).lock_owned().await;
+        let clipboard_guard = std::sync::Arc::clone(&clipboard_lock).lock_owned().await;
+        let (pasted_tx, pasted_rx) = tokio::sync::oneshot::channel();
+        let (allow_restore_tx, allow_restore_rx) = tokio::sync::oneshot::channel();
+        let (restored_tx, restored_rx) = tokio::sync::oneshot::channel();
+
+        let waiter = tokio::spawn(async move {
+            run_cancellation_safe_guarded((input_guard, clipboard_guard), async move {
+                let _ = pasted_tx.send(());
+                let _ = allow_restore_rx.await;
+                let _ = restored_tx.send(());
+            })
+            .await
+        });
+
+        // Cancel the caller after the paste, before the clipboard restore.
+        pasted_rx.await.expect("paste did not finish");
+        waiter.abort();
+        let _ = waiter.await;
+        assert!(input_lock.try_lock().is_err());
+        assert!(clipboard_lock.try_lock().is_err());
+
+        allow_restore_tx
+            .send(())
+            .expect("clipboard restore stopped on caller cancellation");
+        timeout(Duration::from_secs(1), restored_rx)
+            .await
+            .expect("clipboard restore did not finish")
+            .expect("clipboard restore dropped its completion marker");
+        tokio::task::yield_now().await;
+        assert!(input_lock.try_lock().is_ok());
+        assert!(clipboard_lock.try_lock().is_ok());
     }
 
     /// The xdotool path must accept exactly the keys the evdev grammar accepts,
