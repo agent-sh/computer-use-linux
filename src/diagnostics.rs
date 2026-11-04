@@ -21,6 +21,7 @@ const DESKTOP_ENV_KEYS: &[&str] = &[
     "DESKTOP_SESSION",
     "DISPLAY",
     "HYPRLAND_INSTANCE_SIGNATURE",
+    "NIRI_SOCKET",
     "XAUTHORITY",
     "YDOTOOL_SOCKET",
     "XDG_SESSION_DESKTOP",
@@ -36,7 +37,11 @@ const FORCE_PORTAL_KEYBOARD_ENV_KEYS: &[&str] = &["COMPUTER_USE_LINUX_FORCE_PORT
 const FORCE_PORTAL_POINTER_ENV_KEYS: &[&str] = &["COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER"];
 const PORTAL_DEVICE_KEYBOARD: u32 = 1;
 const PORTAL_DEVICE_POINTER: u32 = 2;
+/// The cursor mode portal pointer sessions request in SelectSources.
+const PORTAL_CURSOR_MODE_HIDDEN: u32 = 1;
 const PORTAL_SOURCE_MONITOR: u32 = 1;
+/// ScreenCast version that added `AvailableCursorModes` and `cursor_mode`.
+const SCREENCAST_CURSOR_MODE_VERSION: u32 = 2;
 const REMOTE_DESKTOP_KEYBOARD_METHODS: &[&str] = &[
     "CreateSession",
     "SelectDevices",
@@ -120,6 +125,7 @@ pub struct PlatformReport {
 pub struct PortalReport {
     pub desktop_portal: Check,
     pub remote_desktop: Check,
+    pub remote_desktop_keyboard: Check,
     pub screencast: Check,
     pub screenshot: Check,
     pub input_capture: Check,
@@ -272,13 +278,13 @@ pub fn doctor_report() -> DoctorReport {
     hydrate_session_bus_env();
 
     let platform = platform_report();
-    let (portals, remote_desktop_keyboard) = portal_report();
+    let portals = portal_report();
     let accessibility = accessibility_report();
     let windowing = windowing_report(&platform);
     let input = input_report();
     let readiness = readiness_report_with_portal_keyboard(
         &platform,
-        &remote_desktop_keyboard,
+        &portals.remote_desktop_keyboard,
         &accessibility,
         &windowing,
         &input,
@@ -288,7 +294,7 @@ pub fn doctor_report() -> DoctorReport {
     let capabilities = capability_map_with_portal_keyboard(
         &platform,
         &portals,
-        &remote_desktop_keyboard,
+        &portals.remote_desktop_keyboard,
         &accessibility,
         &windowing,
         &input,
@@ -343,6 +349,7 @@ fn capability_map_with_portal_keyboard(
     }
     let force_ydotool = env_flag_enabled_any(FORCE_YDOTOOL_KEYBOARD_ENV_KEYS);
     let force_xdotool = env_flag_enabled_any(FORCE_XDOTOOL_KEYBOARD_ENV_KEYS);
+    let force_portal_keyboard = env_flag_enabled_any(FORCE_PORTAL_KEYBOARD_ENV_KEYS);
     let portal_pointer_available = portal_pointer_input_available(platform, portals);
     let portal_keyboard_available =
         portal_keyboard_input_available(platform, remote_desktop_keyboard);
@@ -358,11 +365,13 @@ fn capability_map_with_portal_keyboard(
     if should_advertise_xdotool(platform, input, force_ydotool, force_xdotool) {
         input_backends.push("xdotool".to_string());
     }
-    if platform_is_wayland(platform)
-        && wtype_compatible_wayland_desktop(platform.xdg_current_desktop.as_deref())
-        && input.wtype.ok
-        && !force_ydotool
-    {
+    if should_advertise_wtype(
+        platform,
+        input,
+        force_ydotool,
+        force_xdotool,
+        force_portal_keyboard,
+    ) {
         input_backends.push("wtype".to_string());
     }
     let portal_first = portal_forced_for_all_input
@@ -831,26 +840,24 @@ fn x11_display_check() -> Check {
     }
 }
 
-fn portal_report() -> (PortalReport, Check) {
+fn portal_report() -> PortalReport {
     let (remote_desktop, remote_desktop_keyboard, screencast) = remote_desktop_portal_checks();
-    (
-        PortalReport {
-            desktop_portal: bus_name_check("org.freedesktop.portal.Desktop"),
-            remote_desktop,
-            screencast,
-            screenshot: portal_interface_methods_check(
-                "org.freedesktop.portal.Screenshot",
-                SCREENSHOT_PORTAL_METHODS,
-            ),
-            input_capture: portal_interface_methods_check(
-                "org.freedesktop.portal.InputCapture",
-                INPUT_CAPTURE_PORTAL_METHODS,
-            ),
-            mutter_remote_desktop: bus_name_check("org.gnome.Mutter.RemoteDesktop"),
-            mutter_screencast: bus_name_check("org.gnome.Mutter.ScreenCast"),
-        },
+    PortalReport {
         remote_desktop_keyboard,
-    )
+        desktop_portal: bus_name_check("org.freedesktop.portal.Desktop"),
+        remote_desktop,
+        screencast,
+        screenshot: portal_interface_methods_check(
+            "org.freedesktop.portal.Screenshot",
+            SCREENSHOT_PORTAL_METHODS,
+        ),
+        input_capture: portal_interface_methods_check(
+            "org.freedesktop.portal.InputCapture",
+            INPUT_CAPTURE_PORTAL_METHODS,
+        ),
+        mutter_remote_desktop: bus_name_check("org.gnome.Mutter.RemoteDesktop"),
+        mutter_screencast: bus_name_check("org.gnome.Mutter.ScreenCast"),
+    }
 }
 
 fn accessibility_report() -> AccessibilityReport {
@@ -1270,6 +1277,21 @@ pub(crate) fn wtype_compatible_wayland_desktop(desktop: Option<&str>) -> bool {
     })
 }
 
+fn should_advertise_wtype(
+    platform: &PlatformReport,
+    input: &InputReport,
+    force_ydotool: bool,
+    force_xdotool: bool,
+    force_portal_keyboard: bool,
+) -> bool {
+    platform_is_wayland(platform)
+        && wtype_compatible_wayland_desktop(platform.xdg_current_desktop.as_deref())
+        && input.wtype.ok
+        && !force_ydotool
+        && !force_xdotool
+        && !force_portal_keyboard
+}
+
 fn should_advertise_xdotool(
     platform: &PlatformReport,
     input: &InputReport,
@@ -1415,11 +1437,35 @@ fn remote_desktop_portal_checks() -> (Check, Check, Check) {
             "AvailableSourceTypes",
         ],
     );
+    let screencast_version = command_check_with_session_bus(
+        "busctl",
+        &[
+            "--user",
+            "get-property",
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.ScreenCast",
+            "version",
+        ],
+    );
+    let available_cursor_modes = command_check_with_session_bus(
+        "busctl",
+        &[
+            "--user",
+            "get-property",
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.ScreenCast",
+            "AvailableCursorModes",
+        ],
+    );
     let pointer = remote_desktop_pointer_check_from(
         &introspection,
         &screencast,
         &available_device_types,
         &available_source_types,
+        &screencast_version,
+        &available_cursor_modes,
     );
     let keyboard = remote_desktop_keyboard_check_from(&introspection, &available_device_types);
     (pointer, keyboard, screencast)
@@ -1430,6 +1476,8 @@ fn remote_desktop_pointer_check_from(
     screencast: &Check,
     available_device_types: &Check,
     available_source_types: &Check,
+    screencast_version: &Check,
+    available_cursor_modes: &Check,
 ) -> Check {
     if !introspection.ok {
         return Check::fail(introspection.detail.clone());
@@ -1476,9 +1524,59 @@ fn remote_desktop_pointer_check_from(
         ));
     }
 
+    let version = match screencast_version_number(screencast_version) {
+        Ok(version) => version,
+        Err(detail) => return Check::fail(detail),
+    };
+    if version >= SCREENCAST_CURSOR_MODE_VERSION {
+        let cursor_modes = match screencast_cursor_modes(available_cursor_modes) {
+            Ok(cursor_modes) => cursor_modes,
+            Err(detail) => return Check::fail(detail),
+        };
+        if cursor_modes & PORTAL_CURSOR_MODE_HIDDEN == 0 {
+            return Check::fail(format!(
+                "ScreenCast AvailableCursorModes={cursor_modes} does not include hidden cursor mode"
+            ));
+        }
+
+        return Check::ok(format!(
+            "pointer-capable RemoteDesktop portal (AvailableDeviceTypes={device_types}, AvailableSourceTypes={source_types}, ScreenCast version={version}, AvailableCursorModes={cursor_modes})"
+        ));
+    }
+
     Check::ok(format!(
-        "pointer-capable RemoteDesktop portal (AvailableDeviceTypes={device_types}, AvailableSourceTypes={source_types})"
+        "pointer-capable RemoteDesktop portal (AvailableDeviceTypes={device_types}, AvailableSourceTypes={source_types}, ScreenCast version={version}, hidden cursor mode is the interface default)"
     ))
+}
+
+fn screencast_version_number(screencast_version: &Check) -> Result<u32, String> {
+    if !screencast_version.ok {
+        return Err(format!(
+            "ScreenCast version is unavailable: {}",
+            screencast_version.detail
+        ));
+    }
+    parse_busctl_u32_property(&screencast_version.detail).ok_or_else(|| {
+        format!(
+            "ScreenCast version has an unexpected value: {}",
+            screencast_version.detail
+        )
+    })
+}
+
+fn screencast_cursor_modes(available_cursor_modes: &Check) -> Result<u32, String> {
+    if !available_cursor_modes.ok {
+        return Err(format!(
+            "ScreenCast AvailableCursorModes is unavailable: {}",
+            available_cursor_modes.detail
+        ));
+    }
+    parse_busctl_u32_property(&available_cursor_modes.detail).ok_or_else(|| {
+        format!(
+            "ScreenCast AvailableCursorModes has an unexpected value: {}",
+            available_cursor_modes.detail
+        )
+    })
 }
 
 fn remote_desktop_keyboard_check_from(
@@ -1872,6 +1970,7 @@ pub(crate) mod tests {
 
     fn portal_report(remote_desktop: Check) -> PortalReport {
         PortalReport {
+            remote_desktop_keyboard: remote_desktop.clone(),
             desktop_portal: Check::ok("ok"),
             remote_desktop,
             screencast: Check::fail("missing"),
@@ -2264,6 +2363,8 @@ pub(crate) mod tests {
             &screencast_runtime_introspection(),
             &available_device_types,
             &Check::ok("u 1"),
+            &Check::ok("u 2"),
+            &Check::ok("u 2"),
         );
         let keyboard = remote_desktop_keyboard_check_from(&introspection, &available_device_types);
 
@@ -2353,6 +2454,8 @@ pub(crate) mod tests {
             &Check::ok("NAME TYPE SIGNATURE RESULT/VALUE FLAGS"),
             &Check::ok("u 2"),
             &Check::ok("u 1"),
+            &Check::ok("u 2"),
+            &Check::ok("u 2"),
         );
 
         assert!(!check.ok);
@@ -2364,6 +2467,8 @@ pub(crate) mod tests {
         let check = remote_desktop_pointer_check_from(
             &remote_desktop_runtime_introspection(),
             &screencast_runtime_introspection(),
+            &Check::ok("u 2"),
+            &Check::ok("u 2"),
             &Check::ok("u 2"),
             &Check::ok("u 2"),
         );
@@ -2402,6 +2507,8 @@ pub(crate) mod tests {
             &remote_desktop_runtime_introspection(),
             &screencast_runtime_introspection(),
             &available_device_types,
+            &Check::ok("u 1"),
+            &Check::ok("u 2"),
             &Check::ok("u 1"),
         );
         let keyboard = remote_desktop_keyboard_check_from(
@@ -2965,5 +3072,83 @@ pub(crate) mod tests {
             .blockers
             .iter()
             .any(|blocker| blocker.contains("COSMIC Wayland window introspection")));
+    }
+
+    #[test]
+    fn desktop_env_hydration_includes_niri_socket() {
+        assert!(DESKTOP_ENV_KEYS.contains(&"NIRI_SOCKET"));
+    }
+
+    #[test]
+    fn wtype_capability_honors_keyboard_backend_overrides() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("wayland".to_string());
+        platform.xdg_current_desktop = Some("Hyprland".to_string());
+        platform.wayland_display = Some("wayland-0".to_string());
+        let mut input = input_report(false);
+        input.wtype = Check::ok("wtype");
+
+        assert!(should_advertise_wtype(
+            &platform, &input, false, false, false
+        ));
+        assert!(!should_advertise_wtype(
+            &platform, &input, true, false, false
+        ));
+        assert!(!should_advertise_wtype(
+            &platform, &input, false, true, false
+        ));
+        assert!(!should_advertise_wtype(
+            &platform, &input, false, false, true
+        ));
+    }
+
+    #[test]
+    fn remote_desktop_pointer_rejects_missing_hidden_cursor_mode() {
+        let check = remote_desktop_pointer_check_from(
+            &remote_desktop_runtime_introspection(),
+            &screencast_runtime_introspection(),
+            &Check::ok("u 2"),
+            &Check::ok("u 1"),
+            &Check::ok("u 2"),
+            &Check::ok("u 2"),
+        );
+
+        assert!(!check.ok);
+        assert!(check.detail.contains("does not include hidden cursor mode"));
+    }
+
+    #[test]
+    fn remote_desktop_pointer_accepts_screencast_v1_default_hidden_cursor() {
+        let check = remote_desktop_pointer_check_from(
+            &remote_desktop_runtime_introspection(),
+            &screencast_runtime_introspection(),
+            &Check::ok("u 2"),
+            &Check::ok("u 1"),
+            &Check::ok("u 1"),
+            &Check::fail("AvailableCursorModes is not available on ScreenCast v1"),
+        );
+
+        assert!(check.ok);
+        assert!(check
+            .detail
+            .contains("hidden cursor mode is the interface default"));
+    }
+
+    #[test]
+    fn capability_map_reports_niri_window_control() {
+        let platform = platform_report();
+        let portals = portal_report(Check::fail("missing"));
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let mut windowing = windowing_report(false, false);
+        windowing.niri = Check::ok("niri msg returned windows");
+        let input = input_report(false);
+
+        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+
+        assert_eq!(capabilities.window_control, vec![NIRI_BACKEND]);
+        assert_eq!(
+            capabilities.preferred.window_control.as_deref(),
+            Some(NIRI_BACKEND)
+        );
     }
 }

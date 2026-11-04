@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `type_text` falls back to ydotool when wtype cannot start (no execute permission, a missing interpreter), as it already did when wtype was not installed; nothing was typed. A `wtype` or `xdotool` on `PATH` counts only when it is executable.
 - Focus verification before targeted input gives each focused-window query up to 5 s and runs one more query after the 1 s transition allowance, so a slow backend (Hyprland runs two `hyprctl` calls per query) is not cut off while focus lands. Queries that keep reporting another window still fail after about 1 s.
 - Portal pointer input on niri maps coordinates with niri's logical output layout, read over its IPC socket or `niri msg`, before it falls back to wlr-output-management.
+- The server takes `NIRI_SOCKET` from the session's environment, like `WAYLAND_DISPLAY`, when the MCP host did not pass it.
+- `doctor` reports the RemoteDesktop keyboard check as `portals.remote_desktop_keyboard`; readiness used it, but the report did not show it. The pointer check reads the ScreenCast portal version and, from version 2, requires the hidden cursor mode that portal pointer sessions request; version 1 portals pass, since a hidden cursor is their default.
+- `doctor` no longer lists `wtype` as an input backend when `COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD=1` or `COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD=1` sends keyboard input elsewhere.
 
 ## [0.7.39] - 2026-11-04
 
