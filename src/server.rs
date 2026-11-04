@@ -4935,7 +4935,7 @@ impl ComputerUseLinux {
                 };
             }
             // A tree for a named window must not borrow the previous
-            // snapshot's app: on i3, sway and COSMIC the window has no pid, and
+            // snapshot's app: on i3 without xprop and on COSMIC the window has no pid, and
             // that app may not be the one holding it.
             let window_targeted = resolved_window.is_some()
                 && (target.is_some_and(WindowTarget::has_target) || fallback_window.is_some());
@@ -6183,8 +6183,8 @@ impl ComputerUseLinux {
     /// the accessibility bus. When neither is known the action proceeds, since
     /// a mismatch cannot be shown. When the pids match and the snapshot's tree
     /// was narrowed to one window of the app, a window target must name that
-    /// window, since an app's windows share its pid. A window target with no known pid (i3,
-    /// sway and COSMIC report none) is judged by the snapshot's window and
+    /// window, since an app's windows share its pid. A window target with no known pid (i3
+    /// without xprop, COSMIC) is judged by the snapshot's window and
     /// fails closed when the snapshot recorded no comparable window.
     async fn check_node_target(
         &self,
@@ -7940,8 +7940,8 @@ fn keyboard_target_raised(target: &WindowTarget) -> TargetRaised {
 
 /// The window a post-action tree can be recorded as taken for, so a
 /// follow-up action on that window passes the ownership check. A window with
-/// a pid needs the tree to come from that pid. A window without one (i3,
-/// sway, COSMIC) needs the tree narrowed to the frame its title names; an
+/// a pid needs the tree to come from that pid. A window without one (i3
+/// without xprop, COSMIC) needs the tree narrowed to the frame its title names; an
 /// app-wide tree may hold another app's nodes, and recording it would let
 /// them pass. A focused-window guess is never passed in.
 ///
@@ -16552,7 +16552,7 @@ mod node_target_scope_tests {
         );
     }
 
-    /// An i3, sway or COSMIC window: the backend reports no pid.
+    /// An i3 (no xprop) or COSMIC window: the backend reports no pid.
     fn pidless_window(window_id: u64) -> WindowInfo {
         WindowInfo {
             window_id,
