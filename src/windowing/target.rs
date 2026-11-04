@@ -4,7 +4,12 @@ use anyhow::{bail, Result};
 use std::future::Future;
 use tokio::time::{sleep_until, timeout_at, Duration, Instant};
 
-const FOCUS_VERIFY_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long focus may take to land, for example across a workspace switch.
+const FOCUS_VERIFY_TRANSITION_TIMEOUT: Duration = Duration::from_secs(1);
+/// Upper bound for one focused-window query. Some backends run several
+/// bounded commands per query (Hyprland runs two `hyprctl` calls of up to
+/// 2 s each), so a query can outlast the transition allowance.
+const FOCUS_VERIFY_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 const FOCUS_VERIFY_DELAY: Duration = Duration::from_millis(50);
 
 pub async fn list_windows() -> Result<Vec<WindowInfo>> {
@@ -86,25 +91,35 @@ pub(crate) fn ensure_backend_can_focus_target(
 }
 
 async fn wait_for_focused_window(requested_window: &WindowInfo) -> Option<WindowInfo> {
-    wait_for_focused_window_with(requested_window, FOCUS_VERIFY_TIMEOUT, || {
-        registry::focused_window_for_backend(&requested_window.backend)
-    })
+    wait_for_focused_window_with(
+        requested_window,
+        FOCUS_VERIFY_TRANSITION_TIMEOUT,
+        FOCUS_VERIFY_QUERY_TIMEOUT,
+        || registry::focused_window_for_backend(&requested_window.backend),
+    )
     .await
 }
 
 async fn wait_for_focused_window_with<F, Fut>(
     requested_window: &WindowInfo,
-    verify_timeout: Duration,
+    transition_timeout: Duration,
+    query_timeout: Duration,
     mut query: F,
 ) -> Option<WindowInfo>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<Option<WindowInfo>>>,
 {
-    let deadline = Instant::now() + verify_timeout;
+    // Poll until the transition allowance is over, then run one more query:
+    // a query that started before focus moved can return a stale window, so
+    // the fresh query after it decides. Each query has its own bound, so a
+    // slow backend is not cut off by the transition allowance, while fast
+    // queries that keep reporting another window still fail on time.
+    let deadline = Instant::now() + transition_timeout;
     let mut last_focused_window = None;
     loop {
-        match timeout_at(deadline, query()).await {
+        let started = Instant::now();
+        match timeout_at(started + query_timeout, query()).await {
             Ok(Ok(focused_window)) => {
                 if focused_window
                     .as_ref()
@@ -120,11 +135,10 @@ where
             Err(_) => break,
         }
 
-        let now = Instant::now();
-        if now >= deadline {
+        if started >= deadline {
             break;
         }
-        sleep_until((now + FOCUS_VERIFY_DELAY).min(deadline)).await;
+        sleep_until((Instant::now() + FOCUS_VERIFY_DELAY).min(deadline)).await;
     }
     last_focused_window
 }
@@ -377,7 +391,8 @@ mod tests {
 
     #[test]
     fn focus_verification_allows_workspace_transition_latency() {
-        assert!(FOCUS_VERIFY_TIMEOUT >= Duration::from_secs(1));
+        assert!(FOCUS_VERIFY_TRANSITION_TIMEOUT >= Duration::from_secs(1));
+        assert!(FOCUS_VERIFY_QUERY_TIMEOUT >= Duration::from_secs(4));
     }
 
     #[tokio::test]
@@ -398,14 +413,87 @@ mod tests {
         };
         let started = Instant::now();
 
-        let focused =
-            wait_for_focused_window_with(&requested_window, Duration::from_millis(20), || async {
+        let focused = wait_for_focused_window_with(
+            &requested_window,
+            Duration::from_millis(20),
+            Duration::from_millis(20),
+            || async {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 Ok::<_, anyhow::Error>(None)
-            })
-            .await;
+            },
+        )
+        .await;
 
         assert!(focused.is_none());
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    fn focused_test_window(window_id: u64) -> WindowInfo {
+        WindowInfo {
+            window_id,
+            title: None,
+            app_id: None,
+            wm_class: None,
+            pid: None,
+            bounds: None,
+            workspace: None,
+            focused: true,
+            hidden: false,
+            client_type: None,
+            backend: "test".to_string(),
+            terminal: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_fresh_query_verifies_after_a_stale_one() {
+        // Each query takes longer than the whole transition allowance. The
+        // first one started before focus moved and reports the old window;
+        // the next one must still run and see the target.
+        let requested_window = WindowInfo {
+            focused: false,
+            ..focused_test_window(1)
+        };
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let focused = wait_for_focused_window_with(
+            &requested_window,
+            Duration::from_millis(20),
+            Duration::from_millis(500),
+            || {
+                let attempts = std::sync::Arc::clone(&attempts);
+                async move {
+                    tokio::time::sleep(Duration::from_millis(60)).await;
+                    let first = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+                    Ok::<_, anyhow::Error>(Some(focused_test_window(if first { 2 } else { 1 })))
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(focused.map(|window| window.window_id), Some(1));
+    }
+
+    #[tokio::test]
+    async fn stale_focus_still_fails_after_the_transition_allowance() {
+        // Fast queries that keep reporting another window stop once the
+        // transition allowance is over; the longer query bound does not
+        // stretch a real focus failure.
+        let requested_window = WindowInfo {
+            focused: false,
+            ..focused_test_window(1)
+        };
+        let started = Instant::now();
+
+        let focused = wait_for_focused_window_with(
+            &requested_window,
+            Duration::from_millis(100),
+            Duration::from_secs(5),
+            || async { Ok::<_, anyhow::Error>(Some(focused_test_window(2))) },
+        )
+        .await;
+
+        assert_eq!(focused.map(|window| window.window_id), Some(2));
+        assert!(started.elapsed() < Duration::from_millis(400));
     }
 }

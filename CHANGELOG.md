@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A cancelled remote desktop portal click, drag, key chord or keysym text keeps the server's input lock until its release cleanup has sent the pending button or key release, so another backend cannot send input while a button or key is still down. A cancelled portal scroll runs to the end under the lock.
 - A cancelled KDE clipboard paste still puts the user's clipboard back: the paste runs to the end with the input and clipboard locks held. When writing the text to the clipboard fails, the write may still have landed, so the previous contents are restored and the text is not retyped through ydotool.
 - `type_text` falls back to ydotool when wtype cannot start (no execute permission, a missing interpreter), as it already did when wtype was not installed; nothing was typed. A `wtype` or `xdotool` on `PATH` counts only when it is executable.
+- Focus verification before targeted input gives each focused-window query up to 5 s and runs one more query after the 1 s transition allowance, so a slow backend (Hyprland runs two `hyprctl` calls per query) is not cut off while focus lands. Queries that keep reporting another window still fail after about 1 s.
 
 ## [0.7.39] - 2026-11-04
 
