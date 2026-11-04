@@ -6,10 +6,12 @@ The MCP server has a private /dev without uinput, a private bus without desktop
 services, and denied global-input helpers. The owner's display is never used.
 """
 import contextlib
+import faulthandler
 import json
 import os
 from pathlib import Path
 import select
+import signal
 import subprocess
 import sys
 import tempfile
@@ -25,6 +27,24 @@ def wait_for(probe, timeout=5):
     raise TimeoutError('fixture condition did not arrive')
 
 
+# The first GTK start on a fresh runner reads GDK and GTK from a cold disk. In isolated jobs it took
+# 0.5 to 2.2 s and warm starts about 0.15 s; after this job's cargo build it ran past a 5 s budget.
+FIXTURE_START_TIMEOUT = 30
+
+
+def wait_for_fixture(fixture, root):
+    start = time.monotonic()
+    while not (root / 'ready').exists():
+        if fixture.poll() is not None:
+            raise RuntimeError(f'GTK fixture exited with status {fixture.returncode} before it was ready')
+        if time.monotonic() - start > FIXTURE_START_TIMEOUT:
+            fixture.send_signal(signal.SIGUSR1)  # app() prints its Python stack to stderr.
+            time.sleep(1)
+            raise TimeoutError(f'GTK fixture was not ready after {FIXTURE_START_TIMEOUT} s')
+        time.sleep(.01)
+    print(f'GTK fixture ready after {time.monotonic() - start:.2f} s', flush=True)
+
+
 def stop(proc):
     proc.terminate()
     try:
@@ -35,6 +55,7 @@ def stop(proc):
 
 
 def app(root):
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
     import gi
     gi.require_version('Gtk', '3.0')
     gi.require_version('Gdk', '3.0')
@@ -118,7 +139,7 @@ def run(binary, root):
         fixture = subprocess.Popen(['/usr/bin/python3', __file__, '--app', str(root)], env=env,
                                    stdout=subprocess.DEVNULL)
         cleanup.callback(stop, fixture)
-        wait_for(lambda: (root / 'ready').exists())
+        wait_for_fixture(fixture, root)
         def events():
             return [json.loads(line) for line in (root / 'events').read_text().splitlines()] if (root / 'events').exists() else []
         def drops():
