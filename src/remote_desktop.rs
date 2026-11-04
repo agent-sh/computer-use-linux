@@ -433,6 +433,11 @@ pub(crate) async fn logical_desktop_layout() -> Option<Vec<LogicalMonitor>> {
             }
         }
     }
+    if env_token_contains("XDG_CURRENT_DESKTOP", "niri") {
+        if let Some(layout) = crate::windowing::backends::niri::monitor_layout().await {
+            return Some(layout);
+        }
+    }
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         if let Some(layout) = crate::wlr_outputs::wlr_output_layout().await {
             return Some(layout);
