@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.41] - 2026-11-04
+
 ### Fixed
 
 - An untargeted `scroll` whose remote desktop portal could not start (denied consent, portal startup failure) and whose ydotool fallback then failed reports the portal error after the ydotool error. It used to show only the ydotool error.
@@ -1071,7 +1073,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.40...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.41...HEAD
+[0.7.41]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.40...v0.7.41
 [0.7.40]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.39...v0.7.40
 [0.7.39]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.38...v0.7.39
 [0.7.38]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.37...v0.7.38
