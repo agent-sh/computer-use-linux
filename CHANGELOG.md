@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The Pi extension's type check runs on TypeScript 7.0.2, the native Go compiler, instead of TypeScript 5.9.3. Same `tsc --noEmit` command and tsconfig; the check takes about 0.6 s instead of 2.7 s.
+
 ## [0.7.39] - 2026-11-04
 
 ### Changed
