@@ -89,6 +89,13 @@ older binary without the checks:
 /usr/bin/python3 scripts/contenteditable_focus_test.py target/debug/computer-use-linux
 ```
 
+A Unix socket path must fit in 107 bytes. Tests that bind or connect to
+sockets take their directory from `src/test_sockets.rs` or
+`scripts/socket_fixture.py`: the temp dir (or the base a script names) when
+the longest socket path fits, else `XDG_RUNTIME_DIR`. When neither fits, the
+test fails and names the limit and the path. A long `TMPDIR` moves the
+fixtures instead of breaking them.
+
 ## PR Guidelines
 
 - Keep changes focused and explain the desktop/session you tested on.

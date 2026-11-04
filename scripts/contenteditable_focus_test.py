@@ -20,8 +20,9 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
+
+from socket_fixture import INDICATOR_SOCKET, socket_tempdir
 
 MARKER = "cul290marker"
 
@@ -267,7 +268,10 @@ def main():
         return
     cache = Path.home() / ".cache"
     cache.mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="cul-290-", dir=cache) as scratch:
+    # runtime/ is the server's runtime dir. The browser runs with TMPDIR set
+    # to the scratch and binds its singleton socket there.
+    sockets = [f"runtime/{INDICATOR_SOCKET}", ".org.chromium.Chromium.XXXXXX/SingletonSocket"]
+    with socket_tempdir("cul-290-", sockets, dir=cache) as scratch:
         runtime = Path(scratch) / "runtime"
         runtime.mkdir(mode=0o700)
         display = next(f":{n}" for n in range(190, 260) if not Path(f"/tmp/.X11-unix/X{n}").exists())

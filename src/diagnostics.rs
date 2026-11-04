@@ -3016,10 +3016,10 @@ pub(crate) mod tests {
 
     #[test]
     fn ydotool_socket_check_rejects_legacy_stream_socket() {
-        let dir = std::env::temp_dir().join(format!(
-            "computer-use-linux-diagnostics-{}",
-            std::process::id()
-        ));
+        let dir = crate::test_sockets::socket_fixture(
+            &format!("cul-diag-stream-{}", std::process::id()),
+            "ydotool.sock",
+        );
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp diagnostics dir");
         let socket = dir.join("ydotool.sock");
@@ -3035,10 +3035,10 @@ pub(crate) mod tests {
 
     #[test]
     fn ydotool_socket_check_accepts_datagram_socket() {
-        let dir = std::env::temp_dir().join(format!(
-            "computer-use-linux-diagnostics-dgram-{}",
-            std::process::id()
-        ));
+        let dir = crate::test_sockets::socket_fixture(
+            &format!("cul-diag-dgram-{}", std::process::id()),
+            "ydotool.sock",
+        );
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp diagnostics dir");
         let socket = dir.join("ydotool.sock");

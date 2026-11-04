@@ -18,6 +18,8 @@ import threading
 import time
 import zlib
 
+from socket_fixture import INDICATOR_SOCKET, socket_tempdir
+
 BINARY = str(Path(sys.argv[1]).resolve())
 
 HELPER = '''#!/usr/bin/python3
@@ -282,7 +284,9 @@ if __name__ == '__main__':
     if len(sys.argv) > 2 and sys.argv[2] == '--private':
         run_private(sys.argv[3])
     else:
-        with tempfile.TemporaryDirectory(prefix='cul-portal-', dir=Path.home()/'.cache') as directory:
+        # The directory is the server's runtime dir.
+        with socket_tempdir('cul-portal-', [INDICATOR_SOCKET],
+                            dir=Path.home()/'.cache') as directory:
             env = dict(os.environ, XDG_RUNTIME_DIR=directory, XDG_CONFIG_HOME=directory+'/config')
             proc = subprocess.Popen(['dbus-run-session', '--', '/usr/bin/python3', __file__,
                                      BINARY, '--private', directory], env=env, start_new_session=True)

@@ -16,6 +16,8 @@ import sys
 import tempfile
 from typing import Any
 
+from socket_fixture import INDICATOR_SOCKET, socket_tempdir
+
 
 EXPECTED_TOOLS = {
     "doctor",
@@ -279,7 +281,9 @@ def assert_screenshot_error_contract(binary: pathlib.Path) -> None:
     # Supply an unfocused window without connecting to the user's desktop.
     # niri validates the socket's type before invoking its CLI, so keep a
     # private socket bound even though the fixture CLI answers every query.
-    with tempfile.TemporaryDirectory(prefix="cul-mcp-") as temporary:
+    # The fixture is the server's runtime dir, where its capture handshake
+    # names the overlay socket, the longest one here.
+    with socket_tempdir("cul-mcp-", [INDICATOR_SOCKET]) as temporary:
         fixture = pathlib.Path(temporary)
         # The plugin launcher still needs these commands for cached startup.
         # The server can restore standard PATH entries during environment

@@ -21,6 +21,8 @@ mod remote_desktop;
 mod screenshot_impl;
 mod server;
 mod terminal;
+#[cfg(test)]
+mod test_sockets;
 mod tree_encoding;
 mod tree_spill;
 mod windowing;

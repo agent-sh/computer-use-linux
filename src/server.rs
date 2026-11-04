@@ -10915,14 +10915,18 @@ mod tests {
 
     impl PointerChildHarness {
         fn new(prefix: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "{prefix}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
+            // The longest socket a run names: the scroll test's missing.sock.
+            let dir = crate::test_sockets::socket_fixture(
+                &format!(
+                    "{prefix}-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ),
+                "missing.sock",
+            );
             std::fs::create_dir(&dir).unwrap();
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
             let socket_path = dir.join("input.sock");

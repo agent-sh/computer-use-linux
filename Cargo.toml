@@ -24,6 +24,7 @@ include = [
     "/scripts/gnome_indicator_test.py",
     "/scripts/hyprland_background_test.py",
     "/scripts/mcp_safety_check.py",
+    "/scripts/socket_fixture.py",
     "/Cargo.toml",
     "/Cargo.lock",
     "/README.md",

@@ -3275,7 +3275,7 @@ mod tests {
         #[zbus::interface(name = "org.freedesktop.portal.RemoteDesktop")]
         impl RemoteDesktop {}
 
-        let dir = TempState::new();
+        let dir = TempState::with_bus();
         let socket = dir.path.join("bus");
         let address = format!("unix:path={}", socket.display());
         let probe = || remote_desktop_portal_missing_at(address.parse().unwrap());
@@ -3570,9 +3570,18 @@ mod tests {
 
     impl TempState {
         fn new() -> Self {
+            Self::create(|name| std::env::temp_dir().join(name))
+        }
+
+        /// A state dir that also holds a private bus's `bus` socket.
+        fn with_bus() -> Self {
+            Self::create(|name| crate::test_sockets::bus_fixture(name, "bus"))
+        }
+
+        fn create(place: impl FnOnce(&str) -> PathBuf) -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(1);
             let nonce = NEXT.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
+            let path = place(&format!(
                 "cul-rd-persist-{}-{}-{nonce}",
                 std::process::id(),
                 std::time::SystemTime::now()

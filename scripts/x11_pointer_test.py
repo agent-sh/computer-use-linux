@@ -14,8 +14,9 @@ import select
 import signal
 import subprocess
 import sys
-import tempfile
 import time
+
+from socket_fixture import INDICATOR_SOCKET, socket_tempdir
 
 
 def wait_for(probe, timeout=5):
@@ -240,7 +241,9 @@ def main():
     binary = str(Path(sys.argv[1]).resolve())
     cache = Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache'))
     cache.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='cul-xptr-', dir=cache) as directory:
+    # run/ is the server's runtime dir and the private bus's.
+    with socket_tempdir('cul-xptr-', [f'run/{INDICATOR_SOCKET}'], bus_dir='run',
+                        dir=cache) as directory:
         root = Path(directory)
         runtime = root / 'run'
         runtime.mkdir(mode=0o700)
