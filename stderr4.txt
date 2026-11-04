@@ -1,2 +1,0 @@
-[computer-use-linux] downloading computer-use-linux-x86_64-unknown-linux-gnu from https://github.com/agent-sh/computer-use-linux/releases/download/v0.7.38
-[computer-use-linux] installed computer-use-linux-x86_64-unknown-linux-gnu and computer-use-linux-cosmic-x86_64-unknown-linux-gnu and computer-use-linux-indicator-x86_64-unknown-linux-gnu

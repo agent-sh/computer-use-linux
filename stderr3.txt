@@ -1,4 +1,0 @@
-[computer-use-linux] downloading computer-use-linux-x86_64-unknown-linux-gnu from https://127.0.0.1:48633/release
-[computer-use-linux] no data for 30 s: https://127.0.0.1:48633/release/computer-use-linux-x86_64-unknown-linux-gnu
-computer-use-linux binary not found: /home/avifenesh/.cache/cul-npm-live/prefix/lib/node_modules/@agent-sh/computer-use-linux/npm/bin/computer-use-linux-linux-x64
-Run `node npm/install.js` in the package directory, allow its install script, or set COMPUTER_USE_LINUX_BIN.
