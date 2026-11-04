@@ -196,6 +196,11 @@ This requires both `x`/`y` and element identity; do not
 combine it with `relative: true` or use it for ordinary screenshot pixels.
 Use `perform_action` explicitly for entry `activate` or slider `jump`; `click`
 never substitutes those actions, including when bounds are unavailable.
+A coordinate `click` or `scroll` result warns when the point is off the
+screenshot or between monitors, where no monitor shows that part of the
+screenshot. The result says whether the input was sent, and the warning says
+where it may have landed; pick a point on a monitor and check the screen
+before retrying.
 
 ### Screenshot-relative coordinates
 

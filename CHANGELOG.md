@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A click or scroll coordinate between monitors gets a warning. Monitors of different heights or offset rows leave parts of the screenshot that no monitor shows, and a point there used to pass as on-screen. The server reads the monitor layout once per screenshot, from the portal session or the compositor, or from RandR on X11, and checks the point in screenshot pixels. It never runs xrandr on Wayland, where that could start Xwayland. Without a layout that fits the screenshot, only its outer rectangle is checked, as before. No screenshot is taken for the check.
+- Off-screen warnings say what the input route did with the point. The portal sends nothing, and its warning no longer claims the input landed. On X11 the server keeps the pointer on the screen, so a point off the screenshot lands at an edge; the warning used to say it landed on no visible pixel. On X11 and the uinput pointer, a point between monitors lands at a monitor edge or on no visible pixel. A point clamped into a gap, by the X server or the uinput device, gets that warning too. A failed X11 dispatch gets no warning, since nothing was sent.
+- When the uinput pointer's stale device cannot be replaced, the result says the device was removed and where a retry goes: a new device from a fresh screenshot first, then the remote desktop portal, ydotool, or a refusal on Wayland.
+- A KWin element click whose uinput device cannot be replaced reports that device failure. It used to report a KWin coordinate mapping failure and ask for a new `get_app_state`, though the mapping had worked.
+- The KWin element mapping text no longer names the backend a second time.
+
 ## [0.7.41] - 2026-11-04
 
 ### Fixed
