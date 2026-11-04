@@ -456,6 +456,16 @@ mod tests {
     }
 
     #[test]
+    fn enabled_extensions_contains_uuid_matches_quoted_entry() {
+        assert!(enabled_extensions_contains_uuid(&format!(
+            "['other@example.com', '{UUID}']"
+        )));
+        assert!(!enabled_extensions_contains_uuid(&format!(
+            "['{UUID}.suffix']"
+        )));
+    }
+
+    #[test]
     fn session_command_failure_reports_command_stderr() {
         let mut command = Command::new("sh");
         command.args(["-c", "printf 'settings rejected' >&2; exit 23"]);

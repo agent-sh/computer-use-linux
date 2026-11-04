@@ -10333,6 +10333,12 @@ mod tests {
     use crate::windows::{WindowBounds, GNOME_SHELL_EXTENSION_BACKEND, NIRI_BACKEND};
     use std::os::unix::fs::PermissionsExt;
 
+    #[test]
+    fn mcp_server_version_matches_cargo() {
+        let info = rmcp::ServerHandler::get_info(&ComputerUseLinux::default());
+        assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+    }
+
     /// Restores an environment variable when a test ends, including on panic.
     struct EnvVarGuard {
         key: &'static str,
@@ -18001,6 +18007,15 @@ echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
         assert_eq!(structured["ok"], true);
         assert!(structured.get("screenshot").is_some());
         let message = structured["message"].as_str().unwrap();
+        // The layout warning survives the post-action capture.
+        for expected in [
+            "WARNING: X11 keyboard layout",
+            "br/ABNT2",
+            "before pressing Enter",
+            "Field contents were not verified",
+        ] {
+            assert!(message.contains(expected), "missing {expected}: {message}");
+        }
         assert!(
             message.contains("layout-change detection was unavailable"),
             "{message}"

@@ -40,8 +40,8 @@ mod tests {
         }
     }
     use super::registry::{
-        descriptors, list_note, COSMIC_WAYLAND_BACKEND, GNOME_SHELL_EXTENSION_BACKEND,
-        GNOME_SHELL_INTROSPECT_BACKEND,
+        backend_can_exact_focus, descriptors, list_note, COSMIC_WAYLAND_BACKEND,
+        GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND, NIRI_BACKEND,
     };
     use super::target::{ensure_backend_can_focus_target, focused_in};
     use super::*;
@@ -76,6 +76,11 @@ mod tests {
                 X11_BACKEND,
             ]
         );
+    }
+
+    #[test]
+    fn niri_backend_can_exact_focus_targets() {
+        assert!(backend_can_exact_focus(NIRI_BACKEND));
     }
 
     #[test]
