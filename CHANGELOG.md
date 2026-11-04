@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- An untargeted `scroll` whose remote desktop portal could not start (denied consent, portal startup failure) and whose ydotool fallback then failed reports the portal error after the ydotool error. It used to show only the ydotool error.
+- KWin element clicks keep the uinput edge-clamp note and the portal off-screen warning. The KWin coordinate mapping text is appended to the result message instead of replacing it.
+- When a later screenshot reports a different desktop size, the next click, coordinate scroll or drag replaces the uinput absolute pointer, sized to that screenshot, as KWin element clicks already did. The compositor spreads the device's range across the current layout, so a device sized for an earlier desktop scaled every point to the wrong place, and an off-screen coordinate got no note. With a matching device, an off-screen coordinate is clamped to the desktop edge, and a click or scroll result says where it landed. If the replacement fails, the action is not sent and the result says why.
+
 ## [0.7.40] - 2026-11-04
 
 ### Changed
