@@ -396,7 +396,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slow_focus_query_cannot_exceed_verification_deadline() {
+    async fn slow_focus_query_is_cut_off_at_its_own_bound() {
         let requested_window = WindowInfo {
             window_id: 1,
             title: None,

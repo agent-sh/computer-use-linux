@@ -12,12 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A uinput absolute-pointer click whose press or release write fails sends one more release, so the button cannot stay held, and the error says whether that release went through. A drag reports its release the same way. A failed absolute-pointer action drops the device, and the next action creates a fresh one.
 - A cancelled remote desktop portal click, drag, key chord or keysym text keeps the server's input lock until its release cleanup has sent the pending button or key release, so another backend cannot send input while a button or key is still down. A cancelled portal scroll runs to the end under the lock.
 - A cancelled KDE clipboard paste still puts the user's clipboard back: the paste runs to the end with the input and clipboard locks held. When writing the text to the clipboard fails, the write may still have landed, so the previous contents are restored and the text is not retyped through ydotool.
-- `type_text` falls back to ydotool when wtype cannot start (no execute permission, a missing interpreter), as it already did when wtype was not installed; nothing was typed. A `wtype` or `xdotool` on `PATH` counts only when it is executable.
+- A `wtype` or `xdotool` on `PATH` without an execute bit is no longer selected, so input takes the next route, as when it is not installed. A selected wtype that cannot start (a missing interpreter, a `noexec` mount) makes `type_text` fall back to ydotool, as a missing wtype does; nothing was typed.
 - Focus verification before targeted input gives each focused-window query up to 5 s and runs one more query after the 1 s transition allowance, so a slow backend (Hyprland runs two `hyprctl` calls per query) is not cut off while focus lands. Queries that keep reporting another window still fail after about 1 s.
 - Portal pointer input on niri maps coordinates with niri's logical output layout, read over its IPC socket or `niri msg`, before it falls back to wlr-output-management.
 - The server takes `NIRI_SOCKET` from the session's environment, like `WAYLAND_DISPLAY`, when the MCP host did not pass it.
 - `doctor` reports the RemoteDesktop keyboard check as `portals.remote_desktop_keyboard`; readiness used it, but the report did not show it. The pointer check reads the ScreenCast portal version and, from version 2, requires the hidden cursor mode that portal pointer sessions request; version 1 portals pass, since a hidden cursor is their default.
-- `doctor` no longer lists `wtype` as an input backend when `COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD=1` or `COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD=1` sends keyboard input elsewhere.
+- `doctor` no longer lists `wtype` as an input backend with `COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD=1`, or with `COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD=1` when xdotool and `DISPLAY` are available, since keyboard input then goes to that backend.
 
 ## [0.7.39] - 2026-11-04
 

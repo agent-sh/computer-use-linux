@@ -1482,6 +1482,10 @@ impl ComputerUseLinux {
             }
         }
         let off_screen_note = self.off_screen_note_for_point(x, y).await;
+        // A portal release guard holds a clone, so a cancelled action keeps
+        // the lock until its button is up; this one keeps it until a failed
+        // session is cleared.
+        let input_guard = InputOperationGuard::new(input_guard);
         if let Some(session) = self.cached_portal_pointer_session() {
             let Some((portal_x, portal_y)) =
                 portal_target_point.or_else(|| self.logical_portal_point(&session, x, y))
@@ -1498,7 +1502,7 @@ impl ComputerUseLinux {
                 portal_y,
                 PointerButton::from_name(params.button.as_deref()),
                 params.click_count.unwrap_or(1).clamp(1, 10),
-                InputOperationGuard::new(input_guard),
+                input_guard.clone(),
             )
             .await
             {
@@ -1550,7 +1554,7 @@ impl ComputerUseLinux {
                         portal_y,
                         PointerButton::from_name(params.button.as_deref()),
                         params.click_count.unwrap_or(1).clamp(1, 10),
-                        InputOperationGuard::new(input_guard),
+                        input_guard.clone(),
                     )
                     .await
                     {
@@ -2250,6 +2254,10 @@ impl ComputerUseLinux {
                 Err(error) => abs_pointer_error("drag", error, received),
             });
         }
+        // A portal release guard holds a clone, so a cancelled action keeps
+        // the lock until its button is up; this one keeps it until a failed
+        // session is cleared.
+        let input_guard = InputOperationGuard::new(input_guard);
         if let Some(session) = self.cached_portal_pointer_session() {
             let _ = self.capture_space_rect().await;
             let Some((start_x, start_y)) =
@@ -2270,7 +2278,7 @@ impl ComputerUseLinux {
                 start_y,
                 end_x,
                 end_y,
-                InputOperationGuard::new(input_guard),
+                input_guard.clone(),
             )
             .await
             {
@@ -2310,7 +2318,7 @@ impl ComputerUseLinux {
                         start_y,
                         end_x,
                         end_y,
-                        InputOperationGuard::new(input_guard),
+                        input_guard.clone(),
                     )
                     .await
                     {
@@ -2500,9 +2508,7 @@ impl ComputerUseLinux {
                     // The release cleanup holds a clone, so a cancelled chord
                     // keeps the lock until its keys are up; this one keeps it
                     // through the landing notes.
-                    match press_key_chord(&session, &modifiers, key, Some(input_guard.clone()))
-                        .await
-                    {
+                    match press_key_chord(&session, &modifiers, key, input_guard.clone()).await {
                         Ok(()) => {
                             let notes = self.input_landing_notes(focus.as_ref(), false).await;
                             return Json(with_notes(
@@ -2824,7 +2830,7 @@ impl ComputerUseLinux {
                         "Portal keyboard input is unavailable; no text was sent.".to_string()
                     })?;
                 focus = self.focus_target_for_input(&portal_target).await?;
-                type_text_with_keysyms(&session, &keysyms, Some(input_guard.clone()))
+                type_text_with_keysyms(&session, &keysyms, input_guard.clone())
                     .await
                     .map_err(|error| {
                         self.clear_portal_keyboard_session(&session);
@@ -9257,7 +9263,7 @@ async fn run_kde_clipboard_paste_text(
     .await?;
 
     let (modifiers, keycode) = kde_clipboard_paste_chord(paste_shortcut);
-    let paste_result = press_keycode_chord(session, modifiers, keycode, Some(operation_guard))
+    let paste_result = press_keycode_chord(session, modifiers, keycode, operation_guard)
         .await
         .map_err(|error| format!("{error:#}"));
 
@@ -9905,10 +9911,13 @@ fn xdotool_type_timeout(text: &str, delay_ms: u64) -> Duration {
 }
 
 fn which_in_path(binary: &str) -> bool {
-    let Ok(path) = env::var("PATH") else {
-        return false;
-    };
-    env::split_paths(&path).any(|dir| executable_file(&dir.join(binary)))
+    env::var_os("PATH").is_some_and(|path| executable_in(&path, binary))
+}
+
+/// True when a directory of `path` (a `PATH` value) holds an executable
+/// `binary`.
+fn executable_in(path: &std::ffi::OsStr, binary: &str) -> bool {
+    env::split_paths(path).any(|dir| executable_file(&dir.join(binary)))
 }
 
 /// True when the program never started: exec found no file, no permission,
@@ -14571,19 +14580,26 @@ esac
     }
 
     #[test]
-    fn wtype_on_path_must_be_executable() {
+    fn a_program_on_path_counts_only_when_it_is_executable() {
+        // No `:` in the name, so the directory can sit in a PATH value.
         let dir = std::env::temp_dir().join(format!(
-            "computer-use-linux-wtype-path-{}-{:?}",
+            "computer-use-linux-wtype-path-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&dir).expect("create command test directory");
         let wtype = dir.join("wtype");
         std::fs::write(&wtype, "#!/bin/sh\nexit 0\n").expect("write fake wtype");
-        assert!(!executable_file(&wtype));
+        let path = std::env::join_paths([std::path::Path::new("/nonexistent"), dir.as_path()])
+            .expect("join PATH");
+        assert!(!executable_in(&path, "wtype"));
         std::fs::set_permissions(&wtype, std::fs::Permissions::from_mode(0o700))
             .expect("make fake wtype executable");
-        assert!(executable_file(&wtype));
+        assert!(executable_in(&path, "wtype"));
+        assert!(!executable_in(&path, "xdotool"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

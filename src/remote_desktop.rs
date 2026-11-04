@@ -41,7 +41,9 @@ const INPUT_TIMEOUT: Duration = Duration::from_secs(3);
 const DEVICE_KEYBOARD: u32 = 1;
 const DEVICE_POINTER: u32 = 2;
 const SOURCE_MONITOR: u32 = 1;
-const CURSOR_MODE_HIDDEN: u32 = 1;
+/// The ScreenCast `cursor_mode` that pointer sessions request; doctor
+/// checks the portal offers it.
+pub(crate) const CURSOR_MODE_HIDDEN: u32 = 1;
 
 const KEY_RELEASED: u32 = 0;
 const KEY_PRESSED: u32 = 1;
@@ -851,7 +853,7 @@ pub(crate) async fn drag(
 pub(crate) async fn type_text_with_keysyms(
     session: &PortalKeyboardSession,
     keysyms: &[i32],
-    operation_guard: Option<InputOperationGuard>,
+    operation_guard: InputOperationGuard,
 ) -> Result<()> {
     let input_guard = Arc::clone(&session.input_lock).lock_owned().await;
     session.ensure_valid()?;
@@ -872,7 +874,7 @@ pub(crate) async fn press_keycode_chord(
     session: &PortalKeyboardSession,
     modifiers: &[i32],
     keycode: i32,
-    operation_guard: Option<InputOperationGuard>,
+    operation_guard: InputOperationGuard,
 ) -> Result<()> {
     let modifiers: Vec<PortalKey> = modifiers.iter().copied().map(PortalKey::Keycode).collect();
     press_key_chord(
@@ -891,7 +893,7 @@ pub(crate) async fn press_key_chord(
     session: &PortalKeyboardSession,
     modifiers: &[PortalKey],
     key: PortalKey,
-    operation_guard: Option<InputOperationGuard>,
+    operation_guard: InputOperationGuard,
 ) -> Result<()> {
     let input_guard = Arc::clone(&session.input_lock).lock_owned().await;
     session.ensure_valid()?;
@@ -976,7 +978,7 @@ impl KeyboardReleaseGuard {
     fn new(
         session: &PortalKeyboardSession,
         input_guard: OwnedMutexGuard<()>,
-        operation_guard: Option<InputOperationGuard>,
+        operation_guard: InputOperationGuard,
     ) -> Self {
         Self {
             ei: session.ei.clone(),
@@ -984,7 +986,7 @@ impl KeyboardReleaseGuard {
             session_handle: session.session_handle.clone(),
             pressed: Vec::new(),
             input_guard: Some(input_guard),
-            operation_guard,
+            operation_guard: Some(operation_guard),
             valid: Arc::clone(&session.valid),
         }
     }

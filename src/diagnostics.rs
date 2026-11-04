@@ -37,8 +37,6 @@ const FORCE_PORTAL_KEYBOARD_ENV_KEYS: &[&str] = &["COMPUTER_USE_LINUX_FORCE_PORT
 const FORCE_PORTAL_POINTER_ENV_KEYS: &[&str] = &["COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER"];
 const PORTAL_DEVICE_KEYBOARD: u32 = 1;
 const PORTAL_DEVICE_POINTER: u32 = 2;
-/// The cursor mode portal pointer sessions request in SelectSources.
-const PORTAL_CURSOR_MODE_HIDDEN: u32 = 1;
 const PORTAL_SOURCE_MONITOR: u32 = 1;
 /// ScreenCast version that added `AvailableCursorModes` and `cursor_mode`.
 const SCREENCAST_CURSOR_MODE_VERSION: u32 = 2;
@@ -1284,11 +1282,13 @@ fn should_advertise_wtype(
     force_xdotool: bool,
     force_portal_keyboard: bool,
 ) -> bool {
+    // The server routes keyboard input to xdotool before wtype only when
+    // xdotool can run, and to the portal whenever it is forced.
     platform_is_wayland(platform)
         && wtype_compatible_wayland_desktop(platform.xdg_current_desktop.as_deref())
         && input.wtype.ok
         && !force_ydotool
-        && !force_xdotool
+        && !should_advertise_xdotool(platform, input, force_ydotool, force_xdotool)
         && !force_portal_keyboard
 }
 
@@ -1533,7 +1533,7 @@ fn remote_desktop_pointer_check_from(
             Ok(cursor_modes) => cursor_modes,
             Err(detail) => return Check::fail(detail),
         };
-        if cursor_modes & PORTAL_CURSOR_MODE_HIDDEN == 0 {
+        if cursor_modes & crate::remote_desktop::CURSOR_MODE_HIDDEN == 0 {
             return Check::fail(format!(
                 "ScreenCast AvailableCursorModes={cursor_modes} does not include hidden cursor mode"
             ));
@@ -3075,8 +3075,18 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn desktop_env_hydration_includes_niri_socket() {
-        assert!(DESKTOP_ENV_KEYS.contains(&"NIRI_SOCKET"));
+    fn desktop_env_hydration_imports_the_niri_socket() {
+        let current_env = HashMap::new();
+        let session_env = HashMap::from([(
+            "NIRI_SOCKET".to_string(),
+            "/run/user/1000/niri.wayland-1.42.sock".to_string(),
+        )]);
+
+        let updates = desktop_env_hydration_updates(&current_env, &session_env);
+
+        assert!(updates.iter().any(|(key, value)| {
+            *key == "NIRI_SOCKET" && value == "/run/user/1000/niri.wayland-1.42.sock"
+        }));
     }
 
     #[test]
@@ -3095,10 +3105,21 @@ pub(crate) mod tests {
             &platform, &input, true, false, false
         ));
         assert!(!should_advertise_wtype(
+            &platform, &input, false, false, true
+        ));
+
+        // Forcing xdotool hides wtype only when xdotool can run: installed,
+        // with DISPLAY set, as the server's keyboard routing requires.
+        assert!(should_advertise_wtype(
             &platform, &input, false, true, false
         ));
+        input.xdotool = Check::ok("xdotool");
         assert!(!should_advertise_wtype(
-            &platform, &input, false, false, true
+            &platform, &input, false, true, false
+        ));
+        platform.display = None;
+        assert!(should_advertise_wtype(
+            &platform, &input, false, true, false
         ));
     }
 
