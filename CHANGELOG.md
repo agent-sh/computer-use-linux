@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.40] - 2026-11-04
+
 ### Changed
 
 - The Pi extension's type check runs on TypeScript 7.0.2, the native Go compiler, instead of TypeScript 5.9.3. Same `tsc --noEmit` command and tsconfig; the check takes about 0.6 s instead of 2.7 s.
@@ -1063,7 +1065,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.39...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.40...HEAD
+[0.7.40]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.39...v0.7.40
 [0.7.39]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.38...v0.7.39
 [0.7.38]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.37...v0.7.38
 [0.7.37]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.36...v0.7.37
