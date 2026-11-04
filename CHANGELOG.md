@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The Pi extension's type check runs on TypeScript 7.0.2, the native Go compiler, instead of TypeScript 5.9.3. Same `tsc --noEmit` command and tsconfig; the check takes about 0.6 s instead of 2.7 s.
+
 ### Fixed
 
 - A uinput absolute-pointer click whose press or release write fails sends one more release, so the button cannot stay held, and the error says whether that release went through. A drag reports its release the same way. A failed absolute-pointer action drops the device, and the next action creates a fresh one.
