@@ -183,7 +183,7 @@ impl AbsPointer {
         Ok(landing)
     }
 
-    /// Press at `(start)`, move to `(end)`, release — a drag with `button`.
+    /// Press at `(start)`, move to `(end)`, release: a drag with `button`.
     /// Reports where the press and the release were emitted after clamping.
     pub fn drag(
         &mut self,
@@ -198,21 +198,19 @@ impl AbsPointer {
             return Err(self.release_after_error(code, error));
         }
         sleep(Duration::from_millis(40));
-        // The path ends at `end`, so its last motion is where the release goes.
-        let mut end_landing = start_landing;
         for (x, y) in crate::pointer_path::drag_points(start, end) {
-            match self.move_to(x, y) {
-                Ok(landing) => end_landing = landing,
-                Err(error) => return Err(self.release_after_error(code, error)),
+            if let Err(error) = self.move_to(x, y) {
+                return Err(self.release_after_error(code, error));
             }
             sleep(crate::pointer_path::DRAG_STEP_DELAY);
         }
         if let Err(error) = self.release_button(code) {
             return Err(self.release_after_error(code, error));
         }
+        // The path's last motion is `end`, so the release goes there.
         Ok(DragLanding {
             start: start_landing,
-            end: end_landing,
+            end: self.geometry.landing_for(end.0, end.1),
         })
     }
 

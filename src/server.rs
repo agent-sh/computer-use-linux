@@ -6222,10 +6222,10 @@ impl ComputerUseLinux {
         })
     }
 
-    /// The off-screen note for each drag endpoint the route sent, naming the
-    /// start and the end. Only the endpoints are checked: the portal moves
-    /// intermediate motion onto the nearest shared monitor, and on X11 and
-    /// uinput the drop goes to the end point.
+    /// The off-screen note for each drag endpoint, naming the start and the
+    /// end. Only the endpoints are checked: the portal moves intermediate
+    /// motion onto the nearest shared monitor, and on X11 and uinput the drop
+    /// goes to the end point.
     async fn drag_off_screen_notes(
         &self,
         start: (i32, i32),
@@ -12928,9 +12928,10 @@ esac
             abs_pointer_clamp_note(
                 "coordinate",
                 crate::abs_pointer::PointerLanding {
-                requested: (1920, 1080),
-                emitted: (1919, 1079),
-            }),
+                    requested: (1920, 1080),
+                    emitted: (1919, 1079),
+                }
+            ),
             Some(
                 "Requested coordinate 1920,1080 was clamped to 1919,1079 by the uinput absolute pointer."
                     .to_string()
