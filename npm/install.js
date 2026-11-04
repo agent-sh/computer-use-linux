@@ -18,36 +18,63 @@ const binDir = path.join(__dirname, 'bin');
 const binaryPath = path.join(binDir, `computer-use-linux-${process.platform}-${process.arch}`);
 const cosmicHelperPath = path.join(binDir, 'computer-use-linux-cosmic');
 const indicatorPath = path.join(binDir, 'computer-use-linux-indicator');
+// A request that receives no bytes for this long is stalled. The wrapper
+// installs on first launch, so a stalled download would otherwise hold the
+// MCP client's startup open and outlive it when the client gives up.
+const IDLE_TIMEOUT_MS = 30_000;
 
 function fail(message) {
   console.error(`[computer-use-linux] ${message}`);
   process.exit(1);
 }
 
+// Write next to the destination, then rename over it, so a server starting
+// at the same time (the wrapper installs on first launch) never runs a
+// half-written binary.
+function place(source, destination) {
+  const staging = `${destination}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+  try {
+    fs.copyFileSync(source, staging);
+    fs.chmodSync(staging, 0o755);
+    fs.renameSync(staging, destination);
+  } finally {
+    fs.rmSync(staging, { force: true });
+  }
+}
+
 function copyLocalBinary(source) {
   fs.mkdirSync(binDir, { recursive: true });
-  fs.copyFileSync(source, binaryPath);
-  fs.chmodSync(binaryPath, 0o755);
+  place(source, binaryPath);
   if (process.env.COMPUTER_USE_LINUX_LOCAL_COSMIC_HELPER) {
-    fs.copyFileSync(process.env.COMPUTER_USE_LINUX_LOCAL_COSMIC_HELPER, cosmicHelperPath);
-    fs.chmodSync(cosmicHelperPath, 0o755);
+    place(process.env.COMPUTER_USE_LINUX_LOCAL_COSMIC_HELPER, cosmicHelperPath);
   }
   if (process.env.COMPUTER_USE_LINUX_LOCAL_INDICATOR) {
-    fs.copyFileSync(process.env.COMPUTER_USE_LINUX_LOCAL_INDICATOR, indicatorPath);
-    fs.chmodSync(indicatorPath, 0o755);
+    place(process.env.COMPUTER_USE_LINUX_LOCAL_INDICATOR, indicatorPath);
   }
   console.log(`[computer-use-linux] installed local binary from ${source}`);
 }
 
 function download(url, destination, redirects = 5) {
   return new Promise((resolve, reject) => {
+    // An explicit timer, re-armed on every chunk: Node's socket idle timeout
+    // did not fire at the requested time during a stalled TLS handshake.
+    let idle = null;
+    const disarm = () => clearTimeout(idle);
+    const arm = () => {
+      disarm();
+      idle = setTimeout(() => {
+        request.destroy(new Error(`no data for ${IDLE_TIMEOUT_MS / 1000} s: ${url}`));
+      }, IDLE_TIMEOUT_MS);
+    };
     const request = https.get(url, (response) => {
+      arm();
       if (
         response.statusCode >= 300 &&
         response.statusCode < 400 &&
         response.headers.location &&
         redirects > 0
       ) {
+        disarm();
         response.resume();
         const nextUrl = new URL(response.headers.location, url).toString();
         download(nextUrl, destination, redirects - 1).then(resolve, reject);
@@ -55,6 +82,7 @@ function download(url, destination, redirects = 5) {
       }
 
       if (response.statusCode !== 200) {
+        disarm();
         response.resume();
         const error = new Error(`download failed with HTTP ${response.statusCode}: ${url}`);
         error.statusCode = response.statusCode;
@@ -63,11 +91,22 @@ function download(url, destination, redirects = 5) {
       }
 
       const file = fs.createWriteStream(destination, { mode: 0o600 });
+      response.on('data', arm);
       response.pipe(file);
-      file.on('finish', () => file.close(resolve));
-      file.on('error', reject);
+      file.on('finish', () => {
+        disarm();
+        file.close(resolve);
+      });
+      file.on('error', (error) => {
+        disarm();
+        reject(error);
+      });
     });
-    request.on('error', reject);
+    arm();
+    request.on('error', (error) => {
+      disarm();
+      reject(error);
+    });
   });
 }
 
@@ -124,6 +163,14 @@ async function main() {
   const baseUrl =
     process.env.COMPUTER_USE_LINUX_DOWNLOAD_BASE ||
     `https://github.com/agent-sh/computer-use-linux/releases/download/v${pkg.version}`;
+  // Refuse before downloading ~15 MB that could not be installed (a global
+  // prefix owned by root).
+  try {
+    fs.accessSync(fs.existsSync(binDir) ? binDir : path.dirname(binDir), fs.constants.W_OK);
+  } catch (error) {
+    fail(`cannot write ${binDir}: ${error.message}`);
+  }
+
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'computer-use-linux-'));
   const tmpBinary = path.join(tmpDir, asset);
   const tmpSha = path.join(tmpDir, `${asset}.sha256`);
@@ -163,17 +210,16 @@ async function main() {
       }
     }
 
+    // The wrapper only checks for the main binary, so it goes last: once it
+    // exists, the helpers it points the server at exist too.
     fs.mkdirSync(binDir, { recursive: true });
-    fs.copyFileSync(tmpBinary, binaryPath);
-    fs.chmodSync(binaryPath, 0o755);
-    fs.copyFileSync(tmpCosmic, cosmicHelperPath);
-    fs.chmodSync(cosmicHelperPath, 0o755);
+    place(tmpCosmic, cosmicHelperPath);
     if (hasIndicator) {
-      fs.copyFileSync(tmpIndicator, indicatorPath);
-      fs.chmodSync(indicatorPath, 0o755);
+      place(tmpIndicator, indicatorPath);
     } else {
       fs.rmSync(indicatorPath, { force: true });
     }
+    place(tmpBinary, binaryPath);
     console.log(`[computer-use-linux] installed ${asset} and ${cosmicAsset}${hasIndicator ? ` and ${indicatorAsset}` : ' (release has no indicator)'}`);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });

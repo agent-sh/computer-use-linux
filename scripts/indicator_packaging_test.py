@@ -44,12 +44,21 @@ HTTPS = r'''const fs = require('node:fs');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const { Readable } = require('node:stream');
+// The installer's 30 s idle timer runs in 20 ms here, so a stalled request
+// fails fast.
+const realSetTimeout = global.setTimeout;
+global.setTimeout = (callback, ms, ...args) => realSetTimeout(callback, ms >= 30000 ? 20 : ms, ...args);
 require('node:https').get = (url, callback) => {
   const request = new EventEmitter();
+  request.destroy = (error) => { request.emit('error', error); return request; };
   process.nextTick(() => {
     const name = path.basename(new URL(url).pathname);
     const file = path.join(process.env.RELEASE_FIXTURE, name);
     fs.appendFileSync(process.env.REQUEST_LOG, name + '\n');
+    if (fs.existsSync(file + '.stall')) {
+      // The server never answers.
+      return;
+    }
     if (fs.existsSync(file + '.network-error')) {
       request.emit('error', new Error('fixture network failure'));
       return;
@@ -92,7 +101,7 @@ def check(kind, scenario):
             indicator.with_name(indicator.name + ".sha256").write_text("0" * 64)
         elif scenario == "missing-sha":
             indicator.with_name(indicator.name + ".sha256").unlink()
-        elif scenario in ("http500", "network-error"):
+        elif scenario in ("http500", "network-error", "stall"):
             indicator.with_name(indicator.name + "." + scenario).touch()
         elif scenario.startswith("missing-"):
             (release / f"{NAMES[int(scenario[-1])]}-{TARGET}").unlink()
@@ -130,11 +139,22 @@ def check(kind, scenario):
             mock.write_text(HTTPS)
             env["COMPUTER_USE_LINUX_DOWNLOAD_BASE"] = "https://fixture.invalid/release"
             destination = package / "npm/bin"
-            command = ["node", "--require", str(mock), str(package / "npm/install.js")]
+            if kind == "npm-wrapper":
+                # npm 12 skipped the postinstall: the wrapper installs on first launch.
+                put(destination, "computer-use-linux.js", (ROOT / "npm/bin/computer-use-linux.js").read_bytes())
+                env["NODE_OPTIONS"] = f"--require {mock}"
+                command = ["node", str(destination / "computer-use-linux.js"), "--help"]
+                if scenario == "skip-download":
+                    env["COMPUTER_USE_LINUX_SKIP_DOWNLOAD"] = "1"
+            else:
+                command = ["node", "--require", str(mock), str(package / "npm/install.js")]
             if scenario == "old-release":
                 put(destination, NAMES[2], b"stale indicator")
 
         success = scenario in ("present", "old-release", "cached-old-release")
+        if scenario == "read-only":
+            # A global prefix owned by root: nothing is downloaded.
+            destination.mkdir(parents=True, exist_ok=True)
         node_arch = "x64" if ARCH == "x86_64" else "arm64"
         installed = NAMES if kind.startswith("plugin") else [f"computer-use-linux-linux-{node_arch}", *NAMES[1:]]
         if not success:
@@ -144,9 +164,24 @@ def check(kind, scenario):
                 for name in installed:
                     put(destination, name, b"old installed binary")
         before = snapshot(destination)
-        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
+        if scenario == "read-only":
+            destination.chmod(0o555)
+        try:
+            result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
+        finally:
+            destination.chmod(0o755)
         detail = f"{kind}/{scenario}: {result.stdout}\n{result.stderr}"
         assert (result.returncode == 0) == success, detail
+        if kind == "npm-wrapper":
+            # The installer's progress must not reach stdout, the MCP channel.
+            assert result.stdout == "", detail
+            assert ("binary not found" in result.stderr) != success, detail
+            assert not any(".tmp-" in name for name in snapshot(destination)), f"staging file left: {detail}"
+        if scenario in ("read-only", "skip-download"):
+            requested = (base / "requests").read_text() if (base / "requests").exists() else ""
+            assert requested == "", f"{scenario} downloaded {requested!r}"
+        if scenario == "stall":
+            assert "no data for" in result.stderr, detail
         if not success:
             assert snapshot(destination) == before, f"failed installation mutated files: {detail}"
         else:
@@ -156,6 +191,11 @@ def check(kind, scenario):
             assert (NAMES[2] in files) == (scenario == "present"), detail
             if scenario == "present":
                 assert files[NAMES[2]] == BINARY, detail
+            if kind == "npm-wrapper":
+                requests = (base / "requests").read_text()
+                again = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
+                assert again.returncode == 0 and again.stdout == "", f"second launch failed: {again.stderr}"
+                assert (base / "requests").read_text() == requests, "an installed binary was downloaded again"
             if kind.startswith("plugin") and scenario != "present":
                 assert (destination / ".no-indicator").exists(), detail
                 requests = (base / "requests").read_text() if (base / "requests").exists() else ""
@@ -179,6 +219,9 @@ def main():
     check("plugin-wget", "old-release")
     check("plugin-wget", "http500")
     check("npm", "network-error")
+    check("npm", "stall")
+    for scenario in ("present", "old-release", "missing-0", "bad-sha", "stall", "network-error", "read-only", "skip-download"):
+        check("npm-wrapper", scenario)
     print("indicator packaging: old releases, verified optional assets, failure isolation, cache reuse and Codex env OK")
 
 

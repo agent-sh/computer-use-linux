@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The npm wrapper downloads the release binaries on first launch when npm skipped the package's install script, as npm 12 does for scripts it was not told to allow. A global install under npm 12 used to fail on every launch with `computer-use-linux binary not found`. The download's output goes to stderr, so an MCP client's stdout stays clean, each binary is written beside its destination and renamed into place, main binary last, so a server starting at the same time never runs a half-written file or misses a helper. A download that receives no data for 30 s fails, and a package directory that cannot be written is refused before anything is downloaded.
+
 ## [0.7.38] - 2026-11-04
 
 ### Fixed

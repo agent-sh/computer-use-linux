@@ -500,13 +500,13 @@ bundle): `CUL_GNOME_EXTENSION_UUID`, `CUL_DBUS_SERVICE`, and
 UUID and DBus endpoint in both the Rust probes and the generated extension
 files.
 
-**npm wrapper** (set during `npm install`, or before running):
+**npm wrapper** (set during `npm install`, or before running). The package's install script downloads the release binaries. When npm skipped it (npm 12 runs only install scripts it is told to allow), the wrapper runs the same download on first launch, with its output on stderr. A download that receives no data for 30 s fails:
 
 | Variable | Effect |
 | --- | --- |
 | `COMPUTER_USE_LINUX_BIN` | Run this absolute binary path instead of the one bundled by the npm package. Relative paths are ignored. |
 | `COMPUTER_USE_LINUX_DOWNLOAD_BASE` | Override the GitHub release base URL the installer downloads from (mirrors, air-gapped hosts). |
-| `COMPUTER_USE_LINUX_SKIP_DOWNLOAD=1` | Skip the post-install binary download entirely. |
+| `COMPUTER_USE_LINUX_SKIP_DOWNLOAD=1` | Skip the binary download entirely, at install and at first launch. |
 | `COMPUTER_USE_LINUX_LOCAL_BINARY` / `…_LOCAL_COSMIC_HELPER` / `…_LOCAL_INDICATOR` | Install from a local build instead of downloading (used by CI and local testing). |
 
 ## Architecture

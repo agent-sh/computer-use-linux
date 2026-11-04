@@ -3,7 +3,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 
 const binaryName = `computer-use-linux-${process.platform}-${process.arch}`;
 const bundledBinary = path.join(__dirname, binaryName);
@@ -11,11 +11,20 @@ const binary = process.env.COMPUTER_USE_LINUX_BIN || bundledBinary;
 const bundledCosmicHelper = path.join(__dirname, 'computer-use-linux-cosmic');
 const bundledIndicator = path.join(__dirname, 'computer-use-linux-indicator');
 
-if (!fs.existsSync(binary)) {
+// npm 12 skips install scripts it has not been told to allow, so a global
+// install can arrive without the native binary. Run the installer on first
+// launch. Its output goes to stderr: stdout is the MCP channel.
+function installBinary() {
+  const installer = path.join(__dirname, '..', 'install.js');
+  const result = spawnSync(process.execPath, [installer], { stdio: ['ignore', 2, 2] });
+  return result.status === 0 && fs.existsSync(binary);
+}
+
+if (!fs.existsSync(binary) && (process.env.COMPUTER_USE_LINUX_BIN || !installBinary())) {
   console.error(
     [
       `computer-use-linux binary not found: ${binary}`,
-      'Reinstall the package, run `npm rebuild computer-use-linux`, or set COMPUTER_USE_LINUX_BIN.',
+      'Run `node npm/install.js` in the package directory, allow its install script, or set COMPUTER_USE_LINUX_BIN.',
     ].join('\n')
   );
   process.exit(127);
