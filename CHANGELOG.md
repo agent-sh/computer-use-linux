@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.42] - 2026-11-05
+
 ### Fixed
 
 - A click or scroll coordinate between monitors gets a warning. Monitors of different heights or offset rows leave parts of the screenshot that no monitor shows, and a point there used to pass as on-screen. The server reads the monitor layout once per screenshot, from the portal session or the compositor, or from RandR on X11, and checks the point in screenshot pixels. It never runs xrandr on Wayland, where that could start Xwayland. Without a layout that fits the screenshot, only its outer rectangle is checked, as before. No screenshot is taken for the check.
@@ -1081,7 +1083,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.41...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.42...HEAD
+[0.7.42]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.41...v0.7.42
 [0.7.41]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.40...v0.7.41
 [0.7.40]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.39...v0.7.40
 [0.7.39]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.38...v0.7.39
