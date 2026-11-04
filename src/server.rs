@@ -6210,6 +6210,8 @@ impl ComputerUseLinux {
             // window of the same app is still refused when the target names
             // one window exactly; an app-wide tree holds every window, and an
             // inexact target picked one arbitrarily, so both pass on the pid.
+            // A narrowed tree that recorded no comparable window cannot show
+            // which window it holds, so an exact target fails closed.
             let Some((target_window, target_backend)) =
                 target.window.as_ref().filter(|_| target.exact_window)
             else {
@@ -6223,35 +6225,47 @@ impl ComputerUseLinux {
             if !narrowed {
                 return Ok(());
             }
-            return match self.snapshot_window() {
-                Some((window_id, backend))
-                    if backend == *target_backend && window_id != *target_window =>
-                {
-                    Err(node_window_mismatch_message(
-                        node.index,
-                        window_id,
-                        *target_window,
-                    ))
-                }
-                _ => Ok(()),
-            };
+            return self.check_snapshot_window(
+                node.index,
+                *target_window,
+                target_backend,
+                node_window_unrecorded_message,
+            );
         }
         let Some((target_window, target_backend)) = target.window.as_ref() else {
             return Ok(());
         };
+        self.check_snapshot_window(
+            node.index,
+            *target_window,
+            target_backend,
+            node_window_unverified_message,
+        )
+    }
+
+    /// Compare the snapshot's recorded window with the target window. A
+    /// snapshot with no window, or one listed by another window backend,
+    /// cannot be compared and is refused with `uncomparable`'s message.
+    fn check_snapshot_window(
+        &self,
+        element_index: u32,
+        target_window: u64,
+        target_backend: &str,
+        uncomparable: fn(u32, u64) -> String,
+    ) -> std::result::Result<(), String> {
         match self.snapshot_window() {
-            Some((window_id, backend)) if backend == *target_backend => {
-                if window_id == *target_window {
+            Some((window_id, backend)) if backend == target_backend => {
+                if window_id == target_window {
                     Ok(())
                 } else {
                     Err(node_window_mismatch_message(
-                        node.index,
+                        element_index,
                         window_id,
-                        *target_window,
+                        target_window,
                     ))
                 }
             }
-            _ => Err(node_window_unverified_message(node.index, *target_window)),
+            _ => Err(uncomparable(element_index, target_window)),
         }
     }
 
@@ -8469,6 +8483,12 @@ fn node_window_mismatch_message(
 fn node_window_unverified_message(element_index: u32, target_window: u64) -> String {
     format!(
         "Did not act because element_index {element_index} could not be tied to target window_id {target_window}: the window backend reports no pid for it and the latest get_app_state snapshot was not taken for that window. Pass pid, or call get_app_state for that window and use an index from that result."
+    )
+}
+
+fn node_window_unrecorded_message(element_index: u32, target_window: u64) -> String {
+    format!(
+        "Did not act because element_index {element_index} could not be tied to target window_id {target_window}: the latest get_app_state snapshot was narrowed to one window of this app, and the window it recorded, if any, cannot be compared with the target (none was recorded, or another window backend listed it). Call get_app_state for the target window and use an index from that result."
     )
 }
 
@@ -16711,6 +16731,66 @@ mod node_target_scope_tests {
             .check_node_target(&node, &ElementOwnerTarget::window(&window_10, None, true))
             .await
             .is_ok());
+    }
+
+    #[tokio::test]
+    async fn same_pid_exact_target_fails_closed_when_the_narrowed_tree_recorded_no_window() {
+        // A tree narrowed through the cached scope that came from another pid
+        // or frame records no window (post_action_tree_window). An exact
+        // target then cannot be checked against it.
+        let backend = ComputerUseLinux::default();
+        let node = cached_node(2, ":1.9/org/a11y/atspi/accessible/42");
+        let mut window_10 = pidless_window(10);
+        window_10.pid = Some(7);
+        backend.store_snapshot(
+            std::slice::from_ref(&node),
+            Some(7),
+            None,
+            None,
+            TreeShape {
+                detail: NodeDetail::Compact,
+                window_scope: Some("Window 20".to_string()),
+            },
+        );
+
+        assert_eq!(
+            backend
+                .check_node_target(&node, &ElementOwnerTarget::window(&window_10, None, true))
+                .await
+                .unwrap_err(),
+            node_window_unrecorded_message(2, 10)
+        );
+        // An inexact target and a pid-only target still pass on the pid.
+        assert!(backend
+            .check_node_target(&node, &ElementOwnerTarget::window(&window_10, None, false))
+            .await
+            .is_ok());
+        assert!(backend
+            .check_node_target(&node, &ElementOwnerTarget::pid(Some(7)))
+            .await
+            .is_ok());
+
+        // A narrowed tree whose window another backend listed (the GNOME
+        // extension failed and Introspect answered) is not comparable either.
+        let mut window_10_other_backend = window_10.clone();
+        window_10_other_backend.backend = "gnome-shell-introspect".to_string();
+        backend.store_snapshot(
+            std::slice::from_ref(&node),
+            Some(7),
+            None,
+            Some(&window_10_other_backend),
+            TreeShape {
+                detail: NodeDetail::Compact,
+                window_scope: Some("Window 10".to_string()),
+            },
+        );
+        assert_eq!(
+            backend
+                .check_node_target(&node, &ElementOwnerTarget::window(&window_10, None, true))
+                .await
+                .unwrap_err(),
+            node_window_unrecorded_message(2, 10)
+        );
     }
 
     #[tokio::test]
