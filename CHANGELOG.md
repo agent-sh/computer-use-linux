@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.39] - 2026-11-04
+
+### Changed
+
+- The crates.io package carries only what the crate builds and tests from (src, tests, examples, the five Python scripts the tests run, the GNOME Shell extension, manifest, lockfile, README, CHANGELOG, LICENSE): 75 files instead of 135. The npm wrapper, Pi extension, plugins and CI config are no longer published to crates.io.
+
 ### Fixed
 
 - The npm wrapper downloads the release binaries on first launch when npm skipped the package's install script, as npm 12 does for scripts it was not told to allow. A global install under npm 12 used to fail on every launch with `computer-use-linux binary not found`. The download's output goes to stderr, so an MCP client's stdout stays clean, each binary is written beside its destination and renamed into place, main binary last, so a server starting at the same time never runs a half-written file or misses a helper. A download that receives no data for 30 s fails, and a package directory that cannot be written is refused before anything is downloaded.
@@ -1041,7 +1047,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.38...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.39...HEAD
+[0.7.39]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.38...v0.7.39
 [0.7.38]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.37...v0.7.38
 [0.7.37]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.36...v0.7.37
 [0.7.36]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.35...v0.7.36
