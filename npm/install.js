@@ -44,13 +44,15 @@ function place(source, destination) {
 
 function copyLocalBinary(source) {
   fs.mkdirSync(binDir, { recursive: true });
-  place(source, binaryPath);
+  // Main binary last, as in main(): its presence tells the wrapper the
+  // helpers are in place.
   if (process.env.COMPUTER_USE_LINUX_LOCAL_COSMIC_HELPER) {
     place(process.env.COMPUTER_USE_LINUX_LOCAL_COSMIC_HELPER, cosmicHelperPath);
   }
   if (process.env.COMPUTER_USE_LINUX_LOCAL_INDICATOR) {
     place(process.env.COMPUTER_USE_LINUX_LOCAL_INDICATOR, indicatorPath);
   }
+  place(source, binaryPath);
   console.log(`[computer-use-linux] installed local binary from ${source}`);
 }
 
