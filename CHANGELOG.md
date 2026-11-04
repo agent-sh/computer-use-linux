@@ -7,12 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.37] - 2026-11-04
+
 ### Fixed
 
 - `activate_window` with the i3 backend on Sway focuses Xwayland windows. The backend sent the window id in hex, which Sway rejects with `The value for 'id' should be numeric`; it now sends the decimal id, which i3 also accepts ([#357](https://github.com/agent-sh/computer-use-linux/issues/357)).
 - The i3 backend on Sway lists native Wayland windows, so `list_windows`, `focused_window`, `activate_window` and targeted input reach them. It used to skip every window without an X11 id. A native Wayland window's `window_id` is 2^32 plus its Sway container id, above every X11 id, and focus matches `con_id`; X11 windows keep their X11 id. Sway windows carry the pid from the tree; i3 windows still read it through `xprop` ([#357](https://github.com/agent-sh/computer-use-linux/issues/357)).
 - The i3 backend marks a window hidden when it sits in the scratchpad (under `__i3_scratch`). It used to read the window's `scratchpad_state`, which Sway keeps `fresh` after the window is shown, so a shown scratchpad window was refused for window-cropped screenshots; i3 reports `none` there, so a hidden i3 scratchpad window was never marked hidden.
 - An element action with an exact window target is refused when the app's cached tree was narrowed to one window but recorded none, or recorded one that another window backend listed. A tree records no window when it was narrowed through the cached scope from another pid or frame, or when `get_app_state` took a title the window list could not resolve. Before, the action passed on the shared pid, so an index from one Chromium window could act on another ([#370](https://github.com/agent-sh/computer-use-linux/issues/370)).
+
+Thanks @RaphaelFakhri for the decimal window id fix on Sway ([#367](https://github.com/agent-sh/computer-use-linux/pull/367)), and @joshuadavidthomas for the Sway report ([#357](https://github.com/agent-sh/computer-use-linux/issues/357)).
 
 ## [0.7.36] - 2026-11-01
 
@@ -1025,7 +1029,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.36...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.37...HEAD
+[0.7.37]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.36...v0.7.37
 [0.7.36]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.35...v0.7.36
 [0.7.35]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.34...v0.7.35
 [0.7.34]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.33...v0.7.34
