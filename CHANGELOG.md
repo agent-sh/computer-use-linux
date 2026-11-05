@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The npm package declares `"libc": ["glibc"]`, so npm refuses it on musl systems, where the glibc release binaries it downloads do not run.
 - The npm package's optional Pi peers require `>=0.84.4`, the documented minimum, instead of any version.
 - The crate declares `rust-version = "1.89"`. It uses `File::try_lock`, stable since Rust 1.89; older compilers failed with E0658.
-- The crate's documentation link points at docs.rs, and the `homepage` that repeated the repository URL is gone.
+- The crate's documentation link points at docs.rs. The `homepage` that repeated the repository URL is gone, and so is `authors`, which Cargo deprecates.
 - The crate no longer ships files that its build and tests do not read: `scripts/mcp_safety_check.py`, the manual test notes, the `install.sh` test fixtures and the Python example.
 - The GNOME Shell extension's metadata names the project URL.
 

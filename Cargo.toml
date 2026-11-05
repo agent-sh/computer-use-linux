@@ -4,7 +4,6 @@ version = "0.7.43"
 edition = "2021"
 # File::try_lock, used by the indicator, is stable since Rust 1.89.
 rust-version = "1.89"
-authors = ["Avi Fenesh <avifenesh@users.noreply.github.com>"]
 license = "MIT"
 description = "Native Linux desktop control over MCP and CLI — semantic AT-SPI accessibility trees, multi-compositor window targeting (GNOME, KDE/KWin, Hyprland, niri, COSMIC, i3, X11), bounded screenshots, Wayland/X11 input, and an on-screen agent activity indicator."
 repository = "https://github.com/agent-sh/computer-use-linux"
