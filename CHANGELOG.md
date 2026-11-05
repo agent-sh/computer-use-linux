@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.44] - 2026-11-05
+
 ### Added
 
 - The Claude Code and Codex plugins have an icon: a penguin whose belly a pointer clicks. Both manifests point at `plugins/computer-use-linux/assets/icon.png`; its SVG source sits next to it.
@@ -1110,7 +1112,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.43...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.44...HEAD
+[0.7.44]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.43...v0.7.44
 [0.7.43]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.42...v0.7.43
 [0.7.42]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.41...v0.7.42
 [0.7.41]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.40...v0.7.41
