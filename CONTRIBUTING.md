@@ -44,6 +44,7 @@ node --check npm/install.js
 node --check npm/bin/computer-use-linux.js
 python3 scripts/indicator_packaging_test.py
 npm run pack:check
+npm run test:wrapper
 npm ci --prefix scripts/zod-check --ignore-scripts --no-audit --no-fund
 node scripts/zod-check/check.mjs --command target/debug/computer-use-linux
 npm ci --prefix pi --ignore-scripts --no-audit --no-fund
@@ -53,9 +54,12 @@ COMPUTER_USE_LINUX_TEST_BINARY="$PWD/target/debug/computer-use-linux" npm test -
 python3 scripts/generate_pi_tool_catalog.py --binary target/debug/computer-use-linux --check
 ```
 
-`check_plugins.sh` without `--binary` skips the launcher download test. CI
-also runs the X11 pointer regression below, installs the npm wrapper against
-the local binaries, and smoke-tests the installed Pi package.
+`check_plugins.sh` also runs `scripts/check_env_forwarding.py`, which fails when
+the server reads a variable the Pi extension or the Codex manifest does not
+pass. Without `--binary` it skips the launcher download test. CI also runs the
+X11 pointer regression below, installs the npm wrapper against the local
+binaries, and smoke-tests the installed Pi package, with and without its
+install script.
 
 A script that a Rust test runs, or that such a script imports, must be listed
 in `Cargo.toml` `include`.

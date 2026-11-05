@@ -300,8 +300,8 @@ release, set `COMPUTER_USE_LINUX_BIN` to its path in the host's environment.
 System setup (`computer-use-linux setup`, `setup-window-targeting`, ydotoold)
 still applies; ask the agent to run the `doctor` tool to see what is missing.
 Codex passes only a short allowlist of environment variables to MCP servers,
-so the Codex manifest forwards the desktop session variables and the
-`COMPUTER_USE_LINUX_*` settings below explicitly. Codex Desktop's Linux build
+so the Codex manifest forwards the desktop session variables and the server
+settings below explicitly. Codex Desktop's Linux build
 already bundles Computer Use; do not install both there.
 
 ### Codex Desktop (Linux build)
@@ -378,7 +378,9 @@ text(result.text);
 for (const block of result.images) image(block);
 ```
 
-No separate MCP adapter or manual MCP configuration is required. Pi starts one
+No separate MCP adapter or manual MCP configuration is required. When npm
+skipped the package's install script (npm 12 does for scripts it was not told
+to allow), the first tool call downloads the binary. Pi starts one
 computer-use-linux process lazily on the first real tool call, reuses it for the
 session so accessibility snapshots remain valid, serializes desktop actions,
 and closes it on reload, session switch, or exit. See the
