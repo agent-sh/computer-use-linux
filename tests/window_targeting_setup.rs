@@ -33,6 +33,8 @@ const EXTENSION_JS: &str = include_str!(concat!(
     "/gnome-shell-extension/computer-use-linux@avifenesh.dev/extension.js"
 ));
 
+const PRIVATE_BUS_CONFIG: &str = "<busconfig><type>session</type><listen>unix:tmpdir=/tmp</listen><policy context=\"default\"><allow own=\"*\"/><allow send_destination=\"*\"/><allow receive_sender=\"*\"/></policy></busconfig>";
+
 struct FakeExtension;
 
 #[zbus::interface(name = "dev.avifenesh.ComputerUseLinux.WindowControl")]
@@ -54,6 +56,14 @@ impl Drop for PrivateBus {
 struct Home(PathBuf);
 
 impl Drop for Home {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
@@ -166,9 +176,20 @@ async fn reload_is_required_only_for_changes_gnome_shell_runs() {
         eprintln!("skipped: a system copy of {UUID} replaces the user copy this test installs");
         return;
     }
+    // No service directories, so nothing on this bus can activate a real
+    // desktop service.
+    let bus_dir = Scratch(
+        Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("setup-bus-{}", getrandom::u64().unwrap())),
+    );
+    fs::create_dir_all(&bus_dir.0).unwrap();
+    let config = bus_dir.0.join("bus.conf");
+    fs::write(&config, PRIVATE_BUS_CONFIG).unwrap();
     let mut bus = PrivateBus(
         Command::new("dbus-daemon")
-            .args(["--session", "--nofork", "--nopidfile", "--print-address=1"])
+            .arg(format!("--config-file={}", config.display()))
+            .args(["--nofork", "--nopidfile", "--print-address=1"])
+            .env_clear()
             .stdout(Stdio::piped())
             .spawn()
             .unwrap(),

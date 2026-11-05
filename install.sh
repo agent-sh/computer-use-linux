@@ -576,11 +576,12 @@ EOF
 # Step 7: GNOME Shell extension (Wayland + GNOME only)
 # -----------------------------------------------------------------------------
 
-# metadata.json without the lines that hold only a name, description or url
-# string, the fields GNOME Shell only displays. Any other difference counts
-# as a change: a line that also holds another field, or a reformatted file.
+# metadata.json without the lines that hold only a name, description, url or
+# version-name string. GNOME Shell only displays their values. Any other
+# difference counts as a change: a line that also holds another field, or a
+# reformatted file.
 metadata_load_lines() {
-    grep -v -E '^[[:space:]]*"(name|description|url)"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"[[:space:]]*,?[[:space:]]*$' "$1" 2>/dev/null || true
+    grep -v -E '^[[:space:]]*"(name|description|url|version-name)"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"[[:space:]]*,?[[:space:]]*$' "$1" 2>/dev/null || true
 }
 
 install_gnome_extension() {
@@ -609,9 +610,9 @@ install_gnome_extension() {
     fi
 
     # Enabled extensions still need refreshed assets after an upgrade. GNOME
-    # keeps the loaded module until the session restarts. It only shows the
-    # name, description and url fields of metadata.json, so a change to those
-    # lines alone needs no new login.
+    # keeps the loaded module until the session restarts. It only displays
+    # the name, description, url and version-name values of metadata.json,
+    # so a change to those lines alone needs no new login.
     local extension_dir="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/${EXT_UUID}"
     local was_enabled=0 needs_login=1
     if gnome-extensions list --enabled 2>/dev/null | grep -qx "${EXT_UUID}"; then

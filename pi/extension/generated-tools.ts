@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.45";
-export const GENERATED_TOOL_CATALOG_HASH = "ec6e646d7eb1f7dec7951339343ba74942a3194fa853eb1f60bf337738521b64";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "9c852f7e8206b88ff19dfb656a9ff68772e15692f821d1bdb47b8f7cb666b23b";
+export const GENERATED_TOOL_CATALOG_HASH = "5220d9a11046797491e8899ea59c66d1d5d450c1457086867d8ae9784c297acd";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "5cb7f910f9317b8b249fad1b994f1d771bd0854ddcad3a9b1f4b040ed2c050b5";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -1146,7 +1146,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
-          "description": "Process id of the target app: an element another process owns is\nrefused. Alone, it needs no window. When it picks the window (with\napp_id, wm_class or window_title, or for screenshot_after=\"window\"),\nit must match exactly one.",
+          "description": "Process id of the target app: an element another process owns is\nrefused. With pid alone, no window is needed. When pid picks the window\n(with app_id, wm_class or window_title, or for\nscreenshot_after=\"window\"), it must match exactly one.",
           "minimum": 0,
           "type": [
             "integer",
@@ -1250,7 +1250,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). With PIXELFLUX_CU and PIXELFLUX_CU_TOKEN set, chords go to pixelflux; a closed port falls through to the routes below, a pixelflux error does not. On X11, chords go through xdotool (XTEST), or ydotool when xdotool is missing or cannot start. On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. When ydotool is absent and the session has no RemoteDesktop portal (for example wlroots compositors), chords go through wtype instead. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. On KDE Plasma every key in a portal chord is a physical keycode. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). With PIXELFLUX_CU and PIXELFLUX_CU_TOKEN set, chords go to pixelflux. An unreachable pixelflux falls through to the routes below; a pixelflux error does not. On X11, chords go through xdotool (XTEST), or ydotool when xdotool is missing or cannot start. On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. When ydotool is absent and the session has no RemoteDesktop portal (for example wlroots compositors), chords go through wtype instead. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. On KDE Plasma every key in a portal chord is a physical keycode. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -2057,7 +2057,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
-          "description": "Process id of the target app: an element another process owns is\nrefused. Alone, it needs no window. When it picks the window (with\napp_id, wm_class or window_title, or for screenshot_after=\"window\"),\nit must match exactly one.",
+          "description": "Process id of the target app: an element another process owns is\nrefused. With pid alone, no window is needed. When pid picks the window\n(with app_id, wm_class or window_title, or for\nscreenshot_after=\"window\"), it must match exactly one.",
           "minimum": 0,
           "type": [
             "integer",

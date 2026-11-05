@@ -393,7 +393,7 @@ test_display_metadata_upgrade_needs_no_login() {
     # v0.7.44 added url to metadata.json and left extension.js as it was.
     local output
     output="$(upgrade_enabled_extension_metadata \
-        '/"url"/d; s/"description": "[^"]*"/"description": "An \\"older\\" text"/')" || return 1
+        '/"url"/d; s/"description": "[^"]*"/"description": "An \\"older\\" text"/; s/\("uuid": "[^"]*",\)/\1\n  "version-name": "0.1",/')" || return 1
     assert_contains "${output}" 'no new login needed' || return 1
     assert_not_contains "${output}" 'log out' || return 1
 }

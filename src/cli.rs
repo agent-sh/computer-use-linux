@@ -63,7 +63,7 @@ const SUBCOMMANDS: &[Subcommand] = &[
         required: 0,
         allowed: 0,
         summary: "Install the GNOME Shell extension for window targeting.",
-        details: "Writes the extension into the user's GNOME Shell extensions directory, unless a system copy is installed, enables it, and prints a JSON report. GNOME may need a new login before it loads the extension. requires_shell_reload in the report is true when GNOME Shell does not serve the window API yet, when a system copy replaces the copy it loaded, or when extension.js or a metadata field GNOME Shell acts on changed while the extension was enabled or its state could not be read. A change to the name, description or url alone needs no new login.",
+        details: "Writes the extension into the user's GNOME Shell extensions directory, unless a system copy is installed, enables it, and prints a JSON report. GNOME may need a new login before it loads the extension. The report's requires_shell_reload says when GNOME Shell needs a new login. That is when the Shell does not serve the window API yet, or a system copy replaces the copy it loaded. It is also when extension.js, or a metadata field the Shell acts on, changed while the extension was enabled or its state was unknown. A change to the name, description or url alone needs no new login.",
         hidden: false,
     },
     Subcommand {

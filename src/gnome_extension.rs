@@ -19,11 +19,13 @@ const METADATA_JSON: &str =
 const EXTENSION_JS: &str =
     include_str!("../gnome-shell-extension/computer-use-linux@avifenesh.dev/extension.js");
 const SYSTEM_EXTENSIONS_DIR: &str = "/usr/share/gnome-shell/extensions";
-/// metadata.json fields GNOME Shell only shows. The Shell reads metadata.json
-/// when it loads an extension and imports extension.js once per session;
-/// it acts on uuid, shell-version, session-modes and version, and passes the
-/// whole object to the extension, but extension.js reads none of it. A change
-/// to these fields alone needs no reload.
+/// metadata.json fields whose values GNOME Shell only displays. The Shell
+/// reads metadata.json when it loads an extension and imports extension.js
+/// once per session. It requires name and description to be strings and acts
+/// on uuid, shell-version, session-modes and version. The Extension base
+/// class reads uuid and gettext-domain, and name only as the getLogger
+/// prefix, which extension.js does not use. A change to these fields alone
+/// needs no reload.
 const DISPLAY_ONLY_METADATA: &[&str] = &["name", "description", "url", "version-name", "donations"];
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -582,13 +584,16 @@ mod tests {
     }
 
     #[test]
-    fn extension_reads_no_metadata_field() {
-        // DISPLAY_ONLY_METADATA holds only while extension.js ignores the
-        // metadata GNOME Shell passes it.
-        assert!(
-            !EXTENSION_JS.contains("metadata"),
-            "extension.js reads its metadata; check DISPLAY_ONLY_METADATA"
-        );
+    fn extension_reads_no_display_metadata() {
+        // DISPLAY_ONLY_METADATA holds only while extension.js reads no
+        // metadata itself and never logs through getLogger, whose prefix is
+        // the name.
+        for reader in ["metadata", "getLogger"] {
+            assert!(
+                !EXTENSION_JS.contains(reader),
+                "extension.js uses {reader}; check DISPLAY_ONLY_METADATA"
+            );
+        }
     }
 
     #[test]
@@ -600,6 +605,8 @@ mod tests {
         assert!(!extension_dir.0.exists());
         assert!(!remove_user_copy(&extension_dir.0).unwrap());
     }
+
+    const PRIVATE_BUS_CONFIG: &str = "<busconfig><type>session</type><listen>unix:tmpdir=/tmp</listen><policy context=\"default\"><allow own=\"*\"/><allow send_destination=\"*\"/><allow receive_sender=\"*\"/></policy></busconfig>";
 
     struct FakeShellExtensions {
         path: std::sync::Arc<std::sync::Mutex<PathBuf>>,
@@ -630,9 +637,17 @@ mod tests {
                 let _ = self.0.wait();
             }
         }
+        // No service directories, so nothing on this bus can activate a
+        // real desktop service.
+        let bus_dir = TestExtensionDirectory::new();
+        fs::create_dir_all(&bus_dir.0).unwrap();
+        let config = bus_dir.0.join("bus.conf");
+        fs::write(&config, PRIVATE_BUS_CONFIG).unwrap();
         let mut bus = PrivateBus(
             Command::new("dbus-daemon")
-                .args(["--session", "--nofork", "--nopidfile", "--print-address=1"])
+                .arg(format!("--config-file={}", config.display()))
+                .args(["--nofork", "--nopidfile", "--print-address=1"])
+                .env_clear()
                 .stdout(Stdio::piped())
                 .spawn()
                 .unwrap(),
