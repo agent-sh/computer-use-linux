@@ -313,9 +313,23 @@ jobs:
             dist/computer-use-linux-cosmic-${{ matrix.target }}.sha256
             dist/computer-use-linux-indicator-${{ matrix.target }}
             dist/computer-use-linux-indicator-${{ matrix.target }}.sha256
-          # Both matrix jobs upload to the same release; each one that
-          # generates notes appends them, so only one does.
-          generate_release_notes: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
+
+  # Both upload jobs above write to one release, so neither generates notes:
+  # each would append its own copy. This job sets them once, after both.
+  release-notes:
+    name: release notes
+    needs: [release-binary]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Write generated release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" -f tag_name="${GITHUB_REF_NAME}" --jq .body)"
+          gh release edit "${GITHUB_REF_NAME}" -R "${GITHUB_REPOSITORY}" --notes "${notes}"
 
   publish-crate:
     name: publish crate
