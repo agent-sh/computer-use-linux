@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.7.42] - 2026-11-05
 
+### Changed
+
+- KWin element clicks get no off-screen or monitor-gap warning on either input route, since KWin maps the element point onto an output. The portal route dropped the warning that 0.7.41 kept; the uinput route still reports where a point was clamped ([#407](https://github.com/agent-sh/computer-use-linux/issues/407)).
+
 ### Fixed
 
 - A click or scroll coordinate between monitors gets a warning. Monitors of different heights or offset rows leave parts of the screenshot that no monitor shows, and a point there used to pass as on-screen. The server reads the monitor layout once per screenshot, from the portal session or the compositor, or from RandR on X11, and checks the point in screenshot pixels. It never runs xrandr on Wayland, where that could start Xwayland. Without a layout that fits the screenshot, only its outer rectangle is checked, as before. No screenshot is taken for the check.

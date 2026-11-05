@@ -202,8 +202,9 @@ A coordinate `click`, `scroll` or `drag` result warns when the point is off
 the screenshot or between monitors, where no monitor shows that part of the
 screenshot. A `drag` warning names its start or end coordinate. The result
 says whether the input was sent, and the warning says where it may have
-landed; pick a point on a monitor and check the screen before retrying. On
-the portal route, a refused point also closes the portal session; the next
+landed; pick a point on a monitor and check the screen before retrying. A KWin
+element click, including one with `coordinate_space: "atspi"`, gets no such
+warning, since KWin maps its point onto an output. On the portal route, a refused point also closes the portal session; the next
 pointer call starts a new one, which can show the consent dialog again.
 
 The uinput pointer is sized to the latest full screenshot. After the desktop
