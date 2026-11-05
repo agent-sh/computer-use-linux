@@ -164,11 +164,12 @@ test_non_systemd_host_gets_manual_guidance() (
     export XDG_RUNTIME_DIR="/run/user/test"
     local uinput
     uinput="$(mktemp)"
-    trap 'rm -f "${uinput}"' EXIT
     export COMPUTER_USE_LINUX_UINPUT_DEVICE="${uinput}"
 
     # shellcheck source=../install.sh
     source "${INSTALLER}"
+    # Set after sourcing: install.sh installs its own EXIT trap.
+    trap 'rm -f "${uinput}"' EXIT
     systemd_user_manager_available() { return 1; }
     ydotoold() { :; }
 
@@ -185,11 +186,12 @@ test_non_systemd_host_requires_uinput_access() (
     local uinput
     uinput="$(mktemp)"
     chmod 000 "${uinput}"
-    trap 'chmod 600 "${uinput}"; rm -f "${uinput}"' EXIT
     export COMPUTER_USE_LINUX_UINPUT_DEVICE="${uinput}"
 
     # shellcheck source=../install.sh
     source "${INSTALLER}"
+    # Set after sourcing: install.sh installs its own EXIT trap.
+    trap 'chmod 600 "${uinput}"; rm -f "${uinput}"' EXIT
     systemd_user_manager_available() { return 1; }
     ydotoold() { :; }
 
