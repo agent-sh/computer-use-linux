@@ -1,6 +1,6 @@
 # @agent-sh/computer-use-linux
 
-Native Linux desktop observation and control for AI agents — published as
+Native Linux desktop observation and control for AI agents, published as
 [`@agent-sh/computer-use-linux`](https://www.npmjs.com/package/@agent-sh/computer-use-linux).
 
 Provides:
@@ -14,7 +14,7 @@ Provides:
 > `ToolAnnotations` so hosts can distinguish read-only observation from mutating
 > desktop actions.
 
-On labwc, window targeting uses the Selkies IPC patch's `labwc.sock` when it exists. Stock labwc and other wlroots compositors that advertise wlr-foreign-toplevel-management use that protocol instead, which reports no pids or bounds. Activation requires a unique app-id/title match. Window IDs include the title and must be refreshed after it changes. Ambiguous windows are rejected. Window bounds and relative coordinate targeting are unavailable until output scaling can be verified.
+On labwc, window targeting uses the Selkies IPC patch's `labwc.sock` when it exists. Stock labwc and other wlroots compositors that advertise wlr-foreign-toplevel-management use that protocol instead, which reports no pids or bounds. Activation requires a unique app-id/title match. Window IDs include the title and must be refreshed after it changes. Ambiguous windows are rejected. Window bounds and relative coordinate targeting are unavailable until output scaling can be verified. Window-targeted screenshots, including `screenshot_after: "window"`, fail for the same reason; capture the full screen instead.
 
 Native X11 clicks, scrolls and drags use xdotool/XTEST on `DISPLAY`, ahead of uinput and portal input. Install xdotool for this route. Missing or failed commands return an error without a system-wide fallback. Drags send paced intermediate motion and always attempt release after a failed press or motion; verify the drop target afterward.
 
@@ -49,7 +49,9 @@ pi install npm:@agent-sh/computer-use-linux
 When installed through Pi, the package supplies native, dynamically loaded
 `computer_use_linux_*` tools. No separate MCP adapter or manual MCP
 configuration is required. Native tools require Pi 0.84.4 or newer; the
-standalone CLI wrapper retains Node.js 18 support.
+standalone CLI wrapper retains Node.js 18 support. Each native tool call times
+out after 60 seconds; set `COMPUTER_USE_LINUX_TIMEOUT_MS` in Pi's environment to
+change it.
 
 In Pi codemode, native tools return `{ text, images, isError }`. Pass image
 blocks directly to `image(result.images[0])` and check `isError` before using
@@ -82,15 +84,17 @@ hermes mcp test computer-use-linux
 hermes mcp configure computer-use-linux
 ```
 
-The generated Hermes config should look like this:
+The generated Hermes config holds `command`, `args` and `enabled`, plus
+`tools.include` when you pick a subset of tools. Hermes defaults to a 300-second
+tool-call timeout and a 60-second connect timeout; add `timeout` or
+`connect_timeout` under the server to change them.
 
 ```yaml
 mcp_servers:
   computer-use-linux:
     command: computer-use-linux
     args: ["mcp"]
-    timeout: 120
-    connect_timeout: 30
+    enabled: true
 ```
 
 ## What the package installs
@@ -100,11 +104,14 @@ GitHub release for this package version and verifies the `.sha256` asset before
 installing it. It also installs the matching `computer-use-linux-cosmic` helper
 used for COSMIC desktop window targeting and the `computer-use-linux-indicator`
 overlay that shows agent activity on screen (`COMPUTER_USE_LINUX_INDICATOR=0`
-turns it off).
+turns it off). When npm skips the install script (npm 12 does for scripts it was
+not told to allow), the wrapper runs the same download on first launch, with its
+output on stderr. A package directory that cannot be written is refused.
 
 If you already built or installed the binary yourself, set
 `COMPUTER_USE_LINUX_BIN=/path/to/computer-use-linux` to make the wrapper use
-that executable instead.
+that executable instead. The Pi extension uses it only when it is an absolute
+path to an executable.
 
 ## Post-action observation & completion cue
 
@@ -145,7 +152,9 @@ does not yet forward the flag or include the tool in its catalog.
   environment to reuse a restore token instead. The first dialog still appears.
   Leave it unset to keep the prompt. The repository README records where the
   token is stored and who can read it.
-- **niri**: On niri, export the session's `NIRI_SOCKET` to the server. Window listing and
+- **niri**: When the host does not pass `NIRI_SOCKET`, the server reads it from its
+  parent processes or the systemd user environment; without it, discovery needs
+  an unambiguous socket matching `WAYLAND_DISPLAY`. Window listing and
   exact focus use `niri msg` with a direct IPC fallback. Missing positions or
   unknown/mixed output scaling leave window-relative coordinates unavailable;
   focus the target and inspect a fresh full-screen screenshot before using
@@ -157,13 +166,13 @@ does not yet forward the flag or include the tool in its catalog.
   accept an optional app target (`pid`, `window_id`, `app_id`, `wm_class`,
   `window_title`). With one, an `element_index` or selector from another app's
   `get_app_state` snapshot is refused. When the window backend reports no pid
-  for the target window (i3, sway, COSMIC), the snapshot must have been taken
-  for that window. `perform_action` and `set_value` do not focus the window;
-  an `element_identifier` is refused only when its bus owner is known and is
-  not the target pid.
-- **Click vs. semantic actions**: Plain left `click` by element index or selector prefers a native AT-SPI
-  `click`, `press`, or `toggle` action over toolkit bounds,
-  avoiding pointer-coordinate conversion when that action is available. Explicit
+  for the target window (i3 without `xprop`, COSMIC, other wlroots compositors),
+  the snapshot must have been taken for that window. `perform_action` and
+  `set_value` do not focus the window; an `element_identifier` is refused only
+  when its bus owner is known and is not the target pid.
+- **Click vs. semantic actions**: Plain left `click` by element index or selector invokes the
+  element's first AT-SPI action instead of using toolkit bounds when that action
+  is `click`, `press`, or `toggle`, avoiding pointer-coordinate conversion. Explicit
   `activate`/`jump` requests belong in `perform_action`, not `click`, even when
   bounds are missing. Explicit
   `x`/`y`, right clicks, and multi-clicks retain pointer semantics. Explicit

@@ -1,7 +1,7 @@
 {
   "name": "computer-use-linux",
   "version": "0.7.43",
-  "description": "Native Linux desktop control: semantic AT-SPI accessibility trees, screenshots, compositor window targeting (GNOME, KDE, Hyprland, niri, COSMIC, i3, X11), Wayland/X11 input, and an on-screen activity indicator.",
+  "description": "Native Linux desktop control: semantic AT-SPI accessibility trees, screenshots, compositor window targeting (GNOME, KDE, Hyprland, niri, COSMIC, i3, Sway, labwc and other wlroots compositors, X11), Wayland/X11 input, and an on-screen activity indicator.",
   "author": {
     "name": "agent-sh",
     "url": "https://github.com/agent-sh"
@@ -15,7 +15,7 @@
   "interface": {
     "displayName": "Computer Use for Linux",
     "shortDescription": "Control Linux desktop apps with semantic accessibility trees, screenshots, and native input.",
-    "longDescription": "Inspect and control local Linux applications through AT-SPI accessibility trees, desktop portals, compositor-aware window targeting (GNOME, KDE, Hyprland, niri, COSMIC, i3, and X11), single-round-trip post-action capture, and a click-through on-screen activity indicator. Screenshots and accessibility trees can contain private data, and input reaches real applications.",
+    "longDescription": "Inspect and control local Linux applications through AT-SPI accessibility trees, desktop portals, compositor-aware window targeting (GNOME, KDE, Hyprland, niri, COSMIC, i3, Sway, labwc and other wlroots compositors, and X11), single-round-trip post-action capture, and a click-through on-screen activity indicator. Screenshots and accessibility trees can contain private data, and input reaches real applications.",
     "developerName": "agent-sh",
     "category": "Productivity",
     "capabilities": ["Interactive", "Write"],

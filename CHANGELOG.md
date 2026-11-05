@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pi passes `COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND`, `COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP`, `COMPUTER_USE_LINUX_XDOTOOL_TYPE_DELAY_MS`, `NIRI_SOCKET`, `PIXELFLUX_CU` and `PIXELFLUX_CU_TOKEN` to the server. They did nothing under Pi.
 - Codex passes `COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND`, `COMPUTER_USE_LINUX_PORTAL_SCROLL_INVERT`, `PIXELFLUX_CU` and `PIXELFLUX_CU_TOKEN` to the server. They did nothing under Codex. A CI check now fails when the server reads a variable that the Pi extension or the Codex manifest does not pass.
 - `npm run test:wrapper` tests the checkout's debug build. It used to download the published release and test that. CI runs it now.
+- Tool descriptions, parameter descriptions and server instructions match what the server does: the pointer and screenshot backend order, which backends `move_window` and `resize_window` support, the readiness fields that call for `setup_window_targeting`, which results carry no post-action observation, and which keyboard routes warn about a non-editable focus. Selector, button, click count, scroll, key, text and window-target parameters now have descriptions. The `get_app_state` `terminal_pid` description named the terminal emulator's pid; the field matches the shell or foreground process on the terminal's tty.
 
 ## [0.7.43] - 2026-11-05
 
@@ -79,7 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The crates.io package carries only what the crate builds and tests from (src, tests, examples, the five Python scripts the tests run, the GNOME Shell extension, manifest, lockfile, README, CHANGELOG, LICENSE): 75 files instead of 135. The npm wrapper, Pi extension, plugins and CI config are no longer published to crates.io.
+- The crates.io package carries only what the crate builds and tests from (src, tests, examples, the four Python scripts the tests run, the MCP safety check, the GNOME Shell extension, manifest, lockfile, README, CHANGELOG, LICENSE): 75 files instead of 135. The npm wrapper, Pi extension, plugins and CI config are no longer published to crates.io.
 
 ### Fixed
 
@@ -135,6 +136,8 @@ Thanks @joshuadavidthomas for the wlr foreign toplevel backend ([#359](https://g
 - `get_app_state` refuses a screenshot of a targeted window that is not focused before it captures anything. It used to capture the whole desktop first and then refuse, so on a portal session the call raised a consent prompt and grabbed every monitor only to discard the image.
 - Keep the remote desktop restore grant when EIS setup fails after `Start` on a non-GNOME session such as COSMIC, so persistence does not drop the grant and prompt for consent again.
 - Connect the pixelflux client to the configured loopback host instead of always dialing 127.0.0.1, so `[::1]:PORT` reaches an IPv6-only server. Read screenshot dimensions from the PNG header instead of fully decoding the image, cap the typing request timeout at two minutes, and refuse text past the timeout budget before anything is sent instead of timing out mid-typing.
+
+Thanks @NjengaFelix for Hyprland background mode ([#350](https://github.com/agent-sh/computer-use-linux/pull/350)) and the unfocused-target refusal ([#349](https://github.com/agent-sh/computer-use-linux/pull/349)).
 
 ## [0.7.34] - 2026-10-31
 
@@ -360,6 +363,10 @@ Thanks @lihaoze123 for the fix and @luochen1990 for the report ([#301](https://g
 
 ## [0.7.11] - 2026-10-04
 
+### Changed
+- Local development builds keep line information with less debug data, and CI host builds share their cache. Release settings are unchanged. (#225)
+- Pi and schema-check dependency lockfiles address audit findings. (#221)
+
 ### Fixed
 
 - Doctor now separates detected screenshot routes from verified capture. A detected route reports `screenshot_capture_status: "unverified"` and `can_capture_screenshots: false`; use `get_app_state` with a screenshot to obtain `verified` or `failed`. Unverified capture is a setup warning, and callers should not treat the boolean alone as a missing backend.
@@ -367,11 +374,11 @@ Thanks @lihaoze123 for the fix and @luochen1990 for the report ([#301](https://g
 - Portal wheel direction matches compositor axis signs on GNOME and KDE. (#226)
 - Screenshot errors retain their backend causes, and diagnostic subprocesses have bounded execution and cleanup.
 
-### Changed
-- Local development builds keep line information with less debug data, and CI host builds share their cache. Release settings are unchanged. (#225)
-- Pi and schema-check dependency lockfiles address audit findings. (#221)
-
 ## [0.7.10] - 2026-10-01
+
+### Fixed
+- MCP safety checks recognize npm launcher error output without weakening
+  the failure assertions. (#214)
 
 ### Security
 - COSMIC targeted input trusts compositor-reported focus rather than an
@@ -385,10 +392,6 @@ Thanks @lihaoze123 for the fix and @luochen1990 for the report ([#301](https://g
   mode-0600 daemon socket; `YDOTOOL_SOCKET` remains an explicit override. (#215)
 - Scroll amounts must be finite and within -100 to 100 before input locks
   are taken. Pi executable and PATH overrides must use absolute paths. (#215)
-
-### Fixed
-- MCP safety checks recognize npm launcher error output without weakening
-  the failure assertions. (#214)
 
 ## [0.7.9] - 2026-10-01
 
@@ -442,7 +445,6 @@ Thanks @lihaoze123 for the fix and @luochen1990 for the report ([#301](https://g
   deadline is still checked every pass, so continuous output cannot starve
   stderr or bypass the output limit. Fix by Gary Lysenko (ilysenko), from
   ilysenko/codex-desktop-linux#1532. (#203)
-||||||| parent of 1954063 (feat: official Claude Code and Codex plugin)
 
 ## [0.7.7] - 2026-09-30
 
@@ -767,7 +769,7 @@ Thanks @lihaoze123 for the fix and @luochen1990 for the report ([#301](https://g
 ### Fixed
 - X11 keyboard input now goes through `xdotool` (XTEST) instead of ydotool.
   ydotool injects raw evdev scancodes into a virtual uinput device, which X11
-  re-interprets through the active XKB layout — so `press_key "Return"` and
+  re-interprets through the active XKB layout, so `press_key "Return"` and
   chords like `ctrl+a` landed as stray characters, and `type_text` mangled
   symbols and digits (`_` → `%`, `1` → `+`) even on a plain US layout. XTEST
   resolves keysyms against the live layout. Wayland behaviour is unchanged, and
@@ -863,6 +865,10 @@ Thanks @lihaoze123 for the fix and @luochen1990 for the report ([#301](https://g
 
 ## [0.2.7] - 2026-06-16
 
+### Changed
+- The COSMIC helper source path and runtime override surface now use standalone
+  `computer-use-linux` naming only.
+
 ### Fixed
 - Window-relative clicks now require a verified target window and resolved
   bounds before coordinates are translated, preventing clicks from silently
@@ -876,11 +882,14 @@ Thanks @lihaoze123 for the fix and @luochen1990 for the report ([#301](https://g
 - Failed accessibility tree extraction clears cached nodes so later
   element-targeted actions cannot use stale coordinates.
 
-### Changed
-- The COSMIC helper source path and runtime override surface now use standalone
-  `computer-use-linux` naming only.
-
 ## [0.2.6] - 2026-06-06
+
+### Added
+- `COMPUTER_USE_LINUX_SCREENSHOT_BACKEND` to force a single screenshot backend
+  (`gnome-shell`, `portal`, or `gnome-screenshot`), skipping the fallback chain
+  for pinned/background deployments and debugging.
+- `doctor` now probes `gnome-screenshot` and lists it under
+  `capabilities.screenshot` when present.
 
 ### Fixed
 - Screenshots now work from background processes (systemd user services,
@@ -891,13 +900,6 @@ Thanks @lihaoze123 for the fix and @luochen1990 for the report ([#301](https://g
   capture fallback that works regardless of session context, bounded by a 20s
   timeout so a hung capture degrades to a clear error instead of blocking.
 
-### Added
-- `COMPUTER_USE_LINUX_SCREENSHOT_BACKEND` to force a single screenshot backend
-  (`gnome-shell`, `portal`, or `gnome-screenshot`), skipping the fallback chain
-  for pinned/background deployments and debugging.
-- `doctor` now probes `gnome-screenshot` and lists it under
-  `capabilities.screenshot` when present.
-
 ## [0.2.5] - 2026-06-05
 
 ### Added
@@ -906,7 +908,7 @@ Thanks @lihaoze123 for the fix and @luochen1990 for the report ([#301](https://g
   Codex extension identity, plus runtime `CODEX_COMPUTER_USE_*` aliases for the
   embedded input/backend knobs.
 
-### Documentation
+### Changed
 - Cross-referenced the sibling `agent-workspace-linux` project in the README.
 
 ### Fixed
@@ -988,6 +990,12 @@ pages; also bumps the MCP server's advertised version string to match.
   environment discovery, common command path hydration, `HYPRLAND_INSTANCE_SIGNATURE`
   inference, and rounded window-id disambiguation.
 
+### Changed
+- Updated repository, release, package, and CI links from `avifenesh` to the
+  `agent-sh/computer-use-linux` org repo.
+- `setup_accessibility` and `doctor` now understand the AT-SPI
+  `org.a11y.Status IsEnabled` path in addition to GNOME toolkit accessibility.
+
 ### Fixed
 - Omitted the debug-only `received` echo field from the generated MCP
   `outputSchema` for `ActionOutput` and `ActivateWindowOutput`. `schemars`
@@ -996,12 +1004,6 @@ pages; also bumps the MCP server's advertised version string to match.
   `AssertObjectSchema`) reject, failing the whole `tools/list` response.
   Affected `click`, `drag`, `perform_action`, `press_key`, `scroll`,
   `set_value`, `type_text`, and `activate_window`. (#1)
-
-### Changed
-- Updated repository, release, package, and CI links from `avifenesh` to the
-  `agent-sh/computer-use-linux` org repo.
-- `setup_accessibility` and `doctor` now understand the AT-SPI
-  `org.a11y.Status IsEnabled` path in addition to GNOME toolkit accessibility.
 
 ## [0.2.1] - 2026-05-14
 
@@ -1025,8 +1027,6 @@ pages; also bumps the MCP server's advertised version string to match.
   outside `cargo install`.
 - Keep the MCP `serverInfo.version` aligned with the Cargo package version.
 - Remove unused direct `libc` and `png` dependencies from the crate manifest.
-
-### Documentation
 - Add Hermes Agent CLI setup commands and clarify the registered MCP tool
   names / toolset.
 - Add npm install instructions and fix the prebuilt binary install example to
@@ -1037,6 +1037,8 @@ pages; also bumps the MCP server's advertised version string to match.
   and `v0.2.1` GitHub release assets.
 
 ## [0.2.0] - 2026-05-14
+
+This release tracks [`ilysenko/codex-desktop-linux`](https://github.com/ilysenko/codex-desktop-linux) through commit `4d6fd96` (May 2026), then re-applies the rebrand (DBus names, env vars, GNOME extension UUID, cache-file prefixes). Upstream credit goes to ilysenko, mosesmrima, PinguuSS, and the original Codex contributors.
 
 ### Added
 - **Multi-compositor window targeting**: native backends for **KWin**
@@ -1055,9 +1057,9 @@ pages; also bumps the MCP server's advertised version string to match.
   reconnection penalty per input event.
 - **Raw-keycode keyboard input** path for ydotool, fixing keystroke
   delivery on layouts where the symbolic keysym path was unreliable.
-- **Compact Linux accessibility trees** in `get_app_state` — deduplicated
+- **Compact Linux accessibility trees** in `get_app_state`: deduplicated
   redundant container nodes for smaller, more focused snapshots.
-- **Enriched AT-SPI state readback** — element states (`focused`,
+- **Enriched AT-SPI state readback**: element states (`focused`,
   `selected`, `expanded`, `checked`, …) now flow through to the response
   schema for `get_app_state`.
 
@@ -1065,24 +1067,18 @@ pages; also bumps the MCP server's advertised version string to match.
 - Server-side rejection of empty window-backend results (returns a
   structured "no backend available" error instead of an empty list).
 - Stale-client eviction in the chrome-extension host path on backend
-  side (host binary itself not shipped here — see Removed).
+  side (the host binary itself is not shipped here; see Removed).
 
 ### Removed
 - **`codex-chrome-extension-host` binary** is intentionally not shipped
-  in this fork — it is a Chrome native messaging host scoped to Codex
+  in this fork: it is a Chrome native messaging host scoped to Codex
   browser automation (`com.openai.codexextension`), unrelated to the
   computer-use MCP. The cosmic helper binary is renamed to
   `computer-use-linux-cosmic` to match the project naming.
 
-### Synced from upstream
-- This release tracks
-  [`ilysenko/codex-desktop-linux`](https://github.com/ilysenko/codex-desktop-linux)
-  through commit `4d6fd96` (May 2026), then re-applies the rebrand
-  (DBus names, env vars, GNOME extension UUID, cache-file prefixes).
-  Upstream credit goes to ilysenko, mosesmrima, PinguuSS, and the
-  original Codex contributors.
+## [0.1.0] - 2026-05-14
 
-## [0.1.0] - 2026-05-13
+Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNOME 50.1 on Wayland (Ubuntu 25.10). KDE, Sway and Hyprland untested: see the README support matrix.
 
 ### Added
 - Initial public release as a standalone repository, extracted from
@@ -1109,11 +1105,6 @@ pages; also bumps the MCP server's advertised version string to match.
 - `doctor` subcommand reporting AT-SPI bus health, GNOME Shell introspection
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
-
-### Architecture
-- Wayland-first; X11 best-effort through AT-SPI + ydotool.
-- Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
-- KDE / Sway / Hyprland untested — see README support matrix.
 
 [Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.43...HEAD
 [0.7.43]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.42...v0.7.43
@@ -1184,5 +1175,5 @@ pages; also bumps the MCP server's advertised version string to match.
 [0.2.3]: https://github.com/agent-sh/computer-use-linux/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/agent-sh/computer-use-linux/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/agent-sh/computer-use-linux/compare/v0.2.0...v0.2.1
-[0.2.0]: https://github.com/agent-sh/computer-use-linux/releases/tag/v0.2.0
+[0.2.0]: https://github.com/agent-sh/computer-use-linux/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/agent-sh/computer-use-linux/releases/tag/v0.1.0

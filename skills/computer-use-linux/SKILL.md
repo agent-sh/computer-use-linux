@@ -11,7 +11,7 @@ compatibility: "Native Pi tools require Pi 0.84.4+ and Node.js 22.19+; the stand
 
 Use `computer-use-linux` when an agent needs to observe or operate a local Linux desktop: inspect the accessibility tree, list/focus windows, take screenshots, click, scroll, type, press keys, or invoke AT-SPI actions.
 
-On labwc, window targeting uses the Selkies IPC patch's `labwc.sock` when it exists. Stock labwc and other wlroots compositors that advertise wlr-foreign-toplevel-management use that protocol instead, which reports no pids or bounds. Activation requires a unique app-id/title match. Window IDs include the title and must be refreshed after it changes. Ambiguous windows are rejected. Window bounds and relative coordinate targeting are unavailable until output scaling can be verified.
+On labwc, window targeting uses the Selkies IPC patch's `labwc.sock` when it exists. Stock labwc and other wlroots compositors that advertise wlr-foreign-toplevel-management use that protocol instead, which reports no pids or bounds. Activation requires a unique app-id/title match. Window IDs include the title and must be refreshed after it changes. Ambiguous windows are rejected. Window bounds and relative coordinate targeting are unavailable until output scaling can be verified. Window-targeted screenshots, including `screenshot_after: "window"`, fail for the same reason; capture the full screen instead.
 
 Native X11 clicks, scrolls and drags use xdotool/XTEST on `DISPLAY`, ahead of uinput and portal input. Install xdotool for this route. Missing or failed commands return an error without a system-wide fallback. Drags send paced intermediate motion and always attempt release after a failed press or motion; verify the drop target afterward.
 
@@ -81,9 +81,11 @@ computer-use-linux setup-window-targeting
 computer-use-linux doctor | jq .readiness
 ```
 
-If `doctor` selects ydotool as the input backend, also enable its per-user daemon with `systemctl --user enable --now ydotoold`. Direct uinput, X11 xdotool, and RemoteDesktop portal input do not require `ydotoold`.
+If `doctor` selects ydotool as the input backend, also enable its per-user daemon. `./install.sh` creates `ydotoold.service`; Ubuntu's ydotool package ships `ydotool.service` instead (`systemctl --user enable --now ydotool`). Direct uinput, X11 xdotool, and RemoteDesktop portal input do not require `ydotoold`, but a Wayland scroll at a point needs ydotool for the wheel, or the portal.
 
-On niri, export the session's `NIRI_SOCKET` to the server. Window listing and
+On niri, the server reads `NIRI_SOCKET` from its parent processes or the systemd
+user environment when the host does not pass it; without it, discovery needs an
+unambiguous socket matching `WAYLAND_DISPLAY`. Window listing and
 exact focus use `niri msg` with a direct IPC fallback. Missing positions or
 unknown/mixed output scaling leave window-relative coordinates unavailable;
 focus the target and inspect a fresh full-screen screenshot before using
@@ -139,15 +141,15 @@ Pi native tools skip this MCP `command` config; see [Pi setup](references/pi-set
 ## Procedure
 
 1. In Pi, call `computer_use_linux_tools` with the exact tools or capability you need. Enabled tools use the `computer_use_linux_<name>` prefix, appear starting on the next model turn, and remain active for the session.
-2. Begin every desktop-control turn with `get_app_state`, scoped to the app you are working in: pass `app_name_or_bundle_identifier` or a window target (`window_id`, `pid`, `app_id`, `wm_class`, `title`). An `app_id` may be a full desktop ID or its final dot-separated segment; matching is case-insensitive, ambiguous aliases are rejected, and an unresolved explicit `app_id` returns an empty scoped tree rather than the desktop. Without a target the result is the whole desktop AT-SPI tree, `tree_scoped` is `false`, and `message` warns; that can flood context. Use `include_screenshot: false` when the accessibility tree is sufficient. If `accessibility_tree_truncated` is `true`, the tree is incomplete: scope to a narrower target and raise `max_nodes` or `max_depth` (hard caps 10000 and 64) rather than lowering them. A tree too large to return inline comes back as its leading nodes plus `accessibility_tree_spill.path`, a private JSON file with the whole tree and the same `element_index` values: search it (for a role, name or text) instead of requesting the tree again, or page through it with `get_tree_page` when you cannot read files. Nodes are compact: null, empty, zero and false fields are left out and `actions` lists action names; `verbose: true` returns every field. To find controls in a large tree, pass `interactive_only: true`: it keeps nodes with an action, editable text or a value, plus headings, status and live regions, windows and dialogs, collapses containers, and keeps the same `element_index` values. A `title` or `window_id` target narrows a Chromium-style app with several windows under one AT-SPI root to that window, keeping the app's popups and dialogs. The compact readiness block identifies missing setup.
+2. Begin every desktop-control turn with `get_app_state`, scoped to the app you are working in: pass `app_name_or_bundle_identifier` or a window target (`window_id`, `pid`, `app_id`, `wm_class`, `title`). An `app_id` may be a full desktop ID or its final dot-separated segment; matching is case-insensitive, ambiguous aliases are rejected, and an unresolved explicit `app_id` returns an empty scoped tree rather than the desktop. Without a target the result is the whole desktop AT-SPI tree, `tree_scoped` is `false`, and `message` warns; that can flood context. Use `include_screenshot: false` when the accessibility tree is sufficient. If `accessibility_tree_truncated` is `true`, the tree is incomplete: scope to a narrower target and raise `max_nodes` or `max_depth` (hard caps 10000 and 64) rather than lowering them. A tree too large to return inline comes back as its leading nodes plus `accessibility_tree_spill.path`, a private JSON file with the whole tree and the same `element_index` values: search it (for a role, name or text) instead of requesting the tree again, or page through it with `get_tree_page` when you cannot read files. Nodes are compact: null, empty, zero and false fields are left out and `actions` lists action names; `verbose: true` returns every field. To find controls in a large tree, pass `interactive_only: true`: it keeps nodes with an action, editable text or a value, plus headings, status and live regions, windows and dialogs, collapses containers, and keeps the same `element_index` values. A `title` or `window_id` target narrows a Chromium-style app with several windows under one AT-SPI root to that window, keeping the app's popups and dialogs. A window-targeted screenshot needs that window visible and already focused (Hyprland background mode excepted); otherwise `screenshot_error` is set and only the tree returns, so use `screenshot` to raise and capture it. The compact readiness block identifies missing setup.
 3. Use `doctor` only when you need the full diagnostic report.
 4. If `can_build_accessibility_tree` is false, run `setup_accessibility` and restart the target app.
-5. If `can_query_windows` is false on GNOME Wayland, run `setup_window_targeting` and ask the user to log out and back in if setup says the shell extension needs a reload.
+5. If `can_query_windows` or `can_focus_windows` is false on GNOME Wayland, run `setup_window_targeting` and ask the user to log out and back in if setup says the shell extension needs a reload.
 6. Before targeted input, call `list_windows` or `focused_window` and verify the intended window by title, app id, pid, or wm class.
-7. Prefer semantic targeting from `get_app_state`: use element indices or role/name/text/states selectors. Automatic recovery of a dead semantic target requires verified PID/window ownership and invalidates cached indices; call `get_app_state` again before further index-based actions. When several apps are in play, pass the app target (`pid`, `window_id`, `app_id`, `wm_class`, `window_title`) to `click`, `scroll`, `perform_action`, and `set_value`: an index or selector from another app's snapshot is then refused instead of acting on that app. Where the window backend reports no pid (i3 without `xprop`, COSMIC), call `get_app_state` for the same window first or pass `pid`, or the call is refused.
+7. Prefer semantic targeting from `get_app_state`: use element indices or role/name/text/states selectors. Automatic recovery of a dead semantic target requires verified PID/window ownership and invalidates cached indices; call `get_app_state` again before further index-based actions. When several apps are in play, pass the app target (`pid`, `window_id`, `app_id`, `wm_class`, `window_title`) to `click`, `scroll`, `perform_action`, and `set_value`: an index or selector from another app's snapshot is then refused instead of acting on that app. On `click` and `scroll` the target also raises and focuses that window, and nothing is sent when focus cannot be verified; GNOME needs the Shell extension to raise a window. The title field there is `window_title`. Where the window backend reports no pid (i3 without `xprop`, COSMIC, and wlr-foreign-toplevel on stock labwc and other wlroots compositors), call `get_app_state` for the same window first or pass `pid`, or the call is refused.
 8. Use coordinates only when the UI surface has no useful accessibility tree.
 9. For text input, prefer `type_text` with a target selector (`window_id`, `pid`, `app_id`, `wm_class`, `title`, `tty`, `terminal_pid`, `terminal_command`, or `terminal_cwd`) rather than relying on current focus. A `window_id` is valid only as returned by a recent `list_windows`; if a call rejects it as outside 0 to 2^53-1 or matches no window, re-run `list_windows`.
-10. After mutating actions (`click`, `drag`, `scroll`, `press_key`, `type_text`, `perform_action`, `set_value`, `activate_window`, `move_window`, `resize_window`), either pass `screenshot_after: true | "screen" | "window"` (with optional `format`, `quality`, `scale`, `max_width`, `max_height`, `max_bytes`) and/or `include_tree: true` on the action call itself to observe the result in the same tool call, or re-check state with `get_app_state`, `focused_window`, or an app-specific readback.
+10. After mutating actions (`click`, `drag`, `scroll`, `press_key`, `type_text`, `perform_action`, `set_value`, `activate_window`, `move_window`, `resize_window`), either pass `screenshot_after: true | "screen" | "window"` (with optional `format`, `quality`, `scale`, `max_width`, `max_height`, `max_bytes`) and/or `include_tree: true` on the action call itself to observe the result in the same tool call, or re-check state with `get_app_state`, `focused_window`, or an app-specific readback. A failed action (`ok: false`) returns no post-action screenshot or tree, so call `get_app_state`; `set_value` still observes when `verified` is `false`.
 11. For `set_value`, `verified: true` is the only exact-content confirmation. `verified: false` requires fresh observation; password fields are deliberately unverifiable. The field is omitted for numeric values and early failures.
 
 On Hyprland, `type_text` passes one literal wtype argument after `--` for a
@@ -183,9 +185,9 @@ only a few thousand nodes before the deadline. A snapshot stops reading at 10 se
 marked truncated; if the editor is still missing, hide the embedded browser pane
 for the snapshot.
 
-Plain left element/index/selector `click` prefers native AT-SPI `click`,
-`press`, or `toggle` over toolkit bounds, avoiding coordinate
-conversion when available. This preference does not replace a coordinate click
+Plain left element/index/selector `click` invokes the element's first AT-SPI
+action instead of using toolkit bounds when that action is `click`, `press`, or
+`toggle`, avoiding coordinate conversion. This preference does not replace a coordinate click
 with an arbitrary action name. Explicit `x`/`y`, right clicks, and double/multiple
 clicks retain pointer semantics. Explicit coordinates default to raw screenshot
 pixels (`coordinate_space: "capture"`). On KDE Wayland, pass
@@ -200,7 +202,13 @@ A coordinate `click`, `scroll` or `drag` result warns when the point is off
 the screenshot or between monitors, where no monitor shows that part of the
 screenshot. A `drag` warning names its start or end coordinate. The result
 says whether the input was sent, and the warning says where it may have
-landed; pick a point on a monitor and check the screen before retrying.
+landed; pick a point on a monitor and check the screen before retrying. On
+the portal route, a refused point also closes the portal session; the next
+pointer call starts a new one, which can show the consent dialog again.
+
+The uinput pointer is sized to the latest full screenshot. After the desktop
+size changes, take a new screenshot before coordinate input. If replacing the
+device fails, nothing is sent and the result says where a retry goes.
 
 ### Screenshot-relative coordinates
 
@@ -218,9 +226,9 @@ directly to a window-relative click.
 
 - Already-running GTK, Qt, and Electron apps may need a restart after AT-SPI is enabled.
 - GNOME may show a portal prompt on the first screenshot or `get_app_state` call with screenshots enabled.
-- Inside a Selkies container, `PIXELFLUX_CU` plus `PIXELFLUX_CU_TOKEN` sends screenshots and input to pixelflux on loopback, with no portal prompt. A closed port falls through. A server error does not, so do not retry that call through another backend.
+- Inside a Selkies container, `PIXELFLUX_CU` plus `PIXELFLUX_CU_TOKEN` sends screenshots and input to pixelflux on loopback, with no portal prompt. A closed port falls through. A server error does not, so do not retry that call through another backend. pixelflux takes left, right and middle clicks with counts 1 to 3, and multi-clicks only with the left button; other clicks go to the next backend. Its results carry no off-screen or monitor-gap warning.
 - On GNOME Wayland, the remote-control portal asks on each new `computer-use-linux` process. `COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP=1` in the server environment asks the portal to remember the grant (GNOME starts with the remember box checked). Later processes reuse a single-use restore token stored mode 0600 in the user state directory. Unset is the default and prompts every time. The flag does nothing when ydotool, not the portal, is the input backend.
-- On Hyprland, `COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND=1` lets targeted `type_text`, `press_key`, `get_app_state` and `screenshot` work on a window without focusing it, including one on a hidden workspace. Pass `window_id` (or another target) on every call. An AT-SPI action can move focus inside the app, so re-focus a field with its `activate` action before typing into it. Text must be printable US-layout ASCII, tab or newline. An unfocused Chromium ignores browser accelerators such as Ctrl+R, and Chromium joins AT-SPI only when started with `ACCESSIBILITY_ENABLED=1` if the accessibility bus reports itself disabled.
+- On Hyprland, `COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND=1` lets targeted `type_text`, `press_key`, `get_app_state` and `screenshot` work on a window without focusing it, including one on a hidden workspace. Pass `window_id` (or another target) on every call. An AT-SPI action can move focus inside the app, so re-focus a field with its `activate` action before typing into it. The active Hyprland keymap must be US, or every background call, `press_key` included, is refused. Text must be printable ASCII, tab or newline. An unfocused Chromium ignores browser accelerators such as Ctrl+R, and Chromium joins AT-SPI only when started with `ACCESSIBILITY_ENABLED=1` if the accessibility bus reports itself disabled.
 - Desktop input is stateful. Avoid concurrent tool calls against this MCP server.
 - Pi serializes the native Computer Use tools and keeps one process for the session. If that process exits, do not replay an ambiguous mutating call; obtain a fresh `get_app_state` before another element-based action.
 - `click`, `drag`, `press_key`, `type_text`, `perform_action`, and `set_value` can change real application state.

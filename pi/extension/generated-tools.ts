@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.43";
-export const GENERATED_TOOL_CATALOG_HASH = "c3da735e9c17d0bd15294e604abd28a6008e67d250f6db226da05e3f9504f68f";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "96bd879e7d29ef3f3193d49ef6f86b0d561b2ac9c7eeeece326c1637e1c6428f";
+export const GENERATED_TOOL_CATALOG_HASH = "350cfeeeef6c397d427f082f08db12af773f1bc695955534bae8dbb34d41eed3";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "748c373d6bc2365bfc264f779f8066798eedb5846af4f0455f538698333d6619";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -34,6 +34,7 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "app_id": {
           "default": null,
+          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
           "type": [
             "string",
             "null"
@@ -51,7 +52,7 @@ export const GENERATED_MCP_TOOLS =
           "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
         },
         "include_tree": {
-          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.\nIt reads at most 1000 nodes and depth 32; when accessibility_tree_truncated\nis true, call get_app_state with a higher max_nodes.",
           "type": [
             "boolean",
             "null"
@@ -83,6 +84,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
+          "description": "Process id of the window. Alone, it must match exactly one window.",
           "minimum": 0,
           "type": [
             "integer",
@@ -126,6 +128,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_command": {
           "default": null,
+          "description": "Case-insensitive substring of the command name or command line of a\nterminal's shell or foreground process.",
           "type": [
             "string",
             "null"
@@ -133,6 +136,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_cwd": {
           "default": null,
+          "description": "Working directory of a terminal's shell or foreground process: an\nabsolute path, or a trailing path such as project/src.",
           "type": [
             "string",
             "null"
@@ -140,6 +144,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_pid": {
           "default": null,
+          "description": "Pid of the shell or foreground process on a terminal's tty, not the\nterminal emulator (use pid for that).",
           "minimum": 0,
           "type": [
             "integer",
@@ -148,6 +153,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "title": {
           "default": null,
+          "description": "Case-insensitive window title substring. The first matching window wins.",
           "type": [
             "string",
             "null"
@@ -155,6 +161,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "tty": {
           "default": null,
+          "description": "Terminal tty: /dev/pts/N, pts/N or N.",
           "type": [
             "string",
             "null"
@@ -162,6 +169,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
+          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -171,6 +179,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
+          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
           "type": [
             "string",
             "null"
@@ -188,7 +197,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. Plain left activation prefers a native AT-SPI click/press/toggle action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics. Explicit x/y default to raw screenshot capture pixels; coordinate_space=\"atspi\" with element_index or a semantic selector maps a global AT-SPI screen point through the element's KWin window and output geometry on KDE Wayland. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. A plain left click on an element whose first AT-SPI action is click, press, or toggle invokes that action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics. Explicit x/y default to raw screenshot capture pixels; coordinate_space=\"atspi\" with element_index or a semantic selector maps a global AT-SPI screen point through the element's KWin window and output geometry on KDE Wayland. A window target is raised and focused first (GNOME needs the Shell extension to raise one); nothing is sent when focus cannot be verified. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "ClickCoordinateSpace": {
@@ -210,6 +219,7 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "app_id": {
           "default": null,
+          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
           "type": [
             "string",
             "null"
@@ -217,6 +227,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "button": {
           "default": null,
+          "description": "Mouse button: left (default), right or middle. side, extra, forward and\nback reach only the portal and ydotool routes, which treat an unknown\nname as left.",
           "type": [
             "string",
             "null"
@@ -224,6 +235,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "click_count": {
           "default": null,
+          "description": "Number of clicks (default 1), clamped to 1 to 10.",
           "minimum": 0,
           "type": [
             "integer",
@@ -237,6 +249,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "element_index": {
           "default": null,
+          "description": "Element index from the latest get_app_state or include_tree snapshot.",
           "minimum": 0,
           "type": [
             "integer",
@@ -255,7 +268,7 @@ export const GENERATED_MCP_TOOLS =
           "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
         },
         "include_tree": {
-          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.\nIt reads at most 1000 nodes and depth 32; when accessibility_tree_truncated\nis true, call get_app_state with a higher max_nodes.",
           "type": [
             "boolean",
             "null"
@@ -287,6 +300,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "name": {
           "default": null,
+          "description": "Case-insensitive substring of the element's accessible name.",
           "type": [
             "string",
             "null"
@@ -294,6 +308,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
+          "description": "Process id of the window. Alone, it must match exactly one window.",
           "minimum": 0,
           "type": [
             "integer",
@@ -319,6 +334,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "role": {
           "default": null,
+          "description": "Case-insensitive substring of the element's AT-SPI role.",
           "type": [
             "string",
             "null"
@@ -352,6 +368,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "states": {
           "default": [],
+          "description": "AT-SPI states the element must all have, case-insensitive (for\nexample focused, checked).",
           "items": {
             "type": "string"
           },
@@ -359,6 +376,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "text": {
           "default": null,
+          "description": "Case-insensitive substring of the element's text, name or description.",
           "type": [
             "string",
             "null"
@@ -366,6 +384,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
+          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -375,6 +394,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_title": {
           "default": null,
+          "description": "Case-insensitive window title substring. The first matching window wins.\nThis tool names the field window_title, not title.",
           "type": [
             "string",
             "null"
@@ -382,6 +402,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
+          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
           "type": [
             "string",
             "null"
@@ -429,7 +450,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Drag from one point to another using pixel coordinates. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Drag with the left button from one point to another in screenshot capture pixels. Takes no window target or relative coordinates. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -462,7 +483,7 @@ export const GENERATED_MCP_TOOLS =
           "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
         },
         "include_tree": {
-          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.\nIt reads at most 1000 nodes and depth 32; when accessibility_tree_truncated\nis true, call get_app_state with a higher max_nodes.",
           "type": [
             "boolean",
             "null"
@@ -567,7 +588,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Nodes are compact (empty fields left out, actions by name; verbose=true returns every field). Pass interactive_only=true for only actionable nodes, headings and status regions, with the same element_index values. A title or window_id target narrows an app with several windows under one AT-SPI root (Chromium) to that window, keeping the app's popups and dialogs. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
+    "description": "Get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Nodes are compact (empty fields left out, actions by name; verbose=true returns every field). Pass interactive_only=true for only actionable nodes, headings and status regions, with the same element_index values. A title or window_id target narrows an app with several windows under one AT-SPI root (Chromium) to that window, keeping the app's popups and dialogs. A window-targeted screenshot needs that window visible and already focused (outside Hyprland background mode); otherwise screenshot_error is set and the tree still returns, so use the screenshot tool to raise and capture it. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. Screenshot results always include coordinate_width, coordinate_height, scale, and format, plus quality for jpeg; callers can request jpeg/quality for compression before resizing.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -715,7 +736,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_pid": {
           "default": null,
-          "description": "Terminal emulator pid. Resolves a window target and scopes the tree when\npossible.",
+          "description": "Pid of the shell or foreground process on a terminal's tty, not the\nterminal emulator (use pid for that). Resolves a window target and\nscopes the tree when possible.",
           "minimum": 0,
           "type": [
             "integer",
@@ -829,7 +850,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Move a window to a new desktop position (frame top-left in desktop coordinates). Useful to recover windows that are partially off-screen. Works through the computer-use-linux GNOME Shell extension or a generic X11/EWMH window manager (wmctrl). Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Move a window to a new desktop position (frame top-left in desktop coordinates). Useful to recover windows that are partially off-screen. Works only through the computer-use-linux GNOME Shell extension or a generic X11/EWMH window manager (wmctrl); other window backends refuse it. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -844,6 +865,7 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "app_id": {
           "default": null,
+          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
           "type": [
             "string",
             "null"
@@ -861,7 +883,7 @@ export const GENERATED_MCP_TOOLS =
           "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
         },
         "include_tree": {
-          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.\nIt reads at most 1000 nodes and depth 32; when accessibility_tree_truncated\nis true, call get_app_state with a higher max_nodes.",
           "type": [
             "boolean",
             "null"
@@ -893,6 +915,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
+          "description": "Process id of the window. Alone, it must match exactly one window.",
           "minimum": 0,
           "type": [
             "integer",
@@ -936,6 +959,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_command": {
           "default": null,
+          "description": "Case-insensitive substring of the command name or command line of a\nterminal's shell or foreground process.",
           "type": [
             "string",
             "null"
@@ -943,6 +967,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_cwd": {
           "default": null,
+          "description": "Working directory of a terminal's shell or foreground process: an\nabsolute path, or a trailing path such as project/src.",
           "type": [
             "string",
             "null"
@@ -950,6 +975,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_pid": {
           "default": null,
+          "description": "Pid of the shell or foreground process on a terminal's tty, not the\nterminal emulator (use pid for that).",
           "minimum": 0,
           "type": [
             "integer",
@@ -958,6 +984,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "title": {
           "default": null,
+          "description": "Case-insensitive window title substring. The first matching window wins.",
           "type": [
             "string",
             "null"
@@ -965,6 +992,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "tty": {
           "default": null,
+          "description": "Terminal tty: /dev/pts/N, pts/N or N.",
           "type": [
             "string",
             "null"
@@ -972,6 +1000,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
+          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -981,6 +1010,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
+          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
           "type": [
             "string",
             "null"
@@ -1034,6 +1064,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "app_id": {
           "default": null,
+          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
           "type": [
             "string",
             "null"
@@ -1048,6 +1079,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "element_index": {
           "default": null,
+          "description": "Element index from the latest get_app_state or include_tree snapshot.",
           "minimum": 0,
           "type": [
             "integer",
@@ -1066,7 +1098,7 @@ export const GENERATED_MCP_TOOLS =
           "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
         },
         "include_tree": {
-          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.\nIt reads at most 1000 nodes and depth 32; when accessibility_tree_truncated\nis true, call get_app_state with a higher max_nodes.",
           "type": [
             "boolean",
             "null"
@@ -1098,6 +1130,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "name": {
           "default": null,
+          "description": "Case-insensitive substring of the element's accessible name.",
           "type": [
             "string",
             "null"
@@ -1105,6 +1138,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
+          "description": "Process id of the target app.",
           "minimum": 0,
           "type": [
             "integer",
@@ -1122,6 +1156,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "role": {
           "default": null,
+          "description": "Case-insensitive substring of the element's AT-SPI role.",
           "type": [
             "string",
             "null"
@@ -1155,6 +1190,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "states": {
           "default": [],
+          "description": "AT-SPI states the element must all have, case-insensitive (for\nexample focused, checked).",
           "items": {
             "type": "string"
           },
@@ -1162,6 +1198,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "text": {
           "default": null,
+          "description": "Case-insensitive substring of the element's text, name or description.",
           "type": [
             "string",
             "null"
@@ -1169,6 +1206,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
+          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -1178,6 +1216,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_title": {
           "default": null,
+          "description": "Case-insensitive window title substring. The first matching window wins.\nThis tool names the field window_title, not title.",
           "type": [
             "string",
             "null"
@@ -1185,6 +1224,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
+          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
           "type": [
             "string",
             "null"
@@ -1202,7 +1242,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. When ydotool is absent and the session has no RemoteDesktop portal (for example wlroots compositors), chords go through wtype instead. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On X11, chords go through xdotool (XTEST), or ydotool when xdotool is missing or cannot start. On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. When ydotool is absent and the session has no RemoteDesktop portal (for example wlroots compositors), chords go through wtype instead. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. On KDE Plasma every key in a portal chord is a physical keycode. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -1217,6 +1257,7 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "app_id": {
           "default": null,
+          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
           "type": [
             "string",
             "null"
@@ -1234,13 +1275,14 @@ export const GENERATED_MCP_TOOLS =
           "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
         },
         "include_tree": {
-          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.\nIt reads at most 1000 nodes and depth 32; when accessibility_tree_truncated\nis true, call get_app_state with a higher max_nodes.",
           "type": [
             "boolean",
             "null"
           ]
         },
         "key": {
+          "description": "Key or chord in the grammar the tool description gives, for example\nEnter or Ctrl+Shift+T.",
           "type": "string"
         },
         "max_bytes": {
@@ -1269,6 +1311,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
+          "description": "Process id of the window. Alone, it must match exactly one window.",
           "minimum": 0,
           "type": [
             "integer",
@@ -1312,6 +1355,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_command": {
           "default": null,
+          "description": "Case-insensitive substring of the command name or command line of a\nterminal's shell or foreground process.",
           "type": [
             "string",
             "null"
@@ -1319,6 +1363,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_cwd": {
           "default": null,
+          "description": "Working directory of a terminal's shell or foreground process: an\nabsolute path, or a trailing path such as project/src.",
           "type": [
             "string",
             "null"
@@ -1326,6 +1371,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_pid": {
           "default": null,
+          "description": "Pid of the shell or foreground process on a terminal's tty, not the\nterminal emulator (use pid for that).",
           "minimum": 0,
           "type": [
             "integer",
@@ -1334,6 +1380,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "title": {
           "default": null,
+          "description": "Case-insensitive window title substring. The first matching window wins.",
           "type": [
             "string",
             "null"
@@ -1341,6 +1388,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "tty": {
           "default": null,
+          "description": "Terminal tty: /dev/pts/N, pts/N or N.",
           "type": [
             "string",
             "null"
@@ -1348,6 +1396,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
+          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -1357,6 +1406,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
+          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
           "type": [
             "string",
             "null"
@@ -1377,7 +1427,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Resize a window to a new frame width/height in desktop pixels, unmaximizing it first if needed. Useful to fit a window fully on-screen. Works through the computer-use-linux GNOME Shell extension or a generic X11/EWMH window manager (wmctrl). Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Resize a window in desktop pixels, unmaximizing it first if needed. Useful to fit a window fully on-screen. Through the computer-use-linux GNOME Shell extension, width and height set the frame; through a generic X11/EWMH window manager (wmctrl), they set the client area, and decorations add to it. Other window backends refuse it. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -1392,6 +1442,7 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "app_id": {
           "default": null,
+          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
           "type": [
             "string",
             "null"
@@ -1409,12 +1460,12 @@ export const GENERATED_MCP_TOOLS =
           "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
         },
         "height": {
-          "description": "New frame height in desktop pixels.",
+          "description": "New height in desktop pixels: the frame through the GNOME Shell\nextension, the client area on X11/EWMH.",
           "format": "int32",
           "type": "integer"
         },
         "include_tree": {
-          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.\nIt reads at most 1000 nodes and depth 32; when accessibility_tree_truncated\nis true, call get_app_state with a higher max_nodes.",
           "type": [
             "boolean",
             "null"
@@ -1446,6 +1497,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
+          "description": "Process id of the window. Alone, it must match exactly one window.",
           "minimum": 0,
           "type": [
             "integer",
@@ -1489,6 +1541,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_command": {
           "default": null,
+          "description": "Case-insensitive substring of the command name or command line of a\nterminal's shell or foreground process.",
           "type": [
             "string",
             "null"
@@ -1496,6 +1549,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_cwd": {
           "default": null,
+          "description": "Working directory of a terminal's shell or foreground process: an\nabsolute path, or a trailing path such as project/src.",
           "type": [
             "string",
             "null"
@@ -1503,6 +1557,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_pid": {
           "default": null,
+          "description": "Pid of the shell or foreground process on a terminal's tty, not the\nterminal emulator (use pid for that).",
           "minimum": 0,
           "type": [
             "integer",
@@ -1511,6 +1566,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "title": {
           "default": null,
+          "description": "Case-insensitive window title substring. The first matching window wins.",
           "type": [
             "string",
             "null"
@@ -1518,18 +1574,20 @@ export const GENERATED_MCP_TOOLS =
         },
         "tty": {
           "default": null,
+          "description": "Terminal tty: /dev/pts/N, pts/N or N.",
           "type": [
             "string",
             "null"
           ]
         },
         "width": {
-          "description": "New frame width in desktop pixels.",
+          "description": "New width in desktop pixels: the frame through the GNOME Shell\nextension, the client area on X11/EWMH.",
           "format": "int32",
           "type": "integer"
         },
         "window_id": {
           "default": null,
+          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -1539,6 +1597,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
+          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
           "type": [
             "string",
             "null"
@@ -1560,7 +1619,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize. Returns the image plus a short caption with returned dimensions, coordinate dimensions, scale, format, quality, source, and crop bounds; callers can request jpeg/quality for compression before resizing.",
+    "description": "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize; a target without known bounds is refused, so pass full_screen=true there. Returns the image plus a JSON caption with returned and coordinate dimensions, scale, format, quality, source, cropped_to_window, and window_title. The crop origin is not reported; use relative=true on click or scroll for window-relative input. Callers can request jpeg/quality for compression before resizing.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -1575,6 +1634,7 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "app_id": {
           "default": null,
+          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
           "type": [
             "string",
             "null"
@@ -1629,6 +1689,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
+          "description": "Process id of the window. Alone, it must match exactly one window.",
           "minimum": 0,
           "type": [
             "integer",
@@ -1664,6 +1725,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "title": {
           "default": null,
+          "description": "Case-insensitive window title substring. The first matching window wins.",
           "type": [
             "string",
             "null"
@@ -1671,6 +1733,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
+          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -1680,6 +1743,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
+          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
           "type": [
             "string",
             "null"
@@ -1697,7 +1761,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Scroll an element in a direction by a number of pages. With a window target and no x/y/element_index, scrolls at the centre of the targeted window. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Scroll an element, window, or point in a direction by a number of pages (5 wheel notches per page). With a window target and no x/y/element_index, scrolls at the centre of the targeted window; with no point or target, at the current pointer. A window target is raised and focused first; nothing is sent when focus cannot be verified. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -1712,16 +1776,19 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "app_id": {
           "default": null,
+          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
           "type": [
             "string",
             "null"
           ]
         },
         "direction": {
+          "description": "up, down, left or right (case-insensitive).",
           "type": "string"
         },
         "element_index": {
           "default": null,
+          "description": "Element index from the latest get_app_state or include_tree snapshot.",
           "minimum": 0,
           "type": [
             "integer",
@@ -1740,7 +1807,7 @@ export const GENERATED_MCP_TOOLS =
           "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
         },
         "include_tree": {
-          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.\nIt reads at most 1000 nodes and depth 32; when accessibility_tree_truncated\nis true, call get_app_state with a higher max_nodes.",
           "type": [
             "boolean",
             "null"
@@ -1772,6 +1839,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pages": {
           "default": null,
+          "description": "Distance in pages (default 1), 5 wheel notches each. The sign is\nignored (direction sets it), and any value sends at least one notch.",
           "format": "double",
           "maximum": 100,
           "minimum": -100,
@@ -1782,6 +1850,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
+          "description": "Process id of the window. Alone, it must match exactly one window.",
           "minimum": 0,
           "type": [
             "integer",
@@ -1833,6 +1902,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
+          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -1842,6 +1912,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_title": {
           "default": null,
+          "description": "Case-insensitive window title substring. The first matching window wins.\nThis tool names the field window_title, not title.",
           "type": [
             "string",
             "null"
@@ -1849,6 +1920,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
+          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
           "type": [
             "string",
             "null"
@@ -1900,6 +1972,7 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "app_id": {
           "default": null,
+          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
           "type": [
             "string",
             "null"
@@ -1914,6 +1987,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "element_index": {
           "default": null,
+          "description": "Element index from the latest get_app_state or include_tree snapshot.",
           "minimum": 0,
           "type": [
             "integer",
@@ -1932,7 +2006,7 @@ export const GENERATED_MCP_TOOLS =
           "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
         },
         "include_tree": {
-          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.\nIt reads at most 1000 nodes and depth 32; when accessibility_tree_truncated\nis true, call get_app_state with a higher max_nodes.",
           "type": [
             "boolean",
             "null"
@@ -1964,6 +2038,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "name": {
           "default": null,
+          "description": "Case-insensitive substring of the element's accessible name.",
           "type": [
             "string",
             "null"
@@ -1971,6 +2046,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
+          "description": "Process id of the target app.",
           "minimum": 0,
           "type": [
             "integer",
@@ -1988,6 +2064,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "role": {
           "default": null,
+          "description": "Case-insensitive substring of the element's AT-SPI role.",
           "type": [
             "string",
             "null"
@@ -2021,6 +2098,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "states": {
           "default": [],
+          "description": "AT-SPI states the element must all have, case-insensitive (for\nexample focused, checked).",
           "items": {
             "type": "string"
           },
@@ -2028,6 +2106,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "text": {
           "default": null,
+          "description": "Case-insensitive substring of the element's text, name or description.",
           "type": [
             "string",
             "null"
@@ -2038,6 +2117,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
+          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -2047,6 +2127,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_title": {
           "default": null,
+          "description": "Case-insensitive window title substring. The first matching window wins.\nThis tool names the field window_title, not title.",
           "type": [
             "string",
             "null"
@@ -2054,6 +2135,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
+          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
           "type": [
             "string",
             "null"
@@ -2074,7 +2156,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Enable GNOME accessibility through gsettings so Linux Computer Use can read AT-SPI trees.",
+    "description": "Enable GNOME accessibility so Linux Computer Use can read AT-SPI trees: writes and reads back the toolkit-accessibility gsettings key and requests runtime org.a11y.Status IsEnabled.",
     "inputSchema": {
       "properties": {},
       "type": "object"
@@ -2088,7 +2170,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Install and enable the optional GNOME Shell extension used for exact window list/focus targeting when GNOME blocks native introspection.",
+    "description": "Install and enable the bundled GNOME Shell extension. GNOME needs it for exact window focus, move_window, resize_window and the on-screen indicator; Introspect can only list windows, and recent GNOME blocks that too. Ask the user to log out and back in when the result says a shell reload is required.",
     "inputSchema": {
       "properties": {},
       "type": "object"
@@ -2102,7 +2184,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Success confirms dispatch, not field-content verification; re-observe the target before retrying. X11 xdotool can silently substitute symbols under non-US or changing XKB layouts; inspect the text before pressing Enter or submitting it. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators; Hyprland rejects confirmed password fields; ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Success confirms dispatch, not field-content verification; re-observe the target before retrying. X11 xdotool can silently substitute symbols under non-US or changing XKB layouts; inspect the text before pressing Enter or submitting it. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators. On Hyprland, confirmed password fields are rejected, and ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -2117,6 +2199,7 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "app_id": {
           "default": null,
+          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
           "type": [
             "string",
             "null"
@@ -2134,7 +2217,7 @@ export const GENERATED_MCP_TOOLS =
           "description": "Post-action screenshot image format (default png). Use jpeg with quality to trade exact pixels for smaller payloads."
         },
         "include_tree": {
-          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.",
+          "description": "Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.\nIt reads at most 1000 nodes and depth 32; when accessibility_tree_truncated\nis true, call get_app_state with a higher max_nodes.",
           "type": [
             "boolean",
             "null"
@@ -2166,6 +2249,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
+          "description": "Process id of the window. Alone, it must match exactly one window.",
           "minimum": 0,
           "type": [
             "integer",
@@ -2209,6 +2293,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_command": {
           "default": null,
+          "description": "Case-insensitive substring of the command name or command line of a\nterminal's shell or foreground process.",
           "type": [
             "string",
             "null"
@@ -2216,6 +2301,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_cwd": {
           "default": null,
+          "description": "Working directory of a terminal's shell or foreground process: an\nabsolute path, or a trailing path such as project/src.",
           "type": [
             "string",
             "null"
@@ -2223,6 +2309,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_pid": {
           "default": null,
+          "description": "Pid of the shell or foreground process on a terminal's tty, not the\nterminal emulator (use pid for that).",
           "minimum": 0,
           "type": [
             "integer",
@@ -2230,10 +2317,12 @@ export const GENERATED_MCP_TOOLS =
           ]
         },
         "text": {
+          "description": "Literal text to type, sent as characters, not as key names.",
           "type": "string"
         },
         "title": {
           "default": null,
+          "description": "Case-insensitive window title substring. The first matching window wins.",
           "type": [
             "string",
             "null"
@@ -2241,6 +2330,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "tty": {
           "default": null,
+          "description": "Terminal tty: /dev/pts/N, pts/N or N.",
           "type": [
             "string",
             "null"
@@ -2248,6 +2338,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
+          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -2257,6 +2348,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
+          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
           "type": [
             "string",
             "null"

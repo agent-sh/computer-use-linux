@@ -5,7 +5,7 @@ edition = "2021"
 # File::try_lock, used by the indicator, is stable since Rust 1.89.
 rust-version = "1.89"
 license = "MIT"
-description = "Native Linux desktop control over MCP and CLI — semantic AT-SPI accessibility trees, multi-compositor window targeting (GNOME, KDE/KWin, Hyprland, niri, COSMIC, i3, X11), bounded screenshots, Wayland/X11 input, and an on-screen agent activity indicator."
+description = "Native Linux desktop control over MCP and CLI: semantic AT-SPI accessibility trees, multi-compositor window targeting (GNOME, KDE/KWin, Hyprland, niri, COSMIC, i3, Sway, labwc and other wlroots compositors, X11), bounded screenshots, Wayland/X11 input, and an on-screen agent activity indicator."
 repository = "https://github.com/agent-sh/computer-use-linux"
 documentation = "https://docs.rs/computer-use-linux"
 readme = "README.md"
@@ -48,7 +48,7 @@ path = "src/bin/computer-use-linux-indicator/main.rs"
 mimalloc = { version = "0.1", default-features = false }
 anyhow = "1.0.102"
 # atspi without its "connection" feature: that feature pulls atspi-connection
-# with default features, which include "p2p" — and p2p peer enumeration during
+# with default features, which include "p2p", and p2p peer enumeration during
 # connect() calls GetInterfaces on every a11y-bus peer, so a single
 # AppArmor-confined peer (e.g. snap-packaged Slack) aborts the whole
 # AccessibilityConnection. We deliberately never use P2P routing (issue #31),

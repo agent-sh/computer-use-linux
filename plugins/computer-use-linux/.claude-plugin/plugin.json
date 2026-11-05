@@ -1,7 +1,7 @@
 {
   "name": "computer-use-linux",
   "version": "0.7.43",
-  "description": "Native Linux desktop control: semantic AT-SPI accessibility trees, screenshots, compositor window targeting (GNOME, KDE, Hyprland, niri, COSMIC, i3, X11), Wayland/X11 input, and an on-screen activity indicator.",
+  "description": "Native Linux desktop control: semantic AT-SPI accessibility trees, screenshots, compositor window targeting (GNOME, KDE, Hyprland, niri, COSMIC, i3, Sway, labwc and other wlroots compositors, X11), Wayland/X11 input, and an on-screen activity indicator.",
   "author": {
     "name": "agent-sh",
     "url": "https://github.com/agent-sh"

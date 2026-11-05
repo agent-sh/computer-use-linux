@@ -83,6 +83,8 @@ The original `1850c7a` patch used one argument after `--`, preserving option-loo
 It rejects NUL and more than 131,071 UTF-8 bytes before starting wtype. Missing
 wtype retains the existing ydotool fallback; an available wtype's validation,
 spawn, timeout, or execution error does not replay partially sent text.
+Since 0.7.40, a wtype that never starts falls back to ydotool, since nothing
+was typed.
 
 Tradeoff: unlike stdin, text in argv is inspectable in the child process's
 command line while it runs. This also applies to the existing xdotool backend.
@@ -107,9 +109,11 @@ cannot establish that.
   A text/plain-only backup would not satisfy the reported requirement.
 - Still open: a pointer-motion/hover tool, including its backend dispatch,
   coordinate mapping, MCP annotations, and client catalogs.
-- Still open: unfocused-window screenshots. Existing tests deliberately require
-  focus; a separate design must distinguish a window image from a desktop-region
-  crop that may contain an occluding window or an inactive workspace.
+- Unfocused-window screenshots: shipped for Hyprland in 0.7.35. With
+  `COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND=1`, `grim -T` captures the target
+  window alone. Still open on other compositors: a separate design must
+  distinguish a window image from a desktop-region crop that may contain an
+  occluding window or an inactive workspace.
 
 The regression, limits, scoped-tree hint, and focus-feedback cases have unit
 coverage. The renderer hint and focus-feedback changes have not been validated

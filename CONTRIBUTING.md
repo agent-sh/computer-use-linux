@@ -1,7 +1,5 @@
 # Contributing to computer-use-linux
 
-Thanks for helping improve Linux desktop control for MCP hosts.
-
 ## Development Setup
 
 ```bash
@@ -33,26 +31,43 @@ cargo fmt --all -- --check
 cargo check --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --no-fail-fast
-scripts/install_sh_test.sh
-scripts/mcp_safety_check.py
-scripts/check_plugins.sh
-agnix .
-```
-
-If you changed release packaging, also run:
-
-```bash
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --document-private-items
 cargo publish --dry-run --locked
-npm pack --dry-run
+cargo audit --deny warnings
+bash -n install.sh scripts/install_sh_test.sh
+scripts/install_sh_test.sh
+cargo build --locked
+scripts/mcp_safety_check.py --binary target/debug/computer-use-linux
+scripts/check_plugins.sh --binary target/debug/computer-use-linux
+agnix .
+node --check npm/install.js
+node --check npm/bin/computer-use-linux.js
+python3 scripts/indicator_packaging_test.py
+npm run pack:check
+npm ci --prefix scripts/zod-check --ignore-scripts --no-audit --no-fund
+node scripts/zod-check/check.mjs --command target/debug/computer-use-linux
+npm ci --prefix pi --ignore-scripts --no-audit --no-fund
+npm run build:check --prefix pi
+npm run typecheck --prefix pi
+COMPUTER_USE_LINUX_TEST_BINARY="$PWD/target/debug/computer-use-linux" npm test --prefix pi
+python3 scripts/generate_pi_tool_catalog.py --binary target/debug/computer-use-linux --check
 ```
+
+`check_plugins.sh` without `--binary` skips the launcher download test. CI
+also runs the X11 pointer regression below, installs the npm wrapper against
+the local binaries, and smoke-tests the installed Pi package.
+
+A script that a Rust test runs must be listed in `Cargo.toml` `include`.
+`cargo publish --dry-run` builds the packaged crate but does not run its tests,
+so CI does not catch a missing one.
 
 The COSMIC protocol and portal regressions use private fixture peers and send no
 input to the host desktop. The portal fixture needs PyGObject (`python3-gi`) and
 `dbus-run-session`:
 
 ```bash
-python3 scripts/cosmic_focus_test.py "$CARGO_TARGET_DIR/debug/computer-use-linux-cosmic"
-/usr/bin/python3 scripts/cosmic_input_test.py "$CARGO_TARGET_DIR/debug/computer-use-linux"
+python3 scripts/cosmic_focus_test.py target/debug/computer-use-linux-cosmic
+/usr/bin/python3 scripts/cosmic_input_test.py target/debug/computer-use-linux
 ```
 
 The GNOME indicator regressions also use PyGObject and `dbus-run-session` and
@@ -78,11 +93,11 @@ denies global-input helpers. It checks repeated clicks, GTK drag payloads,
 release after failure, missing xdotool, and isolation from the other display.
 
 The Chromium accessibility-tree regressions run Chrome on a private Xvfb display
-and D-Bus session, with the same tools as the X11 fixture plus openbox, xprop
-and google-chrome or chromium. `app_state_size_test.py` opens two windows of one
-browser, checks window scoping, the compact encoding and `interactive_only`,
-and prints bytes per node; `CUL_338_MEASURE_ONLY=1` prints the numbers for an
-older binary without the checks:
+and D-Bus session. They need Xvfb, openbox, xdotool, xprop, `dbus-run-session`,
+the AT-SPI registry, and google-chrome or chromium. `app_state_size_test.py`
+opens two windows of one browser, checks window scoping, the compact encoding
+and `interactive_only`, and prints bytes per node; `CUL_338_MEASURE_ONLY=1`
+prints the numbers for an older binary without the checks:
 
 ```bash
 /usr/bin/python3 scripts/app_state_size_test.py target/debug/computer-use-linux
@@ -102,8 +117,24 @@ fixtures instead of breaking them.
 - Include `computer-use-linux doctor` output for compositor, portal, or accessibility issues.
 - Preserve the MCP safety annotations when adding or changing tools.
 - Update `README.md`, `npm/README.md`, and `skills/computer-use-linux/SKILL.md` when user-facing commands change.
-- After editing `skills/computer-use-linux/`, copy it into `plugins/computer-use-linux/skills/`. A release bumps the version in `Cargo.toml`, `package.json`, the plugin launcher, both plugin manifests, and `.claude-plugin/marketplace.json`. `scripts/check_plugins.sh` enforces both.
+- After editing `skills/computer-use-linux/`, copy it into `plugins/computer-use-linux/skills/`. `scripts/check_plugins.sh` fails while the copies differ.
+- After changing a tool schema or description, rebuild and regenerate the Pi catalog: `python3 scripts/generate_pi_tool_catalog.py --binary target/debug/computer-use-linux`.
 - Use conventional commit prefixes when practical (`fix:`, `feat:`, `docs:`, `chore:`).
+
+## Releases
+
+A release changes these ten files:
+
+- `Cargo.toml` and `Cargo.lock`: the package version.
+- `package.json`: the npm version.
+- `src/server.rs`: the MCP server version.
+- `plugins/computer-use-linux/bin/computer-use-linux`: the launcher's pinned version.
+- `plugins/computer-use-linux/.claude-plugin/plugin.json` and `plugins/computer-use-linux/.codex-plugin/plugin.json`.
+- `.claude-plugin/marketplace.json`.
+- `pi/extension/generated-tools.ts`: rebuild, then regenerate it with `python3 scripts/generate_pi_tool_catalog.py --binary target/debug/computer-use-linux`.
+- `CHANGELOG.md`: the `[Unreleased]` entries become the version's section.
+
+`scripts/check_plugins.sh` fails when a plugin version differs from `Cargo.toml`, the MCP safety check fails when the server version does, and the Pi catalog `--check` fails until the catalog is regenerated. Push a `vX.Y.Z` tag to publish.
 
 ## Security
 

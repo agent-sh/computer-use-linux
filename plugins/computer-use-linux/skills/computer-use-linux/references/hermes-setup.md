@@ -15,16 +15,19 @@ hermes mcp configure computer-use-linux
 
 `configure` opens Hermes' tool-selection UI for this MCP server.
 
-The generated config should look like this:
+The generated config holds `command`, `args` and `enabled`, plus
+`tools.include` when you pick a subset of tools:
 
 ```yaml
 mcp_servers:
   computer-use-linux:
     command: computer-use-linux
     args: ["mcp"]
-    timeout: 120
-    connect_timeout: 30
+    enabled: true
 ```
+
+Hermes defaults to a 300-second tool-call timeout and a 60-second connect
+timeout. Add `timeout` or `connect_timeout` under the server to change them.
 
 If the binary is not on `PATH`, pass the absolute path to `--command`.
 
