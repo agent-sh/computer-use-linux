@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.44";
-export const GENERATED_TOOL_CATALOG_HASH = "dd4f0b26ce625940ae164e81508ce18b40a1062135346ec809ac2c97f5d62203";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "b4cb611f28a9653f5d6cde9dbf2b457e9afc40a4b1bb5102b988841c1b857672";
+export const GENERATED_TOOL_CATALOG_HASH = "70b08b6ea245fc2ad253b4b66e68d446536897cc2fa7948db3f961c7742f14f3";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "3a6ebca9aa371d244a0ca05f749647accec8ed1663760ae41d1ec2e1490eec31";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -410,6 +410,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "x": {
           "default": null,
+          "description": "Point x in raw screenshot capture pixels: the coordinate_width and\ncoordinate_height space. Divide preview pixels by the screenshot scale\nfirst. With relative=true, measured from the window screenshot's crop origin.",
           "format": "int32",
           "type": [
             "integer",
@@ -418,6 +419,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "y": {
           "default": null,
+          "description": "Point y in raw screenshot capture pixels: the coordinate_width and\ncoordinate_height space. Divide preview pixels by the screenshot scale\nfirst. With relative=true, measured from the window screenshot's crop origin.",
           "format": "int32",
           "type": [
             "integer",
@@ -464,10 +466,12 @@ export const GENERATED_MCP_TOOLS =
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "end_x": {
+          "description": "End x in raw screenshot capture pixels.",
           "format": "int32",
           "type": "integer"
         },
         "end_y": {
+          "description": "End y in raw screenshot capture pixels.",
           "format": "int32",
           "type": "integer"
         },
@@ -549,10 +553,12 @@ export const GENERATED_MCP_TOOLS =
           "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
         },
         "start_x": {
+          "description": "Start x in raw screenshot capture pixels: the coordinate_width space.\nDivide preview pixels by the screenshot scale first.",
           "format": "int32",
           "type": "integer"
         },
         "start_y": {
+          "description": "Start y in raw screenshot capture pixels.",
           "format": "int32",
           "type": "integer"
         }
@@ -1057,6 +1063,7 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "action": {
           "default": null,
+          "description": "AT-SPI action to invoke: its name or description, ignoring ASCII case,\nor its 0-based index. Default: the element's first action.",
           "type": [
             "string",
             "null"
@@ -1072,6 +1079,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "element_identifier": {
           "default": null,
+          "description": "A node's object_ref from get_app_state or get_tree_page. It names the\nAT-SPI object itself, not a snapshot index, and wins over element_index\nand the selectors.",
           "type": [
             "string",
             "null"
@@ -1928,6 +1936,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "x": {
           "default": null,
+          "description": "Point x to scroll at in raw screenshot capture pixels: the coordinate_width and\ncoordinate_height space. Divide preview pixels by the screenshot scale\nfirst. With relative=true, measured from the window screenshot's crop origin.\nWithout x/y or element_index, the target window's centre, or the pointer.",
           "format": "int32",
           "type": [
             "integer",
@@ -1936,6 +1945,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "y": {
           "default": null,
+          "description": "Point y to scroll at in raw screenshot capture pixels: the coordinate_width and\ncoordinate_height space. Divide preview pixels by the screenshot scale\nfirst. With relative=true, measured from the window screenshot's crop origin.",
           "format": "int32",
           "type": [
             "integer",
@@ -1980,6 +1990,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "element_identifier": {
           "default": null,
+          "description": "A node's object_ref from get_app_state or get_tree_page. It names the\nAT-SPI object itself, not a snapshot index, and wins over element_index\nand the selectors.",
           "type": [
             "string",
             "null"
@@ -2113,6 +2124,7 @@ export const GENERATED_MCP_TOOLS =
           ]
         },
         "value": {
+          "description": "A number sets an element with the AT-SPI Value interface (slider, spin\nbutton). Otherwise the text replaces an editable text element's\ncontents. Text on a Value-only element is refused.",
           "type": "string"
         },
         "window_id": {

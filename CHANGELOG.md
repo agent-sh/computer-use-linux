@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `click` and `scroll` `x`/`y`, the `drag` endpoints, `perform_action` `action` and `element_identifier`, and `set_value` `value` and `element_identifier` have parameter descriptions: the pixel space, the action name or index rule, and how a value is applied.
+
 ## [0.7.44] - 2026-11-05
 
 ### Added
@@ -41,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `drag` results get the off-screen and monitor-gap warnings that `click` and `scroll` results get, one for each endpoint, naming the start or end coordinate. A drag used to get none on any route. On X11 and the uinput pointer it reported plain success when an endpoint off the screenshot had been moved to an edge. It did the same when an endpoint between monitors had landed at a monitor edge or on no visible pixel. A failed xdotool or ydotool drag on X11 gets no warning, as a failed click does.
 - A uinput `drag` result says where an off-screen endpoint was clamped to, as a click result does, and checks the clamped point against the monitors.
 - A portal `drag` with an endpoint off the shared monitors still sends nothing. Its error now names each endpoint that stopped it and says whether that point is off the screenshot or on no monitor.
+- Tests no longer fail when `TMPDIR` is long. Socket fixtures move to `XDG_RUNTIME_DIR` when a path would pass the Unix socket limit, and the crate ships `scripts/socket_fixture.py`, which the packaged test scripts import ([#401](https://github.com/agent-sh/computer-use-linux/issues/401)).
 
 ## [0.7.42] - 2026-11-05
 

@@ -4295,8 +4295,14 @@ struct ClickParams {
     /// example focused, checked).
     #[serde(default)]
     states: Vec<String>,
+    /// Point x in raw screenshot capture pixels: the coordinate_width and
+    /// coordinate_height space. Divide preview pixels by the screenshot scale
+    /// first. With relative=true, measured from the window screenshot's crop origin.
     #[serde(default)]
     x: Option<i32>,
+    /// Point y in raw screenshot capture pixels: the coordinate_width and
+    /// coordinate_height space. Divide preview pixels by the screenshot scale
+    /// first. With relative=true, measured from the window screenshot's crop origin.
     #[serde(default)]
     y: Option<i32>,
     /// Pixel space for explicit x/y: raw screenshot capture pixels (default),
@@ -4452,6 +4458,9 @@ struct ActionParams {
     /// Element index from the latest get_app_state or include_tree snapshot.
     #[serde(default)]
     element_index: Option<u32>,
+    /// A node's object_ref from get_app_state or get_tree_page. It names the
+    /// AT-SPI object itself, not a snapshot index, and wins over element_index
+    /// and the selectors.
     #[serde(default)]
     element_identifier: Option<String>,
     /// Case-insensitive substring of the element's AT-SPI role.
@@ -4467,6 +4476,8 @@ struct ActionParams {
     /// example focused, checked).
     #[serde(default)]
     states: Vec<String>,
+    /// AT-SPI action to invoke: its name or description, ignoring ASCII case,
+    /// or its 0-based index. Default: the element's first action.
     #[serde(default)]
     action: Option<String>,
     #[serde(flatten)]
@@ -4491,6 +4502,9 @@ struct SetValueParams {
     /// Element index from the latest get_app_state or include_tree snapshot.
     #[serde(default)]
     element_index: Option<u32>,
+    /// A node's object_ref from get_app_state or get_tree_page. It names the
+    /// AT-SPI object itself, not a snapshot index, and wins over element_index
+    /// and the selectors.
     #[serde(default)]
     element_identifier: Option<String>,
     /// Case-insensitive substring of the element's AT-SPI role.
@@ -4506,6 +4520,9 @@ struct SetValueParams {
     /// example focused, checked).
     #[serde(default)]
     states: Vec<String>,
+    /// A number sets an element with the AT-SPI Value interface (slider, spin
+    /// button). Otherwise the text replaces an editable text element's
+    /// contents. Text on a Value-only element is refused.
     value: String,
     #[serde(flatten)]
     target: ElementActionTarget,
@@ -4529,8 +4546,15 @@ struct ScrollParams {
     /// Element index from the latest get_app_state or include_tree snapshot.
     #[serde(default)]
     element_index: Option<u32>,
+    /// Point x to scroll at in raw screenshot capture pixels: the coordinate_width and
+    /// coordinate_height space. Divide preview pixels by the screenshot scale
+    /// first. With relative=true, measured from the window screenshot's crop origin.
+    /// Without x/y or element_index, the target window's centre, or the pointer.
     #[serde(default)]
     x: Option<i32>,
+    /// Point y to scroll at in raw screenshot capture pixels: the coordinate_width and
+    /// coordinate_height space. Divide preview pixels by the screenshot scale
+    /// first. With relative=true, measured from the window screenshot's crop origin.
     #[serde(default)]
     y: Option<i32>,
     /// up, down, left or right (case-insensitive).
@@ -4602,9 +4626,14 @@ impl ScrollParams {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct DragParams {
+    /// Start x in raw screenshot capture pixels: the coordinate_width space.
+    /// Divide preview pixels by the screenshot scale first.
     start_x: i32,
+    /// Start y in raw screenshot capture pixels.
     start_y: i32,
+    /// End x in raw screenshot capture pixels.
     end_x: i32,
+    /// End y in raw screenshot capture pixels.
     end_y: i32,
     #[serde(flatten)]
     capture: PostActionCaptureParams,
