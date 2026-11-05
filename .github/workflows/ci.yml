@@ -313,7 +313,9 @@ jobs:
             dist/computer-use-linux-cosmic-${{ matrix.target }}.sha256
             dist/computer-use-linux-indicator-${{ matrix.target }}
             dist/computer-use-linux-indicator-${{ matrix.target }}.sha256
-          generate_release_notes: true
+          # Both matrix jobs upload to the same release; each one that
+          # generates notes appends them, so only one does.
+          generate_release_notes: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
 
   publish-crate:
     name: publish crate
