@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.47] - 2026-11-05
+
 ### Fixed
 
 - `setup_window_targeting` and `setup-window-targeting` install the user copy of the extension in `$XDG_DATA_HOME/gnome-shell/extensions`, where GNOME Shell loads user extensions. They fall back to `~/.local/share` only when `XDG_DATA_HOME` is unset or empty, as GLib does. When GNOME Shell already loaded a user copy, setup updates the copy the Shell reports, since the Shell can run with another `XDG_DATA_HOME` than the MCP host. Before, setup always wrote under `~/.local/share`. With `XDG_DATA_HOME` set elsewhere, the Shell never loaded that copy, and the reload setup asked for did not help. The Pi extension and the Codex plugin now pass `XDG_DATA_HOME` to the server. `install.sh` already used this path ([#426](https://github.com/agent-sh/computer-use-linux/issues/426)).
@@ -1133,7 +1135,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.46...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.47...HEAD
+[0.7.47]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.46...v0.7.47
 [0.7.46]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.45...v0.7.46
 [0.7.45]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.44...v0.7.45
 [0.7.44]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.43...v0.7.44
