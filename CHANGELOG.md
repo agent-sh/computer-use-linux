@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.45] - 2026-11-05
+
 ### Fixed
 
 - `click` and `scroll` `x`/`y`, the `drag` endpoints, `perform_action` `action` and `element_identifier`, and `set_value` `value` and `element_identifier` have parameter descriptions: the pixel space, the action name or index rule, and how a value is applied.
@@ -1117,7 +1119,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.44...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.45...HEAD
+[0.7.45]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.44...v0.7.45
 [0.7.44]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.43...v0.7.44
 [0.7.43]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.42...v0.7.43
 [0.7.42]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.41...v0.7.42
