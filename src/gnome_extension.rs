@@ -52,7 +52,15 @@ pub struct SetupCommandReport {
 pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
     hydrate_session_bus_env();
 
-    let user_dir = extension_dir();
+    // A per-user copy GNOME Shell loaded names the Shell's own user
+    // extension dir. The host may set XDG_DATA_HOME differently, so this
+    // process's value is only the fallback.
+    let loaded = loaded_extension().await;
+    let user_dir = loaded
+        .as_ref()
+        .filter(|extension| extension.per_user)
+        .map(|extension| extension.path.clone())
+        .unwrap_or_else(extension_dir);
     let system_dir = Path::new(SYSTEM_EXTENSIONS_DIR).join(UUID);
     let system_installed = system_dir.join("metadata.json").is_file();
     let extension_dir = if system_installed {
@@ -103,10 +111,9 @@ pub async fn setup_window_targeting_report() -> WindowTargetingSetupReport {
 
     // Enabling an extension does not replace the object cached by GNOME Shell.
     let system_reload_pending = if system_installed {
-        let loaded_path = loaded_extension_path().await;
         system_extension_requires_shell_reload(
             removed_user_copy,
-            loaded_path.as_deref(),
+            loaded.as_ref().map(|extension| extension.path.as_path()),
             &extension_dir,
         )
     } else {
@@ -222,10 +229,22 @@ fn remove_user_copy(extension_dir: &Path) -> Result<bool, String> {
     }
 }
 
-async fn loaded_extension_path() -> Option<PathBuf> {
+/// The copy of the extension GNOME Shell loaded.
+#[derive(Debug, PartialEq)]
+struct LoadedExtension {
+    path: PathBuf,
+    /// The Shell found it in its user extension dir, not a system one.
+    per_user: bool,
+}
+
+/// `ExtensionType.PER_USER` in GNOME Shell's `js/misc/extensionUtils.js`.
+/// `GetExtensionInfo` sends numbers as doubles.
+const PER_USER_EXTENSION: f64 = 2.0;
+
+async fn loaded_extension() -> Option<LoadedExtension> {
     tokio::time::timeout(Duration::from_secs(2), async {
         let connection = zbus::Connection::session().await.ok()?;
-        loaded_extension_path_on_connection(&connection)
+        loaded_extension_on_connection(&connection)
             .await
             .ok()
             .flatten()
@@ -235,9 +254,9 @@ async fn loaded_extension_path() -> Option<PathBuf> {
     .flatten()
 }
 
-async fn loaded_extension_path_on_connection(
+async fn loaded_extension_on_connection(
     connection: &zbus::Connection,
-) -> Result<Option<PathBuf>, zbus::Error> {
+) -> Result<Option<LoadedExtension>, zbus::Error> {
     let proxy = zbus::Proxy::new(
         connection,
         "org.gnome.Shell",
@@ -247,10 +266,15 @@ async fn loaded_extension_path_on_connection(
     .await?;
     let info: HashMap<String, zbus::zvariant::OwnedValue> =
         proxy.call("GetExtensionInfo", &(UUID,)).await?;
+    let per_user =
+        info.get("type").and_then(|value| f64::try_from(value).ok()) == Some(PER_USER_EXTENSION);
     Ok(info
         .get("path")
         .and_then(|value| <&str>::try_from(value).ok())
-        .map(PathBuf::from))
+        .map(|path| LoadedExtension {
+            path: PathBuf::from(path),
+            per_user,
+        }))
 }
 
 fn system_extension_requires_shell_reload(
@@ -674,7 +698,10 @@ mod tests {
             .unwrap();
 
         let removed = remove_user_copy(&user_dir.0).unwrap();
-        let loaded = loaded_extension_path_on_connection(&client).await.unwrap();
+        let loaded = loaded_extension_on_connection(&client)
+            .await
+            .unwrap()
+            .map(|extension| extension.path);
         assert_eq!(loaded.as_deref(), Some(user_dir.0.as_path()));
         assert!(system_extension_requires_shell_reload(
             removed,
@@ -684,14 +711,20 @@ mod tests {
 
         let removed = remove_user_copy(&user_dir.0).unwrap();
         assert!(!removed);
-        let loaded = loaded_extension_path_on_connection(&client).await.unwrap();
+        let loaded = loaded_extension_on_connection(&client)
+            .await
+            .unwrap()
+            .map(|extension| extension.path);
         assert!(
             system_extension_requires_shell_reload(removed, loaded.as_deref(), &system_dir),
             "a second setup before Shell restarts must retain the reload warning"
         );
 
         *path.lock().unwrap() = system_dir.clone();
-        let loaded = loaded_extension_path_on_connection(&client).await.unwrap();
+        let loaded = loaded_extension_on_connection(&client)
+            .await
+            .unwrap()
+            .map(|extension| extension.path);
         assert!(!system_extension_requires_shell_reload(
             false,
             loaded.as_deref(),

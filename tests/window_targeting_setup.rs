@@ -7,11 +7,14 @@
 //! extension's window list. Nothing reaches the desktop session running the
 //! tests.
 use std::{
+    collections::HashMap,
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{Arc, Mutex},
 };
+use zbus::zvariant::{OwnedValue, Str};
 
 #[path = "../src/test_sockets.rs"]
 #[allow(dead_code)]
@@ -46,6 +49,29 @@ impl FakeExtension {
     }
 }
 
+/// GNOME Shell's extension list: the per-user copy `loaded` names, or none.
+struct FakeShellExtensions {
+    loaded: Arc<Mutex<Option<PathBuf>>>,
+}
+
+#[zbus::interface(name = "org.gnome.Shell.Extensions")]
+impl FakeShellExtensions {
+    fn get_extension_info(&self, uuid: &str) -> HashMap<String, OwnedValue> {
+        let loaded = self.loaded.lock().unwrap().clone();
+        let Some(path) = loaded.filter(|_| uuid == UUID) else {
+            return HashMap::new();
+        };
+        // ExtensionType.PER_USER; the Shell sends numbers as doubles.
+        HashMap::from([
+            (
+                "path".to_string(),
+                OwnedValue::from(Str::from(path.to_string_lossy().into_owned())),
+            ),
+            ("type".to_string(), OwnedValue::from(2.0_f64)),
+        ])
+    }
+}
+
 struct Home {
     root: PathBuf,
     /// XDG_DATA_HOME as setup sees it: `data`, or empty.
@@ -67,6 +93,9 @@ enum DataHome {
     Set,
     /// XDG_DATA_HOME is empty, so HOME/.local/share applies.
     Empty,
+    /// XDG_DATA_HOME is empty for setup, but GNOME Shell loaded its copy
+    /// from `data`: the Shell runs with another XDG_DATA_HOME.
+    Shell,
 }
 
 impl Home {
@@ -77,6 +106,7 @@ impl Home {
         let (data_home, data_dir) = match data_home {
             DataHome::Set => (root.join("data"), root.join("data")),
             DataHome::Empty => (PathBuf::new(), root.join("home/.local/share")),
+            DataHome::Shell => (PathBuf::new(), root.join("data")),
         };
         let installed = data_dir.join("gnome-shell/extensions").join(UUID);
         fs::create_dir_all(&installed).unwrap();
@@ -196,6 +226,7 @@ async fn reload_is_required_only_for_changes_gnome_shell_runs() {
     let address = bus.address();
     // The server serves the window list only when GNOME Shell owns the
     // extension's bus name.
+    let loaded = Arc::new(Mutex::new(None));
     let _shell = zbus::connection::Builder::address(address)
         .unwrap()
         .name("org.gnome.Shell")
@@ -203,6 +234,13 @@ async fn reload_is_required_only_for_changes_gnome_shell_runs() {
         .name(SERVICE)
         .unwrap()
         .serve_at(OBJECT_PATH, FakeExtension)
+        .unwrap()
+        .serve_at(
+            "/org/gnome/Shell",
+            FakeShellExtensions {
+                loaded: loaded.clone(),
+            },
+        )
         .unwrap()
         .build()
         .await
@@ -244,6 +282,20 @@ async fn reload_is_required_only_for_changes_gnome_shell_runs() {
             "{report:#}"
         );
     }
+
+    // Setup updates the copy GNOME Shell reports, not the one its own
+    // environment names.
+    let shell_copy = Home::with_installed(
+        "shell",
+        DataHome::Shell,
+        METADATA_JSON,
+        "// an older extension",
+    );
+    *loaded.lock().unwrap() = Some(shell_copy.installed.clone());
+    let report = shell_copy.setup(address).await;
+    *loaded.lock().unwrap() = None;
+    assert_eq!(report["requires_shell_reload"], true, "{report:#}");
+    assert_eq!(shell_copy.installed("extension.js"), EXTENSION_JS);
 
     let reload_cases = [
         (

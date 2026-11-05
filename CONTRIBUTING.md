@@ -117,12 +117,18 @@ the longest socket path fits, else `XDG_RUNTIME_DIR`. When neither fits, the
 test fails and names the limit and the path. A long `TMPDIR` moves the
 fixtures instead of breaking them.
 
-A private D-Bus bus listens in its fixture's own directory, so the socket
-goes away with the fixture. dbus-daemon leaves its socket behind when it is
-killed. Rust tests start `test_sockets::PrivateBus`. Scripts write a config
-with `socket_fixture.private_bus_config` and pass it to
-`dbus-run-session --config-file`. A unit test fails on `unix:tmpdir` and on
-a bus started without a config file.
+A private D-Bus session listens in its fixture's own directory, so the
+socket goes away with the fixture. dbus-daemon leaves its socket behind when
+it is killed. Rust tests start `test_sockets::PrivateBus`, or write their own
+config in a `bus_fixture` directory when they need the address before the bus
+starts. Scripts write a config with `socket_fixture.private_bus_config` and
+pass it to `dbus-run-session --config-file`. Its `services` names the only
+services the bus may start, such as `ca.desrt.dconf` for gsettings and
+`org.a11y.Bus` for AT-SPI. A bus socket's path must also need no escaping in
+a D-Bus address, since zbus reads `%XX` escapes literally, so a `TMPDIR` with
+a space moves bus fixtures to `XDG_RUNTIME_DIR`. A unit test fails on
+`unix:tmpdir`, on the session config and on a bus started without a config
+file.
 
 ## PR Guidelines
 
