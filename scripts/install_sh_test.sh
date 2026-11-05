@@ -332,8 +332,9 @@ test_enabled_gnome_extension_is_upgraded() (
     local data_home
     data_home="$(mktemp -d "${cache}/cul-gnome-upgrade.XXXXXX")" || return 1
     export XDG_DATA_HOME="${data_home}"
-    trap 'rm -rf -- "${XDG_DATA_HOME}"' EXIT
     source "${INSTALLER}"
+    # Set after sourcing: install.sh installs its own EXIT trap.
+    trap 'rm -rf -- "${XDG_DATA_HOME}"' EXIT
     local installed="${XDG_DATA_HOME}/gnome-shell/extensions/${EXT_UUID}"
     mkdir -p "${installed}"
     printf '%s\n' '// old extension' >"${installed}/extension.js"
@@ -355,48 +356,26 @@ test_enabled_gnome_extension_is_upgraded() (
     assert_contains "${output}" 'log out and back in' || return 1
 )
 
-test_display_metadata_upgrade_needs_no_login() (
-    # v0.7.44 added url to metadata.json and left extension.js as it was.
+# Upgrades an enabled extension whose installed metadata.json is the source
+# file edited by the sed script $1, with extension.js unchanged, and prints
+# the installer's output.
+upgrade_enabled_extension_metadata() (
+    local edit="$1"
+    # install.sh parses the positional arguments it is sourced with.
+    set --
     export XDG_CURRENT_DESKTOP=GNOME XDG_SESSION_TYPE=wayland
     local cache="${XDG_CACHE_HOME:-$HOME/.cache}"
     mkdir -p "${cache}" || return 1
     local data_home
     data_home="$(mktemp -d "${cache}/cul-gnome-metadata.XXXXXX")" || return 1
     export XDG_DATA_HOME="${data_home}"
-    trap 'rm -rf -- "${XDG_DATA_HOME}"' EXIT
     source "${INSTALLER}"
+    # Set after sourcing: install.sh installs its own EXIT trap.
+    trap 'rm -rf -- "${XDG_DATA_HOME}"' EXIT
     local installed="${XDG_DATA_HOME}/gnome-shell/extensions/${EXT_UUID}"
     mkdir -p "${installed}"
     cp "${EXT_SRC_DIR}/extension.js" "${installed}/extension.js"
-    grep -v '"url"' "${EXT_SRC_DIR}/metadata.json" >"${installed}/metadata.json"
-    gnome-extensions() {
-        case "$1" in
-            list) printf '%s\n' "${EXT_UUID}" ;;
-            pack) : >"bridge.shell-extension.zip" ;;
-            install) cp "${EXT_SRC_DIR}/metadata.json" "${installed}/metadata.json" ;;
-            enable) return 1 ;;
-        esac
-    }
-    local output
-    output="$(install_gnome_extension)" || return 1
-    cmp -s "${EXT_SRC_DIR}/metadata.json" "${installed}/metadata.json" || return 1
-    assert_contains "${output}" 'no new login needed' || return 1
-    assert_not_contains "${output}" 'log out' || return 1
-)
-
-test_load_metadata_upgrade_needs_login() (
-    export XDG_CURRENT_DESKTOP=GNOME XDG_SESSION_TYPE=wayland
-    local cache="${XDG_CACHE_HOME:-$HOME/.cache}"
-    mkdir -p "${cache}" || return 1
-    local data_home
-    data_home="$(mktemp -d "${cache}/cul-gnome-metadata.XXXXXX")" || return 1
-    export XDG_DATA_HOME="${data_home}"
-    trap 'rm -rf -- "${XDG_DATA_HOME}"' EXIT
-    source "${INSTALLER}"
-    local installed="${XDG_DATA_HOME}/gnome-shell/extensions/${EXT_UUID}"
-    mkdir -p "${installed}"
-    cp "${EXT_SRC_DIR}/extension.js" "${installed}/extension.js"
-    sed 's/"shell-version": \[/& "44",/' "${EXT_SRC_DIR}/metadata.json" >"${installed}/metadata.json"
+    sed -e "${edit}" "${EXT_SRC_DIR}/metadata.json" >"${installed}/metadata.json"
     ! cmp -s "${EXT_SRC_DIR}/metadata.json" "${installed}/metadata.json" || return 1
     gnome-extensions() {
         case "$1" in
@@ -406,10 +385,32 @@ test_load_metadata_upgrade_needs_login() (
             enable) return 1 ;;
         esac
     }
-    local output
-    output="$(install_gnome_extension)" || return 1
-    assert_contains "${output}" 'log out and back in' || return 1
+    install_gnome_extension || return 1
+    cmp -s "${EXT_SRC_DIR}/metadata.json" "${installed}/metadata.json" || return 1
 )
+
+test_display_metadata_upgrade_needs_no_login() {
+    # v0.7.44 added url to metadata.json and left extension.js as it was.
+    local output
+    output="$(upgrade_enabled_extension_metadata \
+        '/"url"/d; s/"description": "[^"]*"/"description": "An \\"older\\" text"/')" || return 1
+    assert_contains "${output}" 'no new login needed' || return 1
+    assert_not_contains "${output}" 'log out' || return 1
+}
+
+test_load_metadata_upgrade_needs_login() {
+    local output
+    output="$(upgrade_enabled_extension_metadata 's/"shell-version": \[/& "44",/')" || return 1
+    assert_contains "${output}" 'log out and back in' || return 1
+}
+
+test_field_beside_display_field_needs_login() {
+    # A field GNOME Shell acts on, on the same line as a display field.
+    local output
+    output="$(upgrade_enabled_extension_metadata \
+        's/"name": \("[^"]*"\),/"name": \1, "session-modes": ["user", "unlock-dialog"],/')" || return 1
+    assert_contains "${output}" 'log out and back in' || return 1
+}
 
 run_test() {
     local name="$1" test_fn="$2"
@@ -440,3 +441,4 @@ run_test "doctor raw fallback rejects missing install prerequisites" test_doctor
 run_test "enabled GNOME extension assets are upgraded" test_enabled_gnome_extension_is_upgraded
 run_test "a display metadata upgrade needs no new login" test_display_metadata_upgrade_needs_no_login
 run_test "a shell-version upgrade needs a new login" test_load_metadata_upgrade_needs_login
+run_test "a field beside a display field needs a new login" test_field_beside_display_field_needs_login

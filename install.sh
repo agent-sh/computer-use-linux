@@ -576,10 +576,11 @@ EOF
 # Step 7: GNOME Shell extension (Wayland + GNOME only)
 # -----------------------------------------------------------------------------
 
-# metadata.json without the lines GNOME Shell only displays. Any other
-# difference, a reformatted file included, counts as a change.
+# metadata.json without the lines that hold only a name, description or url
+# string, the fields GNOME Shell only displays. Any other difference counts
+# as a change: a line that also holds another field, or a reformatted file.
 metadata_load_lines() {
-    grep -v -E '^[[:space:]]*"(name|description|url)"[[:space:]]*:' "$1" 2>/dev/null || true
+    grep -v -E '^[[:space:]]*"(name|description|url)"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"[[:space:]]*,?[[:space:]]*$' "$1" 2>/dev/null || true
 }
 
 install_gnome_extension() {

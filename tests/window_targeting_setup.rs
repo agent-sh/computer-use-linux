@@ -14,8 +14,14 @@ use std::{
 };
 
 const BINARY: &str = env!("CARGO_BIN_EXE_computer-use-linux");
-// The default build identity, as in scripts/gnome_indicator_test.py.
+// The default build identity, as in scripts/gnome_indicator_test.py. A build
+// with CUL_* identity overrides skips the test (see src/identity.rs).
 const UUID: &str = "computer-use-linux@avifenesh.dev";
+const IDENTITY_OVERRIDES: [Option<&str>; 3] = [
+    option_env!("CUL_GNOME_EXTENSION_UUID"),
+    option_env!("CUL_DBUS_SERVICE"),
+    option_env!("CUL_DBUS_OBJECT_PATH"),
+];
 const SERVICE: &str = "dev.avifenesh.ComputerUseLinux.WindowControl";
 const OBJECT_PATH: &str = "/dev/avifenesh/ComputerUseLinux/WindowControl";
 const METADATA_JSON: &str = include_str!(concat!(
@@ -148,6 +154,10 @@ fn metadata_with(edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Valu
 
 #[tokio::test]
 async fn reload_is_required_only_for_changes_gnome_shell_runs() {
+    if IDENTITY_OVERRIDES.iter().any(Option::is_some) {
+        eprintln!("skipped: the fixture serves the default extension identity only");
+        return;
+    }
     if Path::new("/usr/share/gnome-shell/extensions")
         .join(UUID)
         .join("metadata.json")
