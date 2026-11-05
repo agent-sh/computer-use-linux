@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.46] - 2026-11-05
+
 ### Fixed
 
 - `computer-use-linux-indicator` and `computer-use-linux-cosmic` check their command line before they do anything, as `computer-use-linux` does since 0.7.44. Both print help on `-h` or `--help` and exit 0. The indicator takes no arguments, and the COSMIC helper takes only its five commands and `--window-id`. Anything else prints an error on stderr and exits 2. The indicator used to start on `--help` or any flag: it created its lock files in `XDG_RUNTIME_DIR` and connected to the compositor. The COSMIC helper exited 1 on a bad line, and `probe --help` failed instead of printing help. The server starts both as before ([#419](https://github.com/agent-sh/computer-use-linux/issues/419)).
@@ -1125,7 +1127,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.45...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.46...HEAD
+[0.7.46]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.45...v0.7.46
 [0.7.45]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.44...v0.7.45
 [0.7.44]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.43...v0.7.44
 [0.7.43]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.42...v0.7.43
