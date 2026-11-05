@@ -38,6 +38,15 @@ def socket_tempdir(prefix, sockets, bus_dir=None, dir=None):
     socket is longer, so a layout change cannot drop the check. dir is the
     preferred base; it defaults to the temp dir.
     """
+    return tempfile.TemporaryDirectory(prefix=prefix, dir=socket_base(prefix, sockets, bus_dir, dir))
+
+
+def socket_base(prefix, sockets, bus_dir=None, dir=None):
+    """The directory socket_tempdir makes its fixture in.
+
+    Shell fixtures use it with mktemp -d BASE/PREFIXXXXXXXXX, which also adds
+    eight random characters.
+    """
     # TemporaryDirectory adds eight random characters to the prefix.
     name = prefix + 'X' * 8
     checks = [(path, SOCKET_PATH_MAX) for path in sockets]
@@ -55,12 +64,12 @@ def socket_tempdir(prefix, sockets, bus_dir=None, dir=None):
     base = tempfile.gettempdir() if dir is None else os.fspath(dir)
     first = overflow(base)
     if first is None:
-        return tempfile.TemporaryDirectory(prefix=prefix, dir=base)
+        return base
     runtime = os.environ.get('XDG_RUNTIME_DIR', '')
     if os.path.isabs(runtime) and os.path.isdir(runtime):
         second = overflow(runtime)
         if second is None:
-            return tempfile.TemporaryDirectory(prefix=prefix, dir=runtime)
+            return runtime
         fallback = f'under XDG_RUNTIME_DIR, {second}'
     elif runtime:
         fallback = f'XDG_RUNTIME_DIR ({runtime}) is not an absolute directory'

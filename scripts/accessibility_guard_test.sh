@@ -3,7 +3,13 @@
 # creates a private D-Bus session and private dconf/runtime state, never the host's.
 set -euo pipefail
 if [[ ${CUL_GUARD_TEST_PRIVATE_BUS:-} != 1 ]]; then
-  scratch=$(mktemp -d /tmp/cul-guard-test-XXXXXXXX)
+  scripts=$(dirname "$(realpath "$0")")
+  # runtime/ is the private bus's runtime dir. socket_base puts the scratch
+  # where its sockets fit: the temp dir, else XDG_RUNTIME_DIR.
+  base=$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1])
+from socket_fixture import socket_base
+print(socket_base("cul-guard-test-", [], bus_dir="runtime"))' "$scripts")
+  scratch=$(mktemp -d "$base/cul-guard-test-XXXXXXXX")
   trap 'find "$scratch" -xdev -depth -delete' EXIT
   export XDG_CONFIG_HOME="$scratch/config" XDG_RUNTIME_DIR="$scratch/runtime"
   export CUL_GUARD_TEST_SCRATCH="$scratch"
@@ -15,7 +21,7 @@ if [[ ${CUL_GUARD_TEST_PRIVATE_BUS:-} != 1 ]]; then
   python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1])
 from socket_fixture import private_bus_config
 private_bus_config(sys.argv[2], sys.argv[3], services=sys.argv[4:])' \
-    "$(dirname "$(realpath "$0")")" "$scratch/bus.conf" "$XDG_RUNTIME_DIR" ca.desrt.dconf org.a11y.Bus
+    "$scripts" "$scratch/bus.conf" "$XDG_RUNTIME_DIR" ca.desrt.dconf org.a11y.Bus
   dbus-run-session --config-file="$scratch/bus.conf" -- env CUL_GUARD_TEST_PRIVATE_BUS=1 bash "$0" "$@"
   exit
 fi
