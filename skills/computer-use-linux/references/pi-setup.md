@@ -111,13 +111,16 @@ legacy entry.
 The extension looks for `computer-use-linux` in this order:
 
 1. `COMPUTER_USE_LINUX_BIN`
-2. The binary downloaded inside the installed npm package
-3. `computer-use-linux` on `PATH`, from `npm install -g` or `cargo install`
+2. The binary downloaded inside the installed npm package. When it is missing,
+   as after npm 12 skipped the install script, the first tool call runs the
+   package's `npm/install.js` to download it.
+3. `computer-use-linux` on `PATH`, from `npm install -g` or `cargo install`,
+   when that download fails
 
-A temporary extension (`pi -e npm:@agent-sh/computer-use-linux`) is staged
-without the downloaded binary, so it relies on the `PATH` step. The extension
-still checks that the server version and tool catalog match, so a mismatched
-install fails with that reason instead of starting.
+The extension still checks that the server version and tool catalog match, so
+a mismatched install fails with that reason instead of starting. Set
+`COMPUTER_USE_LINUX_BIN` to run a `PATH` or development build instead of the
+download.
 
 Reinstall the package if the bundled binary is missing:
 

@@ -13,6 +13,10 @@ hosts or be listed below with the reason it is not. Literals inside env! and
 option_env! are read at build time and are skipped, as are #[cfg(test)]
 items and modules. The Codex plugin launcher's variables must be in the Codex
 list too, since Codex starts the launcher.
+
+The check sees names spelled out in this crate only. Variables read inside
+std (TMPDIR through env::temp_dir), dependencies, or the tools the server
+runs (gsettings, ydotool) are out of its reach.
 """
 
 from __future__ import annotations
@@ -129,9 +133,43 @@ def skip_attributes(toks: list[tuple[str, str]], index: int) -> int:
     return index
 
 
-def scan(path: Path) -> tuple[set[str], list[str]]:
+# A #[cfg(test)] item runs to its closing brace or semicolon. Anything else
+# (a match arm, field, variant or statement) also ends at a comma at its own
+# level, or where the enclosing block closes.
+ITEM_KEYWORDS = {
+    "async", "const", "enum", "extern", "fn", "impl", "let", "macro_rules",
+    "mod", "pub", "static", "struct", "trait", "type", "union", "unsafe", "use",
+}
+OPENERS = {"{", "(", "["}
+CLOSERS = {"}", ")", "]"}
+
+
+def skip_cfg_test_target(toks: list[tuple[str, str]], index: int) -> int:
+    """Index just past the code a #[cfg(test)] attribute at index applies to."""
+    item = index < len(toks) and toks[index][0] == "ident" and toks[index][1] in ITEM_KEYWORDS
+    depth = 0
+    while index < len(toks):
+        kind, value = toks[index]
+        if kind == "punct":
+            if value in OPENERS:
+                depth += 1
+            elif value in CLOSERS:
+                if depth == 0:
+                    return index
+                depth -= 1
+                if depth == 0 and value == "}":
+                    return index + 1
+            elif value == ";" and depth == 0:
+                return index + 1
+            elif value == "," and depth == 0 and not item:
+                return index + 1
+        index += 1
+    return index
+
+
+def scan(text: str) -> tuple[set[str], list[str]]:
     """Names read at run time, and test-only module names declared here."""
-    toks = tokens(path.read_text())
+    toks = tokens(text)
     names: set[str] = set()
     test_modules: list[str] = []
     index = 0
@@ -142,18 +180,7 @@ def scan(path: Path) -> tuple[set[str], list[str]]:
             if (index + 2 < len(toks) and toks[index] == ("ident", "mod")
                     and toks[index + 2] == ("punct", ";")):
                 test_modules.append(toks[index + 1][1])
-            depth = 0
-            while index < len(toks):
-                kind, value = toks[index]
-                index += 1
-                if (kind, value) == ("punct", "{"):
-                    depth += 1
-                elif (kind, value) == ("punct", "}"):
-                    depth -= 1
-                    if depth == 0:
-                        break
-                elif (kind, value) == ("punct", ";") and depth == 0:
-                    break
+            index = skip_cfg_test_target(toks, index)
             continue
         kind, value = toks[index]
         if (kind == "ident" and value in ("env", "option_env")
@@ -164,6 +191,68 @@ def scan(path: Path) -> tuple[set[str], list[str]]:
             names.add(value)
         index += 1
     return names, test_modules
+
+
+SELF_TEST = r"""
+//! "DOC_COMMENT_NAME" is skipped.
+const VERSION: &str = env!("BUILD_TIME_NAME");
+fn route(kind: Kind) -> Option<u8> {
+    match kind {
+        #[cfg(test)]
+        Kind::Fake(a, b) => None,
+        Kind::Real => std::env::var("AFTER_ARM_NAME").ok().map(|_| 1),
+    }
+}
+fn block_arm(kind: Kind) -> Option<u8> {
+    match kind {
+        #[cfg(test)]
+        Kind::Fake => { let _ = "TEST_ARM_NAME"; None }
+        Kind::Real => std::env::var("AFTER_BLOCK_ARM_NAME").ok().map(|_| 1),
+    }
+}
+struct Config {
+    #[cfg(test)]
+    fake: Vec<(u8, u8)>,
+    real: Option<String>,
+}
+fn field() -> Option<String> { std::env::var("AFTER_FIELD_NAME").ok() }
+struct Last {
+    real: u8,
+    #[cfg(test)]
+    last: bool
+}
+fn last_field() -> Option<String> { std::env::var("AFTER_LAST_FIELD_NAME").ok() }
+fn statement() -> Option<String> {
+    #[cfg(test)]
+    let _ = ("TEST_STATEMENT_NAME", 1);
+    let raw = r#"RAW_STRING_NAME"#;
+    let _ = '"';
+    std::env::var("AFTER_STATEMENT_NAME").ok()
+}
+#[cfg(test)]
+fn helper(a: u8, b: u8) -> &'static str { "TEST_FN_NAME" }
+#[cfg(test)]
+mod fixtures;
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn reads() { let _ = std::env::var("TEST_MODULE_NAME"); }
+}
+fn last() -> Option<String> { std::env::var("LAST_NAME").ok() }
+"""
+
+
+def self_test() -> None:
+    names, modules = scan(SELF_TEST)
+    expected = {
+        "AFTER_ARM_NAME", "AFTER_BLOCK_ARM_NAME", "AFTER_FIELD_NAME", "AFTER_LAST_FIELD_NAME",
+        "AFTER_STATEMENT_NAME", "RAW_STRING_NAME", "LAST_NAME",
+    }
+    if names != expected or modules != ["fixtures"]:
+        sys.exit(
+            f"check_env_forwarding: scanner self-test failed: found {sorted(names)} and "
+            f"test modules {modules}, expected {sorted(expected)} and ['fixtures']"
+        )
 
 
 def module_file(parent: Path, name: str) -> list[Path]:
@@ -177,7 +266,7 @@ def server_names() -> dict[str, list[str]]:
     found: dict[str, list[str]] = {}
     scans = {}
     for path in sources:
-        scans[path] = scan(path)
+        scans[path] = scan(path.read_text())
         for module in scans[path][1]:
             skipped.update(module_file(path, module))
     for path in sources:
@@ -193,8 +282,9 @@ def pi_names() -> set[str]:
     match = re.search(r"const FORWARDED_ENVIRONMENT = \[(.*?)\]", text, re.DOTALL)
     if not match:
         sys.exit(f"check_env_forwarding: no FORWARDED_ENVIRONMENT list in {PI_EXTENSION.relative_to(ROOT)}")
-    names = set(re.findall(r'"([^"]+)"', match.group(1)))
-    if 'startsWith("LC_")' in text:
+    body = re.sub(r"//[^\n]*|/\*.*?\*/", "", match.group(1), flags=re.DOTALL)
+    names = set(re.findall(r'"([^"]+)"', body))
+    if 'entry[0].startsWith("LC_")' in text:
         names.add("LC_")
     return names
 
@@ -209,6 +299,7 @@ def launcher_names() -> set[str]:
 
 
 def main() -> int:
+    self_test()
     found = server_names()
     pi = pi_names()
     codex = codex_names()

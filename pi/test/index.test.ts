@@ -658,7 +658,9 @@ describe("native Pi extension", () => {
 		// The download fails, so the mismatched PATH binary runs.
 		await expect(
 			doctor.execute("one", {}, undefined, undefined, {} as never),
-		).rejects.toThrow("does not match");
+		).rejects.toThrow(
+			/does not match\. This computer-use-linux came from PATH because downloading the package binary failed: .*release-binary/,
+		);
 		expect(FakeMcpClient.instances[0]?.options.binaryPath).toBe(pathBinary);
 		expect(FakeMcpClient.instances[0]?.closed).toBe(1);
 
@@ -729,6 +731,44 @@ describe("native Pi extension", () => {
 
 		await expect(call).rejects.toThrow("cancelled by the user");
 		expect(Date.now() - started).toBeLessThan(1500);
+		expect(FakeMcpClient.instances).toHaveLength(0);
+	});
+
+	it("starts no server when the session ends during a download", async () => {
+		const packageRoot = join(agentDir, "package");
+		mkdirSync(join(packageRoot, "npm"), { recursive: true });
+		const installed = join(
+			packageRoot,
+			"npm",
+			"bin",
+			`computer-use-linux-${process.platform}-${process.arch}`,
+		);
+		// An installer that finishes after the session is gone.
+		writeFileSync(
+			join(packageRoot, "npm", "install.js"),
+			`const fs = require("node:fs");
+setTimeout(() => {
+	fs.mkdirSync(${JSON.stringify(dirname(installed))}, { recursive: true });
+	fs.writeFileSync(${JSON.stringify(installed)}, "#!/bin/sh\\n", { mode: 0o755 });
+}, 300);
+`,
+		);
+		vi.stubEnv("COMPUTER_USE_LINUX_BIN", "");
+		vi.stubEnv("PATH", join(agentDir, "empty-path"));
+		const harness = createPi();
+		createComputerUseLinuxExtension({
+			packageRoot,
+			loadClientModule: () => ({
+				ComputerUseMcpClient: FakeMcpClient as never,
+			}),
+		})(harness.pi);
+		const call = harness.tools
+			.get("computer_use_linux_doctor")!
+			.execute("one", {}, undefined, undefined, {} as never);
+		await harness.emit("session_shutdown");
+
+		await expect(call).rejects.toThrow("session ended");
+		expect(existsSync(installed)).toBe(true);
 		expect(FakeMcpClient.instances).toHaveLength(0);
 	});
 

@@ -180,6 +180,16 @@ impl Drop for Sandbox {
     }
 }
 
+/// True when a usage line of `text` is `computer-use-linux NAME`, alone or
+/// followed by its arguments and summary. A substring match would let
+/// `setup-window-targeting` stand in for `setup`.
+fn has_usage_line(text: &str, name: &str) -> bool {
+    let usage = format!("computer-use-linux {name}");
+    text.lines()
+        .map(str::trim)
+        .any(|line| line == usage || line.starts_with(&format!("{usage} ")))
+}
+
 fn describe(arguments: &[&str], output: &Output, effects: &[String]) -> String {
     format!(
         "{arguments:?}: {}\nside effects: {effects:?}\nstdout: {}\nstderr: {}",
@@ -205,11 +215,10 @@ fn every_subcommand_prints_help_without_side_effects() {
             };
             let effects = sandbox.side_effects();
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let usage = format!("computer-use-linux {subcommand}");
             if output.status.code() != Some(0)
                 || !effects.is_empty()
                 || !stdout.contains("Usage:")
-                || !stdout.contains(&usage)
+                || !has_usage_line(&stdout, subcommand)
             {
                 failures.push(describe(&arguments, &output, &effects));
             }
@@ -263,7 +272,7 @@ fn top_level_help_lists_every_command_and_bad_lines_exit_2() {
         );
         for subcommand in SUBCOMMANDS.iter().filter(|name| **name != "abs-test") {
             assert!(
-                stdout.contains(&format!("computer-use-linux {subcommand}")),
+                has_usage_line(&stdout, subcommand),
                 "usage misses {subcommand}: {stdout}"
             );
         }

@@ -670,6 +670,9 @@ export function createComputerUseLinuxExtension(
 		// True while the launch is a PATH binary taken because the package
 		// binary could not be downloaded. It may not match this extension.
 		let launchIsFallback = false;
+		// Bumped by session_shutdown, so a download that outlives the session
+		// never starts a server nothing would close.
+		let session = 0;
 
 		// The package's binary comes before PATH, as after an install whose
 		// script ran: it matches this extension's catalog.
@@ -707,7 +710,11 @@ export function createComputerUseLinuxExtension(
 			// The package binary appeared since the fallback was chosen.
 			if (launchIsFallback && findLocal()) await dropClient();
 			if (client) return client;
+			const started = session;
 			const resolved = await resolveLaunch();
+			if (session !== started) {
+				throw new Error("Pi session ended while computer-use-linux was being installed");
+			}
 			if (client) return client;
 			if (!resolved) {
 				const failure = installFailure
@@ -746,8 +753,15 @@ export function createComputerUseLinuxExtension(
 			} catch (error) {
 				// A PATH binary taken after a failed download can be the wrong
 				// version. Drop it so the next call tries the download again.
-				if (launchIsFallback && client === active) await dropClient();
-				throw error;
+				if (signal?.aborted || !launchIsFallback || client !== active) throw error;
+				const failure = installFailure;
+				await dropClient();
+				throw new Error(
+					`${(error instanceof Error ? error.message : String(error)).replace(/\.$/, "")}. ` +
+						`This computer-use-linux came from PATH because downloading the package binary failed: ${failure}. ` +
+						"The next call tries the download again.",
+					{ cause: error },
+				);
 			}
 		};
 
@@ -879,6 +893,7 @@ export function createComputerUseLinuxExtension(
 		});
 
 		pi.on("session_shutdown", async () => {
+			session += 1;
 			const current = client;
 			client = undefined;
 			await current?.close();
