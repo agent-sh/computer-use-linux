@@ -48,7 +48,7 @@ pi install npm:@agent-sh/computer-use-linux
 
 When installed through Pi, the package supplies native, dynamically loaded
 `computer_use_linux_*` tools. When npm skipped the install script, the first
-tool call downloads the binary. No separate MCP adapter or manual MCP
+real tool call downloads the binary. No separate MCP adapter or manual MCP
 configuration is required. Native tools require Pi 0.84.4 or newer; the
 standalone CLI wrapper retains Node.js 18 support. Each native tool call times
 out after 60 seconds; set `COMPUTER_USE_LINUX_TIMEOUT_MS` in Pi's environment to

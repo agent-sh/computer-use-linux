@@ -56,7 +56,8 @@ python3 scripts/generate_pi_tool_catalog.py --binary target/debug/computer-use-l
 
 `check_plugins.sh` also runs `scripts/check_env_forwarding.py`, which fails when
 the server reads a variable the Pi extension or the Codex manifest does not
-pass. Without `--binary` it skips the launcher download test. CI also runs the
+pass, unless the script lists it with a reason, and when Codex drops a variable
+Pi passes. Without `--binary` it skips the launcher download test. CI also runs the
 X11 pointer regression below, installs the npm wrapper against the local
 binaries, and smoke-tests the installed Pi package, with and without its
 install script.

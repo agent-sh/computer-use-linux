@@ -119,7 +119,7 @@ The extension looks for `computer-use-linux` in this order:
 1. `COMPUTER_USE_LINUX_BIN`, when it is an absolute path to an executable. A
    relative or non-executable value is ignored and the next step is used.
 2. The binary downloaded inside the installed npm package. When it is missing,
-   as after npm 12 skipped the install script, the first tool call runs the
+   as after npm 12 skipped the install script, the first real tool call runs the
    package's `npm/install.js` to download it.
 3. `computer-use-linux` on `PATH`, from `npm install -g` or `cargo install`,
    when that download fails

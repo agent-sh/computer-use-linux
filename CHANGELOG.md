@@ -44,7 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- KWin element clicks get no off-screen or monitor-gap warning on either input route, since KWin maps the element point onto an output. The portal route dropped the warning that 0.7.41 kept; the uinput route still reports where a point was clamped ([#407](https://github.com/agent-sh/computer-use-linux/issues/407)).
+- KWin element clicks get no off-screen or monitor-gap warning on either input route, since KWin maps the element point onto an output. The portal route dropped the warning that 0.7.41 kept; the uinput route still reports where a point was clamped ([#397](https://github.com/agent-sh/computer-use-linux/pull/397), [#407](https://github.com/agent-sh/computer-use-linux/issues/407)).
 
 ### Fixed
 
