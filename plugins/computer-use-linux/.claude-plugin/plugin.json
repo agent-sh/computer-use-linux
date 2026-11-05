@@ -10,6 +10,7 @@
   "repository": "https://github.com/agent-sh/computer-use-linux",
   "license": "MIT",
   "keywords": ["linux", "computer-use", "desktop-control", "mcp", "accessibility", "wayland", "x11"],
+  "icon": "./assets/icon.png",
   "mcpServers": {
     "computer-use-linux": {
       "command": "${CLAUDE_PLUGIN_ROOT}/bin/computer-use-linux",

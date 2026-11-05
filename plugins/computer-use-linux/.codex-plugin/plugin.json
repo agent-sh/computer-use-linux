@@ -20,6 +20,9 @@
     "category": "Productivity",
     "capabilities": ["Interactive", "Write"],
     "websiteURL": "https://github.com/agent-sh/computer-use-linux",
+    "brandColor": "#FF9F1C",
+    "logo": "./assets/icon.png",
+    "composerIcon": "./assets/icon.png",
     "defaultPrompt": [
       "Check whether Linux Computer Use is ready",
       "List the open desktop windows",

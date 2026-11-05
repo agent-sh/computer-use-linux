@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The Claude Code and Codex plugins have an icon: a penguin whose belly a pointer clicks. Both manifests point at `plugins/computer-use-linux/assets/icon.png`; its SVG source sits next to it.
+
 ## [0.7.43] - 2026-11-05
 
 ### Fixed
