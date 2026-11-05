@@ -576,6 +576,12 @@ EOF
 # Step 7: GNOME Shell extension (Wayland + GNOME only)
 # -----------------------------------------------------------------------------
 
+# metadata.json without the lines GNOME Shell only displays. Any other
+# difference, a reformatted file included, counts as a change.
+metadata_load_lines() {
+    grep -v -E '^[[:space:]]*"(name|description|url)"[[:space:]]*:' "$1" 2>/dev/null || true
+}
+
 install_gnome_extension() {
     log_section "Step 7/9 — GNOME Shell extension"
     if [[ ${SKIP_GNOME_EXT} -eq 1 ]]; then log_skip "--skip-gnome-extension"; return 0; fi
@@ -602,15 +608,22 @@ install_gnome_extension() {
     fi
 
     # Enabled extensions still need refreshed assets after an upgrade. GNOME
-    # keeps the loaded module until the session restarts.
+    # keeps the loaded module until the session restarts. It only shows the
+    # name, description and url fields of metadata.json, so a change to those
+    # lines alone needs no new login.
     local extension_dir="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/${EXT_UUID}"
-    local was_enabled=0
+    local was_enabled=0 needs_login=1
     if gnome-extensions list --enabled 2>/dev/null | grep -qx "${EXT_UUID}"; then
         was_enabled=1
-        if cmp -s "${EXT_SRC_DIR}/extension.js" "${extension_dir}/extension.js" &&
-           cmp -s "${EXT_SRC_DIR}/metadata.json" "${extension_dir}/metadata.json"; then
-            log_ok "extension ${EXT_UUID} already enabled and up to date"
-            return 0
+        if cmp -s "${EXT_SRC_DIR}/extension.js" "${extension_dir}/extension.js"; then
+            if cmp -s "${EXT_SRC_DIR}/metadata.json" "${extension_dir}/metadata.json"; then
+                log_ok "extension ${EXT_UUID} already enabled and up to date"
+                return 0
+            fi
+            if cmp -s <(metadata_load_lines "${EXT_SRC_DIR}/metadata.json") \
+                      <(metadata_load_lines "${extension_dir}/metadata.json"); then
+                needs_login=0
+            fi
         fi
     fi
 
@@ -629,7 +642,11 @@ install_gnome_extension() {
 
     if [[ ${was_enabled} -eq 1 ]]; then
         log_ok "enabled extension assets updated"
-        log_info "log out and back in to load the updated window control and activity indicator"
+        if [[ ${needs_login} -eq 1 ]]; then
+            log_info "log out and back in to load the updated window control and activity indicator"
+        else
+            log_info "only the extension's display metadata changed; no new login needed"
+        fi
         return 0
     fi
 

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `computer-use-linux-indicator` and `computer-use-linux-cosmic` check their command line before they do anything, as `computer-use-linux` does since 0.7.44. Both print help on `-h` or `--help` and exit 0. The indicator takes no arguments, and the COSMIC helper takes only its five commands and `--window-id`. Anything else prints an error on stderr and exits 2. The indicator used to start on `--help` or any flag: it created its lock files in `XDG_RUNTIME_DIR` and connected to the compositor. The COSMIC helper exited 1 on a bad line, and `probe --help` failed instead of printing help. The server starts both as before ([#419](https://github.com/agent-sh/computer-use-linux/issues/419)).
+- `setup_window_targeting` and `setup-window-targeting` no longer ask for a new login when only the extension's display metadata changed. GNOME Shell reads `metadata.json` when it loads the extension and only shows `name`, `description`, `url`, `version-name` and `donations`. 0.7.44 added `url`, so the next setup with the extension enabled said GNOME Shell must reload, though `extension.js` was unchanged. A changed `extension.js`, or a change to any other field, such as `shell-version`, still sets `requires_shell_reload`. `install.sh` follows the same rule for `name`, `description` and `url` ([#420](https://github.com/agent-sh/computer-use-linux/issues/420)).
+- Tool, parameter and CLI text match the code ([#418](https://github.com/agent-sh/computer-use-linux/issues/418)). The `press_key` description and the `type_text` sentence of the server instructions name pixelflux, which both use when `PIXELFLUX_CU` and `PIXELFLUX_CU_TOKEN` are set. `setup --help` says setup requests `org.a11y.Status IsEnabled` only when the key does not read back true or the tree could not be built. `terminal_command` ignores ASCII case only. The `perform_action` and `set_value` `pid` says when it must match exactly one window. `click` `x` and `y` name the `coordinate_space="atspi"` exception. The `set_value` `value` says which text counts as a number: `inf`, `NaN` and `1e3` do.
+
 ## [0.7.45] - 2026-11-05
 
 ### Fixed

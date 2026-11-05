@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.45";
-export const GENERATED_TOOL_CATALOG_HASH = "70b08b6ea245fc2ad253b4b66e68d446536897cc2fa7948db3f961c7742f14f3";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "3a6ebca9aa371d244a0ca05f749647accec8ed1663760ae41d1ec2e1490eec31";
+export const GENERATED_TOOL_CATALOG_HASH = "ec6e646d7eb1f7dec7951339343ba74942a3194fa853eb1f60bf337738521b64";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "9c852f7e8206b88ff19dfb656a9ff68772e15692f821d1bdb47b8f7cb666b23b";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -128,7 +128,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_command": {
           "default": null,
-          "description": "Case-insensitive substring of the command name or command line of a\nterminal's shell or foreground process.",
+          "description": "Substring of the command name or command line of a terminal's shell\nor foreground process, ignoring ASCII case.",
           "type": [
             "string",
             "null"
@@ -410,7 +410,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "x": {
           "default": null,
-          "description": "Point x in raw screenshot capture pixels: the coordinate_width and\ncoordinate_height space. Divide preview pixels by the screenshot scale\nfirst. With relative=true, measured from the window screenshot's crop origin.",
+          "description": "Point x in raw screenshot capture pixels: the coordinate_width and\ncoordinate_height space. Divide preview pixels by the screenshot scale\nfirst. With relative=true, measured from the window screenshot's crop origin.\nWith coordinate_space=\"atspi\", a global AT-SPI screen x instead.",
           "format": "int32",
           "type": [
             "integer",
@@ -419,7 +419,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "y": {
           "default": null,
-          "description": "Point y in raw screenshot capture pixels: the coordinate_width and\ncoordinate_height space. Divide preview pixels by the screenshot scale\nfirst. With relative=true, measured from the window screenshot's crop origin.",
+          "description": "Point y in raw screenshot capture pixels: the coordinate_width and\ncoordinate_height space. Divide preview pixels by the screenshot scale\nfirst. With relative=true, measured from the window screenshot's crop origin.\nWith coordinate_space=\"atspi\", a global AT-SPI screen y instead.",
           "format": "int32",
           "type": [
             "integer",
@@ -726,7 +726,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_command": {
           "default": null,
-          "description": "Terminal command substring. Resolves a window target and scopes the tree\nwhen possible.",
+          "description": "Terminal command substring, ignoring ASCII case. Resolves a window\ntarget and scopes the tree when possible.",
           "type": [
             "string",
             "null"
@@ -965,7 +965,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_command": {
           "default": null,
-          "description": "Case-insensitive substring of the command name or command line of a\nterminal's shell or foreground process.",
+          "description": "Substring of the command name or command line of a terminal's shell\nor foreground process, ignoring ASCII case.",
           "type": [
             "string",
             "null"
@@ -1146,7 +1146,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
-          "description": "Process id of the target app.",
+          "description": "Process id of the target app: an element another process owns is\nrefused. Alone, it needs no window. When it picks the window (with\napp_id, wm_class or window_title, or for screenshot_after=\"window\"),\nit must match exactly one.",
           "minimum": 0,
           "type": [
             "integer",
@@ -1250,7 +1250,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On X11, chords go through xdotool (XTEST), or ydotool when xdotool is missing or cannot start. On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. When ydotool is absent and the session has no RemoteDesktop portal (for example wlroots compositors), chords go through wtype instead. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. On KDE Plasma every key in a portal chord is a physical keycode. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). With PIXELFLUX_CU and PIXELFLUX_CU_TOKEN set, chords go to pixelflux; a closed port falls through to the routes below, a pixelflux error does not. On X11, chords go through xdotool (XTEST), or ydotool when xdotool is missing or cannot start. On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. When ydotool is absent and the session has no RemoteDesktop portal (for example wlroots compositors), chords go through wtype instead. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. On KDE Plasma every key in a portal chord is a physical keycode. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -1363,7 +1363,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_command": {
           "default": null,
-          "description": "Case-insensitive substring of the command name or command line of a\nterminal's shell or foreground process.",
+          "description": "Substring of the command name or command line of a terminal's shell\nor foreground process, ignoring ASCII case.",
           "type": [
             "string",
             "null"
@@ -1549,7 +1549,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_command": {
           "default": null,
-          "description": "Case-insensitive substring of the command name or command line of a\nterminal's shell or foreground process.",
+          "description": "Substring of the command name or command line of a terminal's shell\nor foreground process, ignoring ASCII case.",
           "type": [
             "string",
             "null"
@@ -2057,7 +2057,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
-          "description": "Process id of the target app.",
+          "description": "Process id of the target app: an element another process owns is\nrefused. Alone, it needs no window. When it picks the window (with\napp_id, wm_class or window_title, or for screenshot_after=\"window\"),\nit must match exactly one.",
           "minimum": 0,
           "type": [
             "integer",
@@ -2124,7 +2124,7 @@ export const GENERATED_MCP_TOOLS =
           ]
         },
         "value": {
-          "description": "A number sets an element with the AT-SPI Value interface (slider, spin\nbutton). Otherwise the text replaces an editable text element's\ncontents. Text on a Value-only element is refused.",
+          "description": "A value that parses as a floating-point number (such as 5, -2.5, 1e3,\ninf or NaN, with no surrounding spaces) sets an element with the\nAT-SPI Value interface (slider, spin button). Otherwise the text\nreplaces an editable text element's contents. Text on a Value-only\nelement is refused.",
           "type": "string"
         },
         "window_id": {
@@ -2305,7 +2305,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "terminal_command": {
           "default": null,
-          "description": "Case-insensitive substring of the command name or command line of a\nterminal's shell or foreground process.",
+          "description": "Substring of the command name or command line of a terminal's shell\nor foreground process, ignoring ASCII case.",
           "type": [
             "string",
             "null"
