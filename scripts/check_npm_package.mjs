@@ -3,6 +3,8 @@
 import { spawnSync } from "node:child_process";
 
 const requiredFiles = [
+	// The Pi extension runs the installer when npm skipped the install script.
+	"npm/install.js",
 	"pi/extension/index.ts",
 	"pi/extension/generated-tools.ts",
 	"pi/extension/mcp-client.bundle.cjs",
@@ -25,7 +27,7 @@ const pack = Array.isArray(packed) ? packed[0] : Object.values(packed)[0];
 const paths = new Set(pack.files.map((file) => file.path));
 const missing = requiredFiles.filter((path) => !paths.has(path));
 if (missing.length > 0) {
-	throw new Error(`npm package is missing required Pi files: ${missing.join(", ")}`);
+	throw new Error(`npm package is missing required files: ${missing.join(", ")}`);
 }
 if (pack.unpackedSize > maxUnpackedBytes) {
 	throw new Error(

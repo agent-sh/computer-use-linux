@@ -20,6 +20,7 @@ import {
 	readFileSync,
 	statSync,
 } from "node:fs";
+import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
@@ -95,8 +96,11 @@ interface BinaryLaunch {
 }
 
 interface ExtensionDependencies {
+	/** Replaces the whole lookup, the first-use download included. */
 	findBinary?: () => BinaryLaunch | null;
 	loadClientModule?: () => NativeMcpClientModule;
+	/** Directory holding npm/bin and npm/install.js. Defaults to this package. */
+	packageRoot?: string;
 }
 
 const ORIGINAL_TOOL_NAMES = AVAILABLE_MCP_TOOLS.map((tool) => tool.name);
@@ -191,57 +195,72 @@ export function findExecutableOnPath(
 	return null;
 }
 
+/**
+ * Variables the server child receives, plus every LC_ variable. Everything
+ * else in Pi's environment stays out of the desktop process.
+ * scripts/check_env_forwarding.py fails CI when the server reads a variable
+ * missing here. COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE is left out: it adds a
+ * tool, and the client refuses a catalog that differs from the generated one.
+ */
+const FORWARDED_ENVIRONMENT = [
+	"PATH",
+	"HOME",
+	"USER",
+	"LOGNAME",
+	"SHELL",
+	"LANG",
+	"LANGUAGE",
+	"TERM",
+	"TMPDIR",
+	"DISPLAY",
+	"WAYLAND_DISPLAY",
+	"XAUTHORITY",
+	"DBUS_SESSION_BUS_ADDRESS",
+	"XDG_RUNTIME_DIR",
+	"XDG_CURRENT_DESKTOP",
+	"XDG_SESSION_TYPE",
+	"XDG_SESSION_DESKTOP",
+	"XDG_DATA_DIRS",
+	"XDG_CONFIG_HOME",
+	"XDG_CACHE_HOME",
+	"XDG_STATE_HOME",
+	"DESKTOP_SESSION",
+	"GDMSESSION",
+	"HYPRLAND_INSTANCE_SIGNATURE",
+	"NIRI_SOCKET",
+	"I3SOCK",
+	"SWAYSOCK",
+	"YDOTOOL_SOCKET",
+	"GSETTINGS_SCHEMA_DIR",
+	"GIO_EXTRA_MODULES",
+	"GI_TYPELIB_PATH",
+	"LD_LIBRARY_PATH",
+	"NIX_LD",
+	"NIX_LD_LIBRARY_PATH",
+	"RUST_LOG",
+	"COMPUTER_USE_LINUX_AGENT_NAME",
+	"COMPUTER_USE_LINUX_COSMIC_HELPER",
+	"COMPUTER_USE_LINUX_ENABLE_SHELL",
+	"COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD",
+	"COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER",
+	"COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD",
+	"COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
+	"COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER",
+	"COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND",
+	"COMPUTER_USE_LINUX_INDICATOR",
+	"COMPUTER_USE_LINUX_INDICATOR_BIN",
+	"COMPUTER_USE_LINUX_INDICATOR_HIDE_TEXT",
+	"COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP",
+	"COMPUTER_USE_LINUX_PORTAL_SCROLL_INVERT",
+	"COMPUTER_USE_LINUX_SCREENSHOT_BACKEND",
+	"COMPUTER_USE_LINUX_XDOTOOL_TYPE_DELAY_MS",
+	"CU_DISABLE_ABS_POINTER",
+	"PIXELFLUX_CU",
+	"PIXELFLUX_CU_TOKEN",
+] as const;
+
 function runtimeEnvironment(): Record<string, string> {
-	const allowed = new Set([
-		"PATH",
-		"HOME",
-		"USER",
-		"LOGNAME",
-		"SHELL",
-		"LANG",
-		"LANGUAGE",
-		"TERM",
-		"TMPDIR",
-		"DISPLAY",
-		"WAYLAND_DISPLAY",
-		"XAUTHORITY",
-		"DBUS_SESSION_BUS_ADDRESS",
-		"XDG_RUNTIME_DIR",
-		"XDG_CURRENT_DESKTOP",
-		"XDG_SESSION_TYPE",
-		"XDG_SESSION_DESKTOP",
-		"XDG_DATA_DIRS",
-		"XDG_CONFIG_HOME",
-		"XDG_CACHE_HOME",
-		"XDG_STATE_HOME",
-		"DESKTOP_SESSION",
-		"GDMSESSION",
-		"HYPRLAND_INSTANCE_SIGNATURE",
-		"I3SOCK",
-		"SWAYSOCK",
-		"YDOTOOL_SOCKET",
-		"GSETTINGS_SCHEMA_DIR",
-		"GIO_EXTRA_MODULES",
-		"GI_TYPELIB_PATH",
-		"LD_LIBRARY_PATH",
-		"NIX_LD",
-		"NIX_LD_LIBRARY_PATH",
-		"RUST_LOG",
-		"COMPUTER_USE_LINUX_COSMIC_HELPER",
-		"COMPUTER_USE_LINUX_AGENT_NAME",
-		"COMPUTER_USE_LINUX_INDICATOR",
-		"COMPUTER_USE_LINUX_INDICATOR_BIN",
-		"COMPUTER_USE_LINUX_INDICATOR_HIDE_TEXT",
-		"COMPUTER_USE_LINUX_ENABLE_SHELL",
-		"COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD",
-		"COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER",
-		"COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD",
-		"COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
-		"COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER",
-		"COMPUTER_USE_LINUX_PORTAL_SCROLL_INVERT",
-		"COMPUTER_USE_LINUX_SCREENSHOT_BACKEND",
-		"CU_DISABLE_ABS_POINTER",
-	]);
+	const allowed = new Set<string>(FORWARDED_ENVIRONMENT);
 	const env = Object.fromEntries(
 		Object.entries(process.env).filter(
 			(entry): entry is [string, string] =>
@@ -254,7 +273,16 @@ function runtimeEnvironment(): Record<string, string> {
 	return env;
 }
 
-function defaultFindBinary(): BinaryLaunch | null {
+/** Directory holding npm/bin and npm/install.js. */
+const PACKAGE_ROOT = join(__dirname, "..", "..");
+const INSTALL_OUTPUT_CHARS = 4000;
+
+function installerPath(packageRoot: string): string {
+	return join(packageRoot, "npm", "install.js");
+}
+
+/** COMPUTER_USE_LINUX_BIN, then the package's own binary. */
+function localLaunch(packageRoot: string): BinaryLaunch | null {
 	const env = runtimeEnvironment();
 	const override = process.env.COMPUTER_USE_LINUX_BIN?.trim();
 	// Relative overrides would be resolved from Pi's potentially untrusted
@@ -263,50 +291,74 @@ function defaultFindBinary(): BinaryLaunch | null {
 		return { binaryPath: override, env };
 	}
 
+	const binDir = join(packageRoot, "npm", "bin");
 	const bundledBinary = join(
-		__dirname,
-		"..",
-		"..",
-		"npm",
-		"bin",
+		binDir,
 		`computer-use-linux-${process.platform}-${process.arch}`,
 	);
-	if (executable(bundledBinary)) {
-		const cosmicHelper = join(
-			__dirname,
-			"..",
-			"..",
-			"npm",
-			"bin",
-			"computer-use-linux-cosmic",
-		);
-		if (!env.COMPUTER_USE_LINUX_COSMIC_HELPER && executable(cosmicHelper)) {
-			env.COMPUTER_USE_LINUX_COSMIC_HELPER = cosmicHelper;
-		}
-		const indicator = join(
-			__dirname,
-			"..",
-			"..",
-			"npm",
-			"bin",
-			"computer-use-linux-indicator",
-		);
-		if (!env.COMPUTER_USE_LINUX_INDICATOR_BIN && executable(indicator)) {
-			env.COMPUTER_USE_LINUX_INDICATOR_BIN = indicator;
-		}
-		return { binaryPath: bundledBinary, env };
+	if (!executable(bundledBinary)) return null;
+	const cosmicHelper = join(binDir, "computer-use-linux-cosmic");
+	if (!env.COMPUTER_USE_LINUX_COSMIC_HELPER && executable(cosmicHelper)) {
+		env.COMPUTER_USE_LINUX_COSMIC_HELPER = cosmicHelper;
 	}
+	const indicator = join(binDir, "computer-use-linux-indicator");
+	if (!env.COMPUTER_USE_LINUX_INDICATOR_BIN && executable(indicator)) {
+		env.COMPUTER_USE_LINUX_INDICATOR_BIN = indicator;
+	}
+	return { binaryPath: bundledBinary, env };
+}
 
-	// A temporary extension (`pi -e npm:@agent-sh/computer-use-linux`) is staged
-	// without the postinstall-downloaded platform binary, so fall back to a
-	// global npm or cargo install. The MCP client still checks the server
-	// version and tool catalog, so a mismatched install fails with that reason.
+/**
+ * A global npm or cargo install. The MCP client still checks the server
+ * version and tool catalog, so a mismatched install fails with that reason.
+ */
+function pathLaunch(): BinaryLaunch | null {
 	const onPath = findExecutableOnPath(process.env.PATH, "computer-use-linux");
-	if (onPath) {
-		return { binaryPath: onPath, env };
-	}
+	return onPath ? { binaryPath: onPath, env: runtimeEnvironment() } : null;
+}
 
-	return null;
+/**
+ * Runs npm/install.js, the first-use download the CLI wrapper also runs.
+ * npm 12 skips install scripts it was not told to allow, so `pi install` can
+ * stage the package without its binary. The installer checks each download's
+ * sha256 and moves the main binary into place last. Its output is kept for
+ * the error and never reaches Pi's terminal.
+ */
+function runInstaller(packageRoot: string): Promise<void> {
+	const installer = installerPath(packageRoot);
+	// Under Bun, execPath is the Bun or Pi executable, not node.
+	const node = process.versions.bun
+		? findExecutableOnPath(process.env.PATH, "node")
+		: process.execPath;
+	if (!node) {
+		return Promise.reject(
+			new Error(`node was not found on PATH to run ${installer}`),
+		);
+	}
+	return new Promise((resolve, reject) => {
+		let output = "";
+		const keep = (chunk: Buffer) => {
+			output = (output + chunk.toString()).slice(-INSTALL_OUTPUT_CHARS);
+		};
+		const child = spawn(node, [installer], {
+			cwd: packageRoot,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		child.stdout.on("data", keep);
+		child.stderr.on("data", keep);
+		child.on("error", reject);
+		child.on("close", (code, signal) => {
+			if (code === 0) {
+				resolve();
+				return;
+			}
+			reject(
+				new Error(
+					`${installer} exited with ${signal ?? `status ${code}`}: ${output.trim()}`,
+				),
+			);
+		});
+	});
 }
 
 function defaultLoadClientModule(): NativeMcpClientModule {
@@ -581,7 +633,12 @@ function restoredNativeTools(ctx: ExtensionContext): string[] {
 export function createComputerUseLinuxExtension(
 	dependencies: ExtensionDependencies = {},
 ) {
-	const findBinary = dependencies.findBinary ?? defaultFindBinary;
+	const packageRoot = dependencies.packageRoot ?? PACKAGE_ROOT;
+	const findLocal =
+		dependencies.findBinary ?? (() => localLaunch(packageRoot));
+	const findOnPath = dependencies.findBinary ? () => null : pathLaunch;
+	const canInstall = () =>
+		!dependencies.findBinary && existsSync(installerPath(packageRoot));
 	const loadClientModule =
 		dependencies.loadClientModule ?? defaultLoadClientModule;
 
@@ -589,21 +646,41 @@ export function createComputerUseLinuxExtension(
 		let launch: BinaryLaunch | undefined;
 		let client: NativeMcpClient | undefined;
 		let enabledNativeTools = new Set<string>();
+		let install: Promise<string | undefined> | undefined;
+		let installFailure: string | undefined;
 
-		const resolveLaunch = () => {
+		// The package's binary comes before PATH, as after an install whose
+		// script ran: it matches this extension's catalog. A failed download
+		// falls back to PATH and is tried again on the next tool call.
+		const resolveLaunch = async () => {
 			if (launch) return launch;
-			const resolved = findBinary();
+			let resolved = findLocal();
+			if (!resolved && canInstall()) {
+				install ??= runInstaller(packageRoot).then(
+					() => undefined,
+					(error: Error) => error.message,
+				);
+				const pending = install;
+				installFailure = await pending;
+				if (install === pending) install = undefined;
+				resolved = findLocal();
+			}
+			resolved ??= findOnPath();
 			if (resolved) launch = resolved;
 			return resolved;
 		};
 
-		const getClient = () => {
+		const getClient = async () => {
 			if (client) return client;
-			const resolved = resolveLaunch();
+			const resolved = await resolveLaunch();
+			if (client) return client;
 			if (!resolved) {
+				const failure = installFailure
+					? ` Downloading it failed: ${installFailure}`
+					: "";
 				throw new Error(
-					"computer-use-linux binary was not found. Reinstall " +
-						`${PACKAGE_NAME}, install computer-use-linux on PATH, or set COMPUTER_USE_LINUX_BIN.`,
+					`computer-use-linux binary was not found.${failure} Reinstall ` +
+						`${PACKAGE_NAME} with its install script allowed, install computer-use-linux on PATH, or set COMPUTER_USE_LINUX_BIN.`,
 				);
 			}
 			const { ComputerUseMcpClient } = loadClientModule();
@@ -630,7 +707,7 @@ export function createComputerUseLinuxExtension(
 				outputSchema: NativeToolOutputSchema,
 				executionMode: "sequential",
 				async execute(_toolCallId, params, signal) {
-					const result = await getClient().callTool(
+					const result = await (await getClient()).callTool(
 						tool.name,
 						params as Record<string, unknown>,
 						signal,
@@ -722,7 +799,9 @@ export function createComputerUseLinuxExtension(
 			}
 			pi.setActiveTools(active);
 
-			if (!resolveLaunch() && ctx.hasUI) {
+			// Nothing is downloaded here; a missing package binary is fetched on
+			// the first tool call.
+			if (!findLocal() && !canInstall() && !findOnPath() && ctx.hasUI) {
 				ctx.ui.notify(
 					`${PACKAGE_NAME}: binary not found; reinstall the package, install computer-use-linux on PATH, or set COMPUTER_USE_LINUX_BIN.`,
 					"warning",

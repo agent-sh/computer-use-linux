@@ -2,12 +2,13 @@
 name = "computer-use-linux"
 version = "0.7.43"
 edition = "2021"
+# File::try_lock, used by the indicator, is stable since Rust 1.89.
+rust-version = "1.89"
 authors = ["Avi Fenesh <avifenesh@users.noreply.github.com>"]
 license = "MIT"
 description = "Native Linux desktop control over MCP and CLI — semantic AT-SPI accessibility trees, multi-compositor window targeting (GNOME, KDE/KWin, Hyprland, niri, COSMIC, i3, X11), bounded screenshots, Wayland/X11 input, and an on-screen agent activity indicator."
-homepage = "https://github.com/agent-sh/computer-use-linux"
 repository = "https://github.com/agent-sh/computer-use-linux"
-documentation = "https://github.com/agent-sh/computer-use-linux#readme"
+documentation = "https://docs.rs/computer-use-linux"
 readme = "README.md"
 keywords = ["mcp", "computer-use", "accessibility", "linux", "wayland"]
 categories = ["accessibility", "command-line-utilities", "os::linux-apis"]
@@ -16,14 +17,14 @@ categories = ["accessibility", "command-line-utilities", "os::linux-apis"]
 # a stray local file) never reach crates.io.
 include = [
     "/src/**",
-    "/tests/**",
-    "/examples/**",
+    "/tests/*.rs",
+    "/tests/fixtures/keyboard-us-de.xkb",
+    "/examples/*.rs",
     "/gnome-shell-extension/**",
     "/scripts/app_state_capture_order_test.py",
     "/scripts/cosmic_focus_test.py",
     "/scripts/gnome_indicator_test.py",
     "/scripts/hyprland_background_test.py",
-    "/scripts/mcp_safety_check.py",
     "/scripts/socket_fixture.py",
     "/Cargo.toml",
     "/Cargo.lock",

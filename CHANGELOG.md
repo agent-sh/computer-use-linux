@@ -11,6 +11,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The Claude Code and Codex plugins have an icon: a penguin whose belly a pointer clicks. Both manifests point at `plugins/computer-use-linux/assets/icon.png`; its SVG source sits next to it.
 
+### Changed
+
+- The CLI checks the whole command line before it does anything. An unknown command, an unknown flag, or a missing or extra argument prints the usage to stderr and exits with status 2. An unknown command used to exit 1. `--` ends the flags, so `state -- --help` reads an app named `--help`.
+- The top-level help lists every command with a one-line summary, `guard-accessibility` included.
+- The Pi extension downloads its binary on the first tool call when the package arrived without it. npm 12 skips install scripts it was not told to allow, so `pi install npm:@agent-sh/computer-use-linux` left no binary. The extension runs the package's `npm/install.js`, the same first-launch install the CLI wrapper runs, and uses that binary ahead of one on PATH. A failed download is named in the tool error and tried again on the next call; PATH stays the fallback. Nothing is downloaded at session start.
+- The npm package declares `"libc": ["glibc"]`, so npm refuses it on musl systems, where the glibc release binaries it downloads do not run.
+- The npm package's optional Pi peers require `>=0.84.4`, the documented minimum, instead of any version.
+- The crate declares `rust-version = "1.89"`. It uses `File::try_lock`, stable since Rust 1.89; older compilers failed with E0658.
+- The crate's documentation link points at docs.rs, and the `homepage` that repeated the repository URL is gone.
+- The crate no longer ships files that its build and tests do not read: `scripts/mcp_safety_check.py`, the manual test notes, the `install.sh` test fixtures and the Python example.
+- The GNOME Shell extension's metadata names the project URL.
+
+### Fixed
+
+- Subcommands no longer ignore their flags. `setup --help` ran setup and wrote GNOME settings, `setup-window-targeting --help` installed and enabled the extension, `guard-accessibility --help` started the guard, which never exits, and `abs-test --help` clicked at 0,0. Every command now prints its own help on `-h` or `--help` and exits 0 without touching the desktop. `abs-test`, the development click probe, now needs integer X and Y.
+- Pi passes `COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND`, `COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP`, `COMPUTER_USE_LINUX_XDOTOOL_TYPE_DELAY_MS`, `NIRI_SOCKET`, `PIXELFLUX_CU` and `PIXELFLUX_CU_TOKEN` to the server. They did nothing under Pi.
+- Codex passes `COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND`, `COMPUTER_USE_LINUX_PORTAL_SCROLL_INVERT`, `PIXELFLUX_CU` and `PIXELFLUX_CU_TOKEN` to the server. They did nothing under Codex. A CI check now fails when the server reads a variable that the Pi extension or the Codex manifest does not pass.
+- `npm run test:wrapper` tests the checkout's debug build. It used to download the published release and test that. CI runs it now.
+
 ## [0.7.43] - 2026-11-05
 
 ### Fixed

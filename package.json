@@ -30,6 +30,9 @@
     "x64",
     "arm64"
   ],
+  "libc": [
+    "glibc"
+  ],
   "bin": {
     "computer-use-linux": "npm/bin/computer-use-linux.js"
   },
@@ -57,14 +60,14 @@
     "pack:check": "node scripts/check_npm_package.mjs",
     "test:pi": "npm test --prefix pi",
     "typecheck:pi": "npm run typecheck --prefix pi",
-    "test:wrapper": "node npm/bin/computer-use-linux.js --help"
+    "test:wrapper": "COMPUTER_USE_LINUX_BIN=target/debug/computer-use-linux node npm/bin/computer-use-linux.js --help"
   },
   "engines": {
     "node": ">=18"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": ">=0.84.4",
+    "@earendil-works/pi-coding-agent": ">=0.84.4",
     "typebox": "*"
   },
   "peerDependenciesMeta": {

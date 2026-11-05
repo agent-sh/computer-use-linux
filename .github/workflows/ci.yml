@@ -164,6 +164,7 @@ jobs:
           COMPUTER_USE_LINUX_LOCAL_INDICATOR="$PWD/target/debug/computer-use-linux-indicator" \
             npm install --prefix "$prefix" -g .
           "$prefix/bin/computer-use-linux" --help
+      - run: npm run test:wrapper
       - run: npm run pack:check
 
   zod-schema:
@@ -216,6 +217,22 @@ jobs:
           COMPUTER_USE_LINUX_EXTENSION_PATH="$prefix/node_modules/@agent-sh/computer-use-linux/pi/extension/index.ts" \
           COMPUTER_USE_LINUX_USE_PACKAGED_BINARY=1 \
             npm test --prefix pi -- pi-integration.test.ts
+      - name: Smoke the Pi package installed without its install script
+        run: |
+          # npm 12 skips install scripts it was not told to allow. The
+          # extension must fetch the binary on first use.
+          prefix="$RUNNER_TEMP/pi-package-no-scripts"
+          package="$(npm pack --pack-destination "$RUNNER_TEMP" --silent)"
+          npm install --prefix "$prefix" "$RUNNER_TEMP/$package" --ignore-scripts --no-audit --no-fund
+          installed="$prefix/node_modules/@agent-sh/computer-use-linux"
+          test ! -e "$installed/npm/bin/computer-use-linux-linux-x64"
+          COMPUTER_USE_LINUX_LOCAL_BINARY="$PWD/target/debug/computer-use-linux" \
+          COMPUTER_USE_LINUX_LOCAL_COSMIC_HELPER="$PWD/target/debug/computer-use-linux-cosmic" \
+          COMPUTER_USE_LINUX_LOCAL_INDICATOR="$PWD/target/debug/computer-use-linux-indicator" \
+          COMPUTER_USE_LINUX_EXTENSION_PATH="$installed/pi/extension/index.ts" \
+          COMPUTER_USE_LINUX_USE_PACKAGED_BINARY=1 \
+            npm test --prefix pi -- pi-integration.test.ts
+          test -x "$installed/npm/bin/computer-use-linux-linux-x64"
 
   release-binary:
     name: release artifact (${{ matrix.target }})

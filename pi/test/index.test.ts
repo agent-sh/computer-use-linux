@@ -6,6 +6,7 @@ import type {
 import { createCodemodeExtension } from "@earendil-works/pi-coding-agent";
 import {
 	chmodSync,
+	copyFileSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -13,7 +14,8 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join, relative } from "node:path";
+import { delimiter, dirname, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	createComputerUseLinuxExtension,
@@ -23,6 +25,8 @@ import {
 import { GENERATED_MCP_TOOLS } from "../extension/generated-tools.ts";
 
 type Handler = (event: any, ctx: any) => unknown;
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 class FakeMcpClient {
 	static instances: FakeMcpClient[] = [];
@@ -459,6 +463,8 @@ describe("native Pi extension", () => {
 		);
 		const harness = createPi();
 		createComputerUseLinuxExtension({
+			// No npm/install.js here, so a missing binary never starts a download.
+			packageRoot: agentDir,
 			loadClientModule: () => ({
 				ComputerUseMcpClient: FakeMcpClient as never,
 			}),
@@ -484,6 +490,8 @@ describe("native Pi extension", () => {
 		vi.stubEnv("PATH", ["", ".", "relative-bin"].join(delimiter));
 		const harness = createPi();
 		createComputerUseLinuxExtension({
+			// No npm/install.js here, so a missing binary never starts a download.
+			packageRoot: agentDir,
 			loadClientModule: () => ({
 				ComputerUseMcpClient: FakeMcpClient as never,
 			}),
@@ -505,12 +513,127 @@ describe("native Pi extension", () => {
 		});
 	});
 
+	it("passes the server's settings to the child and nothing else", async () => {
+		const settings = {
+			COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND: "1",
+			COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP: "1",
+			COMPUTER_USE_LINUX_PORTAL_SCROLL_INVERT: "1",
+			COMPUTER_USE_LINUX_XDOTOOL_TYPE_DELAY_MS: "12",
+			NIRI_SOCKET: "/run/user/1000/niri.sock",
+			PIXELFLUX_CU: "8765",
+			PIXELFLUX_CU_TOKEN: "token",
+		};
+		for (const [name, value] of Object.entries(settings)) {
+			vi.stubEnv(name, value);
+		}
+		vi.stubEnv("CUL_PI_TEST_UNRELATED", "1");
+		vi.stubEnv("COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE", "1");
+		vi.stubEnv("COMPUTER_USE_LINUX_BIN", process.execPath);
+		const harness = createPi();
+		createComputerUseLinuxExtension({
+			// No npm/install.js here, so a missing binary never starts a download.
+			packageRoot: agentDir,
+			loadClientModule: () => ({
+				ComputerUseMcpClient: FakeMcpClient as never,
+			}),
+		})(harness.pi);
+
+		await harness.tools
+			.get("computer_use_linux_doctor")!
+			.execute("one", {}, undefined, undefined, {} as never);
+
+		const env = FakeMcpClient.instances[0]?.options.env;
+		expect(env).toMatchObject(settings);
+		expect(env).not.toHaveProperty("CUL_PI_TEST_UNRELATED");
+		// It would add a tool the generated catalog does not have.
+		expect(env).not.toHaveProperty("COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE");
+	});
+
+	function stagePackageWithoutBinary() {
+		// What npm 12 leaves when it skips the package's install script.
+		const packageRoot = join(agentDir, "package");
+		mkdirSync(join(packageRoot, "npm"), { recursive: true });
+		copyFileSync(
+			join(REPO_ROOT, "npm", "install.js"),
+			join(packageRoot, "npm", "install.js"),
+		);
+		copyFileSync(
+			join(REPO_ROOT, "package.json"),
+			join(packageRoot, "package.json"),
+		);
+		return packageRoot;
+	}
+
+	it("downloads the package binary on first use, ahead of PATH", async () => {
+		const packageRoot = stagePackageWithoutBinary();
+		const release = join(agentDir, "release-binary");
+		writeFileSync(release, "#!/bin/sh\n");
+		chmodSync(release, 0o755);
+		const pathDir = join(agentDir, "path");
+		mkdirSync(pathDir);
+		writeFileSync(join(pathDir, "computer-use-linux"), "#!/bin/sh\n");
+		chmodSync(join(pathDir, "computer-use-linux"), 0o755);
+		vi.stubEnv("COMPUTER_USE_LINUX_BIN", "");
+		// The installer copies this file instead of downloading a release.
+		vi.stubEnv("COMPUTER_USE_LINUX_LOCAL_BINARY", release);
+		vi.stubEnv("PATH", pathDir);
+		const harness = createPi();
+		createComputerUseLinuxExtension({
+			packageRoot,
+			loadClientModule: () => ({
+				ComputerUseMcpClient: FakeMcpClient as never,
+			}),
+		})(harness.pi);
+		await harness.emit("session_start");
+		const installed = join(
+			packageRoot,
+			"npm",
+			"bin",
+			`computer-use-linux-${process.platform}-${process.arch}`,
+		);
+		expect(existsSync(installed)).toBe(false);
+		expect(harness.notify).not.toHaveBeenCalled();
+
+		await harness.tools
+			.get("computer_use_linux_doctor")!
+			.execute("one", {}, undefined, undefined, {} as never);
+
+		expect(existsSync(installed)).toBe(true);
+		expect(FakeMcpClient.instances[0]?.options.binaryPath).toBe(installed);
+	});
+
+	it("reports a failed first-use download", async () => {
+		const packageRoot = stagePackageWithoutBinary();
+		vi.stubEnv("COMPUTER_USE_LINUX_BIN", "");
+		vi.stubEnv(
+			"COMPUTER_USE_LINUX_LOCAL_BINARY",
+			join(agentDir, "missing-release-binary"),
+		);
+		vi.stubEnv("PATH", join(agentDir, "empty-path"));
+		const harness = createPi();
+		createComputerUseLinuxExtension({
+			packageRoot,
+			loadClientModule: () => ({
+				ComputerUseMcpClient: FakeMcpClient as never,
+			}),
+		})(harness.pi);
+
+		await expect(
+			harness.tools
+				.get("computer_use_linux_doctor")!
+				.execute("one", {}, undefined, undefined, {} as never),
+		).rejects.toThrow(/Downloading it failed: .*install\.js exited with status 1: .*missing-release-binary/);
+		expect(FakeMcpClient.instances).toHaveLength(0);
+	});
+
 	it("ignores a relative executable override", async () => {
 		const relativeOverride = relative(process.cwd(), process.execPath);
 		vi.stubEnv("COMPUTER_USE_LINUX_BIN", relativeOverride);
 		vi.stubEnv("PATH", "relative-bin");
 		const harness = createPi();
 		createComputerUseLinuxExtension({
+			// No npm/install.js here, so a missing binary never starts a download.
+			packageRoot: agentDir,
 			loadClientModule: () => ({
 				ComputerUseMcpClient: FakeMcpClient as never,
 			}),

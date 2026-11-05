@@ -2,6 +2,7 @@
   "uuid": "computer-use-linux@avifenesh.dev",
   "name": "Linux Computer Use Window Control",
   "description": "Local GNOME Shell window control and agent activity indicator for Linux Computer Use MCP.",
+  "url": "https://github.com/agent-sh/computer-use-linux",
   "shell-version": [
     "45",
     "46",

@@ -49,6 +49,9 @@ diff -r skills/computer-use-linux "$plugin/skills/computer-use-linux" >/dev/null
 sh -n "$launcher"
 [ -x "$launcher" ] || fail "launcher is not executable"
 
+# Codex and Pi pass the server only the variables they list.
+python3 scripts/check_env_forwarding.py
+
 if [ "${1:-}" != "--binary" ]; then
   echo "plugin manifests ok: version $cargo_version"
   exit 0
