@@ -82,9 +82,9 @@ event trace shows Control events; a permanently stuck Alt key was not proven.
 The original `1850c7a` patch used one argument after `--`, preserving option-looking text literally.
 It rejects NUL and more than 131,071 UTF-8 bytes before starting wtype. Missing
 wtype retains the existing ydotool fallback; an available wtype's validation,
-spawn, timeout, or execution error does not replay partially sent text.
-Since 0.7.40, a wtype that never starts falls back to ydotool, since nothing
-was typed.
+timeout, or execution error does not replay partially sent text. The patch
+also returned spawn errors; since 0.7.40, a wtype that never starts falls back
+to ydotool, since nothing was typed.
 
 Tradeoff: unlike stdin, text in argv is inspectable in the child process's
 command line while it runs. This also applies to the existing xdotool backend.

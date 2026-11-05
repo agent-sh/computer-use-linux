@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.43";
-export const GENERATED_TOOL_CATALOG_HASH = "350cfeeeef6c397d427f082f08db12af773f1bc695955534bae8dbb34d41eed3";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "748c373d6bc2365bfc264f779f8066798eedb5846af4f0455f538698333d6619";
+export const GENERATED_TOOL_CATALOG_HASH = "dd4f0b26ce625940ae164e81508ce18b40a1062135346ec809ac2c97f5d62203";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "b4cb611f28a9653f5d6cde9dbf2b457e9afc40a4b1bb5102b988841c1b857672";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -34,7 +34,7 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "app_id": {
           "default": null,
-          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
+          "description": "Application id, ignoring ASCII case: the full desktop id, or its last\ndot-separated segment outside a terminal match. A segment that matches several apps is\nrejected.",
           "type": [
             "string",
             "null"
@@ -84,7 +84,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
-          "description": "Process id of the window. Alone, it must match exactly one window.",
+          "description": "Process id. It must match exactly one window.",
           "minimum": 0,
           "type": [
             "integer",
@@ -153,7 +153,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "title": {
           "default": null,
-          "description": "Case-insensitive window title substring. The first matching window wins.",
+          "description": "Window title substring, ignoring ASCII case. When several windows\nmatch outside a terminal match, the first wins.",
           "type": [
             "string",
             "null"
@@ -169,7 +169,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
+          "description": "Window id from a recent list_windows. The first target field set\ndecides, in this order: window_id, terminal fields, pid, app_id,\nwm_class, title. With a terminal field, pid, app_id, wm_class and title\nonly narrow the terminal match, which must name one window.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -179,7 +179,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
-          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
+          "description": "Window manager class, an exact match ignoring ASCII case. When several\nwindows match outside a terminal match, the first wins.",
           "type": [
             "string",
             "null"
@@ -197,7 +197,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. A plain left click on an element whose first AT-SPI action is click, press, or toggle invokes that action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics. Explicit x/y default to raw screenshot capture pixels; coordinate_space=\"atspi\" with element_index or a semantic selector maps a global AT-SPI screen point through the element's KWin window and output geometry on KDE Wayland. A window target is raised and focused first (GNOME needs the Shell extension to raise one); nothing is sent when focus cannot be verified. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. A plain left click on an element whose first AT-SPI action is click, press, or toggle invokes that action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics. Explicit x/y default to raw screenshot capture pixels; coordinate_space=\"atspi\" with element_index or a semantic selector maps a global AT-SPI screen point through the element's KWin window and output geometry on KDE Wayland. A window target is raised and focused first (on GNOME Wayland, raising needs the Shell extension); nothing is sent when focus cannot be verified. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "ClickCoordinateSpace": {
@@ -219,7 +219,7 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "app_id": {
           "default": null,
-          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
+          "description": "Application id, ignoring ASCII case: the full desktop id, or its last\ndot-separated segment. A segment that matches several apps is\nrejected.",
           "type": [
             "string",
             "null"
@@ -227,7 +227,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "button": {
           "default": null,
-          "description": "Mouse button: left (default), right or middle. side, extra, forward and\nback reach only the portal and ydotool routes, which treat an unknown\nname as left.",
+          "description": "Mouse button: left (default), right or middle. side, extra, forward and\nback reach only the portal and ydotool routes, which treat an unknown\nname as left. Native X11 refuses any other name.",
           "type": [
             "string",
             "null"
@@ -308,7 +308,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
-          "description": "Process id of the window. Alone, it must match exactly one window.",
+          "description": "Process id. It must match exactly one window.",
           "minimum": 0,
           "type": [
             "integer",
@@ -384,7 +384,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
+          "description": "Window id from a recent list_windows. The first target field set\ndecides, in this order: window_id, pid, app_id, wm_class, window_title.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -394,7 +394,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_title": {
           "default": null,
-          "description": "Case-insensitive window title substring. The first matching window wins.\nThis tool names the field window_title, not title.",
+          "description": "Window title substring, ignoring ASCII case. When several windows\nmatch, the first wins.\nThis tool names the field window_title; a title field is ignored.",
           "type": [
             "string",
             "null"
@@ -402,7 +402,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
-          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
+          "description": "Window manager class, an exact match ignoring ASCII case. When several\nwindows match, the first wins.",
           "type": [
             "string",
             "null"
@@ -865,7 +865,7 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "app_id": {
           "default": null,
-          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
+          "description": "Application id, ignoring ASCII case: the full desktop id, or its last\ndot-separated segment outside a terminal match. A segment that matches several apps is\nrejected.",
           "type": [
             "string",
             "null"
@@ -915,7 +915,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
-          "description": "Process id of the window. Alone, it must match exactly one window.",
+          "description": "Process id. It must match exactly one window.",
           "minimum": 0,
           "type": [
             "integer",
@@ -984,7 +984,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "title": {
           "default": null,
-          "description": "Case-insensitive window title substring. The first matching window wins.",
+          "description": "Window title substring, ignoring ASCII case. When several windows\nmatch outside a terminal match, the first wins.",
           "type": [
             "string",
             "null"
@@ -1000,7 +1000,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
+          "description": "Window id from a recent list_windows. The first target field set\ndecides, in this order: window_id, terminal fields, pid, app_id,\nwm_class, title. With a terminal field, pid, app_id, wm_class and title\nonly narrow the terminal match, which must name one window.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -1010,7 +1010,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
-          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
+          "description": "Window manager class, an exact match ignoring ASCII case. When several\nwindows match outside a terminal match, the first wins.",
           "type": [
             "string",
             "null"
@@ -1064,7 +1064,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "app_id": {
           "default": null,
-          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
+          "description": "Application id, ignoring ASCII case: the full desktop id, or its last\ndot-separated segment. A segment that matches several apps is\nrejected.",
           "type": [
             "string",
             "null"
@@ -1206,7 +1206,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
+          "description": "Window id from a recent list_windows. The first target field set\ndecides, in this order: window_id, pid, app_id, wm_class, window_title.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -1216,7 +1216,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_title": {
           "default": null,
-          "description": "Case-insensitive window title substring. The first matching window wins.\nThis tool names the field window_title, not title.",
+          "description": "Window title substring, ignoring ASCII case. When several windows\nmatch, the first wins.\nThis tool names the field window_title; a title field is ignored.",
           "type": [
             "string",
             "null"
@@ -1224,7 +1224,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
-          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
+          "description": "Window manager class, an exact match ignoring ASCII case. When several\nwindows match, the first wins.",
           "type": [
             "string",
             "null"
@@ -1257,7 +1257,7 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "app_id": {
           "default": null,
-          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
+          "description": "Application id, ignoring ASCII case: the full desktop id, or its last\ndot-separated segment outside a terminal match. A segment that matches several apps is\nrejected.",
           "type": [
             "string",
             "null"
@@ -1311,7 +1311,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
-          "description": "Process id of the window. Alone, it must match exactly one window.",
+          "description": "Process id. It must match exactly one window.",
           "minimum": 0,
           "type": [
             "integer",
@@ -1380,7 +1380,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "title": {
           "default": null,
-          "description": "Case-insensitive window title substring. The first matching window wins.",
+          "description": "Window title substring, ignoring ASCII case. When several windows\nmatch outside a terminal match, the first wins.",
           "type": [
             "string",
             "null"
@@ -1396,7 +1396,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
+          "description": "Window id from a recent list_windows. The first target field set\ndecides, in this order: window_id, terminal fields, pid, app_id,\nwm_class, title. With a terminal field, pid, app_id, wm_class and title\nonly narrow the terminal match, which must name one window.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -1406,7 +1406,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
-          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
+          "description": "Window manager class, an exact match ignoring ASCII case. When several\nwindows match outside a terminal match, the first wins.",
           "type": [
             "string",
             "null"
@@ -1442,7 +1442,7 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "app_id": {
           "default": null,
-          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
+          "description": "Application id, ignoring ASCII case: the full desktop id, or its last\ndot-separated segment outside a terminal match. A segment that matches several apps is\nrejected.",
           "type": [
             "string",
             "null"
@@ -1497,7 +1497,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
-          "description": "Process id of the window. Alone, it must match exactly one window.",
+          "description": "Process id. It must match exactly one window.",
           "minimum": 0,
           "type": [
             "integer",
@@ -1566,7 +1566,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "title": {
           "default": null,
-          "description": "Case-insensitive window title substring. The first matching window wins.",
+          "description": "Window title substring, ignoring ASCII case. When several windows\nmatch outside a terminal match, the first wins.",
           "type": [
             "string",
             "null"
@@ -1587,7 +1587,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
+          "description": "Window id from a recent list_windows. The first target field set\ndecides, in this order: window_id, terminal fields, pid, app_id,\nwm_class, title. With a terminal field, pid, app_id, wm_class and title\nonly narrow the terminal match, which must name one window.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -1597,7 +1597,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
-          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
+          "description": "Window manager class, an exact match ignoring ASCII case. When several\nwindows match outside a terminal match, the first wins.",
           "type": [
             "string",
             "null"
@@ -1619,7 +1619,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize; a target without known bounds is refused, so pass full_screen=true there. Returns the image plus a JSON caption with returned and coordinate dimensions, scale, format, quality, source, cropped_to_window, and window_title. The crop origin is not reported; use relative=true on click or scroll for window-relative input. Callers can request jpeg/quality for compression before resizing.",
+    "description": "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize; outside Hyprland background mode, a target without known bounds is refused, so pass full_screen=true there. Returns the image plus a JSON caption with returned and coordinate dimensions, scale, format, quality, source, cropped_to_window, and window_title. The crop origin is not reported; use relative=true on click or scroll for window-relative input. Callers can request jpeg/quality for compression before resizing.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -1634,7 +1634,7 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "app_id": {
           "default": null,
-          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
+          "description": "Application id, ignoring ASCII case: the full desktop id, or its last\ndot-separated segment. A segment that matches several apps is\nrejected.",
           "type": [
             "string",
             "null"
@@ -1689,7 +1689,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
-          "description": "Process id of the window. Alone, it must match exactly one window.",
+          "description": "Process id. It must match exactly one window.",
           "minimum": 0,
           "type": [
             "integer",
@@ -1725,7 +1725,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "title": {
           "default": null,
-          "description": "Case-insensitive window title substring. The first matching window wins.",
+          "description": "Window title substring, ignoring ASCII case. When several windows\nmatch, the first wins.",
           "type": [
             "string",
             "null"
@@ -1733,7 +1733,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
+          "description": "Window id from a recent list_windows. The first target field set\ndecides, in this order: window_id, pid, app_id, wm_class, title.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -1743,7 +1743,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
-          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
+          "description": "Window manager class, an exact match ignoring ASCII case. When several\nwindows match, the first wins.",
           "type": [
             "string",
             "null"
@@ -1776,7 +1776,7 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "app_id": {
           "default": null,
-          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
+          "description": "Application id, ignoring ASCII case: the full desktop id, or its last\ndot-separated segment. A segment that matches several apps is\nrejected.",
           "type": [
             "string",
             "null"
@@ -1850,7 +1850,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
-          "description": "Process id of the window. Alone, it must match exactly one window.",
+          "description": "Process id. It must match exactly one window.",
           "minimum": 0,
           "type": [
             "integer",
@@ -1902,7 +1902,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
+          "description": "Window id from a recent list_windows. The first target field set\ndecides, in this order: window_id, pid, app_id, wm_class, window_title.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -1912,7 +1912,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_title": {
           "default": null,
-          "description": "Case-insensitive window title substring. The first matching window wins.\nThis tool names the field window_title, not title.",
+          "description": "Window title substring, ignoring ASCII case. When several windows\nmatch, the first wins.\nThis tool names the field window_title; a title field is ignored.",
           "type": [
             "string",
             "null"
@@ -1920,7 +1920,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
-          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
+          "description": "Window manager class, an exact match ignoring ASCII case. When several\nwindows match, the first wins.",
           "type": [
             "string",
             "null"
@@ -1972,7 +1972,7 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "app_id": {
           "default": null,
-          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
+          "description": "Application id, ignoring ASCII case: the full desktop id, or its last\ndot-separated segment. A segment that matches several apps is\nrejected.",
           "type": [
             "string",
             "null"
@@ -2117,7 +2117,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
+          "description": "Window id from a recent list_windows. The first target field set\ndecides, in this order: window_id, pid, app_id, wm_class, window_title.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -2127,7 +2127,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_title": {
           "default": null,
-          "description": "Case-insensitive window title substring. The first matching window wins.\nThis tool names the field window_title, not title.",
+          "description": "Window title substring, ignoring ASCII case. When several windows\nmatch, the first wins.\nThis tool names the field window_title; a title field is ignored.",
           "type": [
             "string",
             "null"
@@ -2135,7 +2135,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
-          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
+          "description": "Window manager class, an exact match ignoring ASCII case. When several\nwindows match, the first wins.",
           "type": [
             "string",
             "null"
@@ -2156,7 +2156,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Enable GNOME accessibility so Linux Computer Use can read AT-SPI trees: writes and reads back the toolkit-accessibility gsettings key and requests runtime org.a11y.Status IsEnabled.",
+    "description": "Enable GNOME accessibility so Linux Computer Use can read AT-SPI trees: sets and reads back the toolkit-accessibility gsettings key when it is not already true, and requests runtime org.a11y.Status IsEnabled when the tree cannot be built or the key does not read back.",
     "inputSchema": {
       "properties": {},
       "type": "object"
@@ -2170,7 +2170,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Install and enable the bundled GNOME Shell extension. GNOME needs it for exact window focus, move_window, resize_window and the on-screen indicator; Introspect can only list windows, and recent GNOME blocks that too. Ask the user to log out and back in when the result says a shell reload is required.",
+    "description": "Install and enable the bundled GNOME Shell extension. GNOME Wayland needs it for exact window focus, move_window and resize_window, since Introspect cannot focus, move or resize windows (and recent GNOME blocks its window list too); every GNOME session needs it for the on-screen indicator. Ask the user to log out and back in when the result says a shell reload is required.",
     "inputSchema": {
       "properties": {},
       "type": "object"
@@ -2199,7 +2199,7 @@ export const GENERATED_MCP_TOOLS =
       "properties": {
         "app_id": {
           "default": null,
-          "description": "Application id, case-insensitive: the full desktop id or its last\ndot-separated segment. A segment that matches several apps is rejected.",
+          "description": "Application id, ignoring ASCII case: the full desktop id, or its last\ndot-separated segment outside a terminal match. A segment that matches several apps is\nrejected.",
           "type": [
             "string",
             "null"
@@ -2249,7 +2249,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "pid": {
           "default": null,
-          "description": "Process id of the window. Alone, it must match exactly one window.",
+          "description": "Process id. It must match exactly one window.",
           "minimum": 0,
           "type": [
             "integer",
@@ -2322,7 +2322,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "title": {
           "default": null,
-          "description": "Case-insensitive window title substring. The first matching window wins.",
+          "description": "Window title substring, ignoring ASCII case. When several windows\nmatch outside a terminal match, the first wins.",
           "type": [
             "string",
             "null"
@@ -2338,7 +2338,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "window_id": {
           "default": null,
-          "description": "Window id from a recent list_windows. Takes precedence over the other\ntarget fields.",
+          "description": "Window id from a recent list_windows. The first target field set\ndecides, in this order: window_id, terminal fields, pid, app_id,\nwm_class, title. With a terminal field, pid, app_id, wm_class and title\nonly narrow the terminal match, which must name one window.",
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": [
@@ -2348,7 +2348,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "wm_class": {
           "default": null,
-          "description": "Window manager class, case-insensitive exact match. The first matching\nwindow wins.",
+          "description": "Window manager class, an exact match ignoring ASCII case. When several\nwindows match outside a terminal match, the first wins.",
           "type": [
             "string",
             "null"

@@ -57,7 +57,8 @@ python3 scripts/generate_pi_tool_catalog.py --binary target/debug/computer-use-l
 also runs the X11 pointer regression below, installs the npm wrapper against
 the local binaries, and smoke-tests the installed Pi package.
 
-A script that a Rust test runs must be listed in `Cargo.toml` `include`.
+A script that a Rust test runs, or that such a script imports, must be listed
+in `Cargo.toml` `include`.
 `cargo publish --dry-run` builds the packaged crate but does not run its tests,
 so CI does not catch a missing one.
 
@@ -132,9 +133,9 @@ A release changes these ten files:
 - `plugins/computer-use-linux/.claude-plugin/plugin.json` and `plugins/computer-use-linux/.codex-plugin/plugin.json`.
 - `.claude-plugin/marketplace.json`.
 - `pi/extension/generated-tools.ts`: rebuild, then regenerate it with `python3 scripts/generate_pi_tool_catalog.py --binary target/debug/computer-use-linux`.
-- `CHANGELOG.md`: the `[Unreleased]` entries become the version's section.
+- `CHANGELOG.md`: the `[Unreleased]` entries become the version's section, with its compare link.
 
-`scripts/check_plugins.sh` fails when a plugin version differs from `Cargo.toml`, the MCP safety check fails when the server version does, and the Pi catalog `--check` fails until the catalog is regenerated. Push a `vX.Y.Z` tag to publish.
+`scripts/check_plugins.sh` fails when a plugin version differs from `Cargo.toml`, CI fails when `package.json` does, the MCP safety check fails when the server version does, and the Pi catalog `--check` fails until the catalog is regenerated. Push a `vX.Y.Z` tag to publish.
 
 ## Security
 

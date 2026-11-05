@@ -50,7 +50,7 @@ The Rust crate is published as [`computer-use-linux`](https://crates.io/crates/c
 
 Most computer-use MCP servers are macOS-only (they lean on AppKit, AXUIElement, CGEvent). The few that target Linux either drive `xdotool` against an X11 root window or shell out to OCR over screenshots. It differs in five ways:
 
-- **Wayland actually works.** On Wayland, pointer actions use `/dev/uinput` or `org.freedesktop.portal.RemoteDesktop`. ydotool only sends wheel events there, and a coordinate action with neither route is refused. Literal text prefers KDE clipboard integration on Plasma, `wtype` on compatible Wayland compositors, and portal keysyms on other Wayland sessions, including GNOME with ydotool installed. Portal text startup or conversion errors fail the call without replaying text through ydotool. Raw ydotool text accepts printable ASCII, tab and newline only, and its physical US key positions can produce different text under the active layout. Screenshots use the GNOME Shell DBus screenshot method when present, `org.freedesktop.portal.Screenshot` otherwise, then on a native X11 session a root-window `GetImage` (device pixels, no toolkit scaling), and finally spawn `gnome-screenshot` for background/systemd contexts where the DBus paths are denied.
+- **Wayland actually works.** On Wayland, pointer actions use `/dev/uinput` or `org.freedesktop.portal.RemoteDesktop`. For pointer actions ydotool only sends wheel events there, and a coordinate action with neither route is refused. Literal text prefers KDE clipboard integration on Plasma, `wtype` on compatible Wayland compositors, and portal keysyms on other Wayland sessions, including GNOME with ydotool installed. Portal text startup or conversion errors fail the call without replaying text through ydotool. Raw ydotool text accepts printable ASCII, tab and newline only, and its physical US key positions can produce different text under the active layout. Screenshots use the GNOME Shell DBus screenshot method when present, `org.freedesktop.portal.Screenshot` otherwise, then on a native X11 session a root-window `GetImage` (device pixels, no toolkit scaling), and finally spawn `gnome-screenshot` for background/systemd contexts where the DBus paths are denied.
 - **Window targeting is compositor-aware.** The window registry tries GNOME Shell extension, GNOME Shell Introspect, COSMIC Wayland helper, KWin DBus scripting, Hyprland `hyprctl`, the niri IPC socket, i3 IPC, labwc's `labwc.sock`, wlr-foreign-toplevel-management, and generic X11/EWMH in order, then reports exactly which backend won or why each backend failed. Terminal windows are enriched with their controlling TTY and foreground process so agents can target "the terminal running `pytest`" directly. Every `window_id` fits JavaScript's exact integer range (at most 2^53-1), so JSON clients can pass it back unchanged; a larger value is rejected with a prompt to re-run `list_windows`.
 - **Semantic selectors first, pixel coordinates when needed.** Tools like `click`, `perform_action`, and `set_value` accept `role` / `name` / `text` / `states` selectors or `element_index` values backed by AT-SPI, and every mutating tool can return a post-action screenshot and updated accessibility tree in the same round trip. Pixel coordinates remain available for rendering-only surfaces (canvas, games, X clients without ATK).
 - **Visible to humans, invisible to screenshots.** While an agent acts, `computer-use-linux-indicator` renders a click-through overlay with a per-agent cursor glide, click ripple, keycaps/typing banner, screen-edge glow, and status pill, and hides automatically under a shared capture lock before any screenshot is read.
@@ -64,7 +64,7 @@ The crate was extracted from [`codex-desktop-linux`](https://github.com/avifenes
 | --- | --- | --- |
 | **Diagnostics & setup** | `doctor` | Single-shot JSON readiness report (platform, portals, accessibility, windowing, input, readiness summary, and capability map). |
 | | `setup_accessibility` | Enables and verifies GNOME's `org.gnome.desktop.interface toolkit-accessibility` setting so toolkit apps expose AT-SPI trees. |
-| | `setup_window_targeting` | Installs and enables the bundled GNOME Shell extension. GNOME needs it for exact window activation, move/resize, and the on-screen indicator. |
+| | `setup_window_targeting` | Installs and enables the bundled GNOME Shell extension. GNOME Wayland needs it for exact window activation and move/resize; every GNOME session needs it for the on-screen indicator. |
 | **Discovery & observation** | `get_app_state` | Combined screenshot + compacted AT-SPI accessibility tree with stable `element_index` handles. Scope with `app_name_or_bundle_identifier` or a window target (`window_id`, `pid`, `app_id`, `wm_class`, `title`). |
 | | `get_tree_page` | Page through the latest cached tree by node offset, for trees too large to return inline when the host cannot read the spill file. |
 | | `screenshot` | Bounded PNG or JPEG capture of the full desktop (`full_screen: true` or no target) or a raised and cropped target window (`window_id`, `pid`, `app_id`, `wm_class`, `title`, `raise_window`). |
@@ -270,7 +270,7 @@ You will still need AT-SPI enabled (`computer-use-linux setup`) and one input ba
 
 ## Wire it into your MCP host
 
-The binary speaks MCP over stdio through `rmcp` 3.5. It answers `initialize` with the client's protocol version from 2024-11-05 through 2025-11-25, and with 2025-11-25 for any other. Pass `mcp` as the only argument; everything else is configured through MCP tool calls.
+The binary speaks MCP over stdio through `rmcp` 3.5. It answers `initialize` with the client's protocol version when that is 2024-11-05, 2025-03-26, 2025-06-18 or 2025-11-25, and with 2025-11-25 for any other. Pass `mcp` as the only argument; everything else is configured through MCP tool calls.
 
 ### Claude Code and Codex plugin
 
@@ -412,10 +412,9 @@ mcp_servers:
     command: computer-use-linux
     args: ["mcp"]
     enabled: true
-
-# Optional: expose the tools to subagents as well.
-inherit_mcp_toolsets: true
 ```
+
+Subagents keep the parent's MCP tools by default (`delegation.inherit_mcp_toolsets`).
 
 If you installed the binary somewhere that is not on `PATH`, pass the absolute path as `--command`.
 
@@ -544,7 +543,7 @@ Computer-use tooling is, by definition, a privilege-escalation surface. The thre
 - **AT-SPI exposes window contents to any client on your session bus.** Enabling the AT-SPI bridge (`setup_accessibility`) is a prerequisite for this binary; it's also what screen readers use, and it shares the same trust boundary.
 - **The GNOME Shell extension** is loaded only into your user's GNOME Shell, runs in the Shell's JS sandbox, and exposes a single DBus interface on the user session bus. It does not request any extra permissions.
 - **The indicator shows what agents type.** `type_text` text (its last 64 characters) and `press_key` keycaps are drawn on screen unless the target is, or might be, a password field: both are replaced by a fixed mask when the focused element's AT-SPI role is a password role or cannot be read within 250 ms. Generic text boxes and terminal focus are also masked because their roles do not establish whether input is obscured. `set_value` values are always masked, because an app can change a field to a password after its accessibility snapshot. The text also travels over a socket in the user's private runtime directory. Set `COMPUTER_USE_LINUX_INDICATOR_HIDE_TEXT=1` to mask all typed text and keycaps, or `COMPUTER_USE_LINUX_INDICATOR=0` to turn the indicator off.
-- **No network.** This binary opens no TCP/UDP listener, makes no outbound Internet connections, and ships no telemetry. It does use local session transports such as DBus and the per-user `ydotoold` Unix socket. With `PIXELFLUX_CU` set, it also connects to that loopback TCP port.
+- **No network.** This binary opens no TCP/UDP listener, makes no outbound Internet connections, and ships no telemetry. It does use local session transports such as DBus and the per-user `ydotoold` Unix socket. With `PIXELFLUX_CU` and `PIXELFLUX_CU_TOKEN` set, it also connects to that loopback TCP port, and a `DISPLAY` that names a host makes X11 queries connect to that X server.
 - **Mutating tools are explicit.** The MCP tool list annotates read-only versus mutating tools, and CI fails if the published tool annotations drift from the table above. Treat those annotations as hints; the host is still responsible for user approval and policy.
 
 If you're running this on a shared workstation, set `ydotoold`'s socket permissions to `0600` (the default) and audit which processes on your user can `connect()` to it.
