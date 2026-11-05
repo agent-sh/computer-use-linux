@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 
-from socket_fixture import INDICATOR_SOCKET, socket_tempdir
+from socket_fixture import INDICATOR_SOCKET, private_bus_config, socket_tempdir
 
 
 def wait_for(probe, timeout=5):
@@ -247,10 +247,7 @@ def main():
         root = Path(directory)
         runtime = root / 'run'
         runtime.mkdir(mode=0o700)
-        config = root / 'bus.conf'
-        config.write_text('<busconfig><type>session</type>' + f'<listen>unix:tmpdir={runtime}</listen>' +
-                          '<policy context="default"><allow own="*"/><allow send_destination="*"/>' +
-                          '<allow receive_sender="*"/></policy></busconfig>')
+        config = private_bus_config(root / 'bus.conf', runtime)
         env = dict(os.environ, XDG_CACHE_HOME=directory, XDG_CONFIG_HOME=directory, XDG_RUNTIME_DIR=str(runtime))
         subprocess.run(['dbus-run-session', '--config-file', str(config), '--', '/usr/bin/python3',
                         __file__, binary, '--private', directory], env=env, check=True, timeout=90)

@@ -10,7 +10,13 @@ if [[ ${CUL_GUARD_TEST_PRIVATE_BUS:-} != 1 ]]; then
   export GIO_USE_VFS=local GVFS_DISABLE_FUSE=1
   unset AT_SPI_BUS_ADDRESS WAYLAND_DISPLAY
   mkdir -m 700 -p "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR"
-  dbus-run-session -- env CUL_GUARD_TEST_PRIVATE_BUS=1 bash "$0" "$@"
+  # The bus listens in the scratch, which the trap removes. gsettings and
+  # AT-SPI start dconf and the a11y bus by activation; no other service can.
+  python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1])
+from socket_fixture import private_bus_config
+private_bus_config(sys.argv[2], sys.argv[3], services=sys.argv[4:])' \
+    "$(dirname "$(realpath "$0")")" "$scratch/bus.conf" "$XDG_RUNTIME_DIR" ca.desrt.dconf org.a11y.Bus
+  dbus-run-session --config-file="$scratch/bus.conf" -- env CUL_GUARD_TEST_PRIVATE_BUS=1 bash "$0" "$@"
   exit
 fi
 binary=$(realpath "${1:-target/debug/computer-use-linux}")

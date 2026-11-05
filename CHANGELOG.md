@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `setup_window_targeting` and `setup-window-targeting` install the user copy of the extension in `$XDG_DATA_HOME/gnome-shell/extensions`, where GNOME Shell loads user extensions. They fall back to `~/.local/share` only when `XDG_DATA_HOME` is unset or empty, as GLib does. Before, setup always wrote under `~/.local/share`. With `XDG_DATA_HOME` set elsewhere, the Shell never loaded that copy, and the reload setup asked for did not help. The Pi extension and the Codex plugin now pass `XDG_DATA_HOME` to the server. `install.sh` already used this path ([#426](https://github.com/agent-sh/computer-use-linux/issues/426)).
+- The `setup-window-targeting` help names all five display-only metadata fields: `name`, `description`, `url`, `version-name` and `donations`. It named the first three ([#426](https://github.com/agent-sh/computer-use-linux/issues/426)).
+
 ## [0.7.46] - 2026-11-05
 
 ### Fixed

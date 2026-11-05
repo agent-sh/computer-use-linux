@@ -117,6 +117,13 @@ the longest socket path fits, else `XDG_RUNTIME_DIR`. When neither fits, the
 test fails and names the limit and the path. A long `TMPDIR` moves the
 fixtures instead of breaking them.
 
+A private D-Bus bus listens in its fixture's own directory, so the socket
+goes away with the fixture. dbus-daemon leaves its socket behind when it is
+killed. Rust tests start `test_sockets::PrivateBus`. Scripts write a config
+with `socket_fixture.private_bus_config` and pass it to
+`dbus-run-session --config-file`. A unit test fails on `unix:tmpdir` and on
+a bus started without a config file.
+
 ## PR Guidelines
 
 - Keep changes focused and explain the desktop/session you tested on.

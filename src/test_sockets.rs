@@ -1,17 +1,115 @@
-//! Paths for unit tests that bind or connect to Unix sockets.
+//! Paths for unit tests that bind or connect to Unix sockets, and the
+//! private D-Bus daemon they share.
 //!
 //! A socket path must fit `sun_path`, so a fixture under a long `TMPDIR`
 //! fails with a bind error that reads like a product bug. Fixtures pick their
 //! place here instead: the temp dir when the longest socket path fits, else
 //! `XDG_RUNTIME_DIR`, else a panic that names the limit and the path.
 //! `scripts/socket_fixture.py` applies the same rule to the Python fixtures.
+//! `tests/window_targeting_setup.rs` includes this file too.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    io::{BufRead, BufReader},
+    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+};
 
 /// `sun_path` holds 108 bytes, including the terminating NUL.
 const SOCKET_PATH_MAX: usize = 107;
 /// dbus-daemon refuses a listen path longer than this.
 const DBUS_SOCKET_PATH_MAX: usize = 99;
+/// The socket dbus-daemon makes for `<listen>unix:dir=DIR</listen>`.
+const DBUS_DIR_SOCKET: &str = "dbus-XXXXXXXXXX";
+
+/// A dbus-daemon whose socket stays in a fixture directory of its own.
+///
+/// The config has no service directories, so nothing on the bus can
+/// activate a desktop service, and the daemon starts with an empty
+/// environment. dbus-daemon leaves its socket behind when it is killed, so
+/// drop removes the directory after the daemon exits.
+pub(crate) struct PrivateBus {
+    child: Child,
+    dir: PathBuf,
+    address: String,
+}
+
+impl PrivateBus {
+    /// Starts a bus in a new fixture directory whose name begins with `label`.
+    pub(crate) fn start(label: &str) -> Self {
+        let dir = bus_fixture(
+            &format!("{label}-{:016x}", getrandom::u64().unwrap()),
+            DBUS_DIR_SOCKET,
+        );
+        fs::create_dir_all(&dir).expect("create private bus dir");
+        // The directory also serves as a private XDG_RUNTIME_DIR.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let config = dir.join("bus.conf");
+        fs::write(
+            &config,
+            format!(
+                "<busconfig><type>session</type><listen>unix:dir={}</listen>\
+                 <policy context=\"default\"><allow own=\"*\"/>\
+                 <allow send_destination=\"*\"/><allow receive_sender=\"*\"/>\
+                 </policy></busconfig>",
+                dbus_address_value(&dir)
+            ),
+        )
+        .unwrap();
+        let mut child = Command::new("dbus-daemon")
+            .arg(format!("--config-file={}", config.display()))
+            .args(["--nofork", "--nopidfile", "--print-address=1"])
+            .env_clear()
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("start private dbus-daemon");
+        let mut address = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut address)
+            .expect("read private bus address");
+        let bus = Self {
+            child,
+            dir,
+            address: address.trim().to_string(),
+        };
+        assert!(!bus.address.is_empty(), "private bus printed no address");
+        bus
+    }
+
+    pub(crate) fn address(&self) -> &str {
+        &self.address
+    }
+
+    /// The fixture directory, which holds the socket and the config.
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+}
+
+impl Drop for PrivateBus {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// `path` as a D-Bus address value: bytes outside `[-0-9A-Za-z_/.\*]` are
+/// written as `%XX`. The result needs no XML escaping either.
+fn dbus_address_value(path: &Path) -> String {
+    path.as_os_str()
+        .as_bytes()
+        .iter()
+        .map(|&byte| {
+            if byte.is_ascii_alphanumeric() || b"-_/.\\*".contains(&byte) {
+                char::from(byte).to_string()
+            } else {
+                format!("%{byte:02x}")
+            }
+        })
+        .collect()
+}
 
 /// Path of the fixture `name`, whose longest socket path is `name/deepest`,
 /// or `name` itself when `deepest` is empty. Nothing is created.
@@ -123,6 +221,87 @@ mod tests {
         assert!(
             error.contains("(run) is not an absolute directory"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn a_private_bus_keeps_its_socket_in_its_dir_and_removes_both() {
+        let bus = PrivateBus::start("cul-bus-test");
+        let dir = bus.dir().to_path_buf();
+        let socket = PathBuf::from(
+            bus.address()
+                .strip_prefix("unix:path=")
+                .and_then(|rest| rest.split(',').next())
+                .unwrap_or_else(|| panic!("unexpected address {}", bus.address())),
+        );
+        assert_eq!(socket.parent(), Some(dir.as_path()));
+        assert!(socket.exists());
+        drop(bus);
+        assert!(!socket.exists(), "{} outlived its bus", socket.display());
+        assert!(!dir.exists(), "{} outlived its bus", dir.display());
+    }
+
+    #[test]
+    fn bus_addresses_escape_bytes_outside_the_plain_set() {
+        assert_eq!(dbus_address_value(Path::new("/a-b_c.d/e*")), "/a-b_c.d/e*");
+        assert_eq!(dbus_address_value(Path::new("/a b/&%")), "/a%20b/%26%25");
+    }
+
+    /// Every private bus a test or script starts listens in a fixture
+    /// directory: Rust tests use [`PrivateBus`] or pass their own config,
+    /// scripts pass one from `socket_fixture.private_bus_config`. The session
+    /// default and `unix:tmpdir` put the socket in `/tmp`, where a killed
+    /// daemon leaves it behind.
+    #[test]
+    fn every_test_bus_listens_in_its_fixture() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let tmpdir_listen = concat!("unix:", "tmp", "dir=");
+        let run_session = concat!("dbus-", "run-session");
+        let daemon_spawn = concat!("Command::new(\"dbus-", "daemon\")");
+        // All of src, and the files directly in tests and scripts.
+        let mut files = Vec::new();
+        let mut dirs = vec![root.join("src")];
+        while let Some(dir) = dirs.pop() {
+            for entry in fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        for dir in ["tests", "scripts"] {
+            for entry in fs::read_dir(root.join(dir)).unwrap() {
+                files.push(entry.unwrap().path());
+            }
+        }
+        files.retain(|path| {
+            matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("rs" | "py" | "sh")
+            )
+        });
+        let mut offenders = Vec::new();
+        for path in files {
+            let text = fs::read_to_string(&path).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
+                // A call may put its config on one of the next two lines.
+                let call = || lines[index..lines.len().min(index + 3)].join(" ");
+                let starts_bus = line.contains(&format!("'{run_session}'"))
+                    || line.contains(&format!("\"{run_session}\""))
+                    || line.trim_start().starts_with(&format!("{run_session} "))
+                    || line.contains(daemon_spawn);
+                if line.contains(tmpdir_listen) || (starts_bus && !call().contains("--config-file"))
+                {
+                    offenders.push(format!("{}:{}", path.display(), index + 1));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "private buses that listen outside their fixture: {offenders:?}"
         );
     }
 }

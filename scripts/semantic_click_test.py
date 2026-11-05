@@ -14,7 +14,7 @@ import sys
 import tempfile
 import time
 
-from socket_fixture import INDICATOR_SOCKET, socket_tempdir
+from socket_fixture import INDICATOR_SOCKET, private_bus_config, socket_tempdir
 
 
 def rpc(proc, request, *, expect_error=False):
@@ -45,15 +45,19 @@ def payload(result):
 def main():
     binary = str(Path(sys.argv[1]).resolve())
     if not os.environ.get('CUL_CLICK_PRIVATE_BUS'):
-        # runtime/ is the server's runtime dir.
-        with socket_tempdir('cul-click-test-', [f'runtime/{INDICATOR_SOCKET}']) as tmp:
+        # runtime/ is the server's runtime dir and the private bus's.
+        with socket_tempdir('cul-click-test-', [f'runtime/{INDICATOR_SOCKET}'], bus_dir='runtime') as tmp:
             env = os.environ.copy()
             env.update(CUL_CLICK_PRIVATE_BUS='1', XDG_CONFIG_HOME=tmp+'/config', XDG_RUNTIME_DIR=tmp+'/runtime', GIO_USE_VFS='local', GVFS_DISABLE_FUSE='1', CU_DISABLE_ABS_POINTER='1', COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER='1', YDOTOOL_SOCKET=tmp+'/no-pointer.sock', XDG_SESSION_TYPE='x11', XDG_CURRENT_DESKTOP='Openbox')
             for key in ('AT_SPI_BUS_ADDRESS', 'WAYLAND_DISPLAY', 'GSETTINGS_BACKEND'):
                 env.pop(key, None)
             for folder in ('config', 'runtime'):
                 Path(tmp, folder).mkdir(mode=0o700)
-            session = subprocess.Popen(['dbus-run-session', '--', '/usr/bin/python3', __file__, binary], env=env, start_new_session=True)
+            # gsettings and AT-SPI start dconf and the a11y bus by activation;
+            # no other service can.
+            config = private_bus_config(Path(tmp, 'bus.conf'), Path(tmp, 'runtime'),
+                                        services=('ca.desrt.dconf', 'org.a11y.Bus'))
+            session = subprocess.Popen(['dbus-run-session', '--config-file', str(config), '--', '/usr/bin/python3', __file__, binary], env=env, start_new_session=True)
             try:
                 assert session.wait(timeout=90) == 0, 'private integration session failed'
             finally:

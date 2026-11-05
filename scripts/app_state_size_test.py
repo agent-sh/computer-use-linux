@@ -30,7 +30,7 @@ from contenteditable_focus_test import (  # noqa: E402
 
 import shutil  # noqa: E402
 
-from socket_fixture import INDICATOR_SOCKET, socket_tempdir  # noqa: E402
+from socket_fixture import INDICATOR_SOCKET, private_bus_config, socket_tempdir  # noqa: E402
 
 MEASURE_ONLY = bool(os.environ.get("CUL_338_MEASURE_ONLY"))
 
@@ -180,12 +180,15 @@ def main():
         return
     cache = Path.home() / ".cache"
     cache.mkdir(exist_ok=True)
-    # runtime/ is the server's runtime dir. The browser runs with TMPDIR set
-    # to the scratch and binds its singleton socket there.
+    # runtime/ is the server's runtime dir and the private bus's. The browser
+    # runs with TMPDIR set to the scratch and binds its singleton socket there.
     sockets = [f"runtime/{INDICATOR_SOCKET}", ".org.chromium.Chromium.XXXXXX/SingletonSocket"]
-    with socket_tempdir("cul-338-", sockets, dir=cache) as scratch:
+    with socket_tempdir("cul-338-", sockets, bus_dir="runtime", dir=cache) as scratch:
         runtime = Path(scratch) / "runtime"
         runtime.mkdir(mode=0o700)
+        # dconf and AT-SPI start by bus activation; no other service can.
+        config = private_bus_config(Path(scratch) / "bus.conf", runtime,
+                                    services=("ca.desrt.dconf", "org.a11y.Bus"))
         display = next(f":{n}" for n in range(190, 260) if not Path(f"/tmp/.X11-unix/X{n}").exists())
         xvfb = subprocess.Popen(["Xvfb", display, "-screen", "0", "1280x1024x24", "-nolisten", "tcp"],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -203,7 +206,8 @@ def main():
             while not Path(f"/tmp/.X11-unix/X{display[1:]}").exists():
                 assert time.monotonic() < deadline, "Xvfb did not start"
                 time.sleep(0.1)
-            session = subprocess.Popen(["dbus-run-session", "--", sys.executable, __file__, binary],
+            session = subprocess.Popen(["dbus-run-session", "--config-file", str(config), "--",
+                                        sys.executable, __file__, binary],
                                        env=env, start_new_session=True)
             try:
                 code = session.wait(timeout=300)
