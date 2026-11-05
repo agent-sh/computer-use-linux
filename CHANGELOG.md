@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The `editable_text_normalization_mismatch_is_not_verified` test accepts `ReadbackTimedOut` as well as `MismatchAfterDeadline`, like the two other mismatch tests. Its last poll can start just before the one-second deadline and still be reading when it passes. On a slow CI runner the test failed this way. Both outcomes leave the write unverified, and neither allows a replay.
+
 ## [0.7.47] - 2026-11-05
 
 ### Fixed
