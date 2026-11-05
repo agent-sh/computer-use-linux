@@ -32,6 +32,8 @@ class FakeMcpClient {
 	static instances: FakeMcpClient[] = [];
 	/** A binary path whose calls fail, as a mismatched server would. */
 	static failingBinary: string | undefined;
+	/** Aborted from inside the next call, as a user cancelling mid-call. */
+	static abortDuringCall: AbortController | undefined;
 	static result: {
 		content?: unknown[];
 		isError?: boolean;
@@ -55,6 +57,12 @@ class FakeMcpClient {
 		signal?: AbortSignal,
 	) {
 		this.calls.push({ name, args, signal });
+		const cancel = FakeMcpClient.abortDuringCall;
+		if (cancel) {
+			FakeMcpClient.abortDuringCall = undefined;
+			cancel.abort(new Error("cancelled by the user"));
+			throw cancel.signal.reason;
+		}
 		if (this.options.binaryPath === FakeMcpClient.failingBinary) {
 			throw new Error("computer-use-linux version 0.0.1 does not match");
 		}
@@ -139,6 +147,7 @@ describe("native Pi extension", () => {
 		vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
 		FakeMcpClient.instances = [];
 		FakeMcpClient.failingBinary = undefined;
+		FakeMcpClient.abortDuringCall = undefined;
 		FakeMcpClient.result = { content: [{ type: "text", text: "ok" }] };
 	});
 
@@ -676,6 +685,42 @@ describe("native Pi extension", () => {
 				`computer-use-linux-${process.platform}-${process.arch}`,
 			),
 		);
+	});
+
+	it("keeps a PATH fallback when its call is cancelled", async () => {
+		const packageRoot = stagePackageWithoutBinary();
+		const pathDir = join(agentDir, "path");
+		mkdirSync(pathDir);
+		const pathBinary = join(pathDir, "computer-use-linux");
+		writeFileSync(pathBinary, "#!/bin/sh\n");
+		chmodSync(pathBinary, 0o755);
+		vi.stubEnv("COMPUTER_USE_LINUX_BIN", "");
+		vi.stubEnv(
+			"COMPUTER_USE_LINUX_LOCAL_BINARY",
+			join(agentDir, "missing-release-binary"),
+		);
+		vi.stubEnv("PATH", pathDir);
+		const harness = createPi();
+		createComputerUseLinuxExtension({
+			packageRoot,
+			loadClientModule: () => ({
+				ComputerUseMcpClient: FakeMcpClient as never,
+			}),
+		})(harness.pi);
+		const doctor = harness.tools.get("computer_use_linux_doctor")!;
+		const controller = new AbortController();
+		FakeMcpClient.abortDuringCall = controller;
+
+		// The download fails; the PATH binary's call is cancelled midway.
+		await expect(
+			doctor.execute("one", {}, controller.signal, undefined, {} as never),
+		).rejects.toThrow(/^cancelled by the user$/);
+		expect(FakeMcpClient.instances[0]?.options.binaryPath).toBe(pathBinary);
+		expect(FakeMcpClient.instances[0]?.closed).toBe(0);
+
+		// A cancellation is not a mismatch: the next call reuses that client.
+		await doctor.execute("two", {}, undefined, undefined, {} as never);
+		expect(FakeMcpClient.instances).toHaveLength(1);
 	});
 
 	it("starts no download for a cancelled call", async () => {

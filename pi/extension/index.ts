@@ -707,10 +707,10 @@ export function createComputerUseLinuxExtension(
 		};
 
 		const getClient = async () => {
+			const started = session;
 			// The package binary appeared since the fallback was chosen.
 			if (launchIsFallback && findLocal()) await dropClient();
 			if (client) return client;
-			const started = session;
 			const resolved = await resolveLaunch();
 			if (session !== started) {
 				throw new Error("Pi session ended while computer-use-linux was being installed");

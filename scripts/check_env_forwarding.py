@@ -65,7 +65,6 @@ NOT_ENVIRONMENT = {
 # Variables the server reads that hosts are not expected to pass.
 NOT_PASSED = {
     "GTK_MODULES": "describes the desktop's apps; the server reads it from the compositor process when the host does not pass it",
-    "LC_": "prefix for run_shell's inherited locale; Codex passes LANG and LC_ALL, Pi passes every LC_ variable",
     "QT_LINUX_ACCESSIBILITY_ALWAYS_ON": "describes the desktop's apps; the server reads it from the compositor process when the host does not pass it",
     "WAYLAND_SOCKET": "a file descriptor a compositor hands to a process it starts; it does not survive an MCP host in between",
 }
@@ -74,7 +73,9 @@ NOT_PASSED = {
 PI_NOT_PASSED = {
     "COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE": "adds complete_interaction to tools/list, and the Pi client refuses a catalog that differs from its generated one",
 }
-CODEX_NOT_PASSED: dict[str, str] = {}
+CODEX_NOT_PASSED = {
+    "LC_": "prefix for run_shell's inherited locale; Codex passes LANG and LC_ALL only",
+}
 
 NAME = re.compile(r"[A-Z][A-Z0-9_]{2,}")
 TOKEN = re.compile(
@@ -133,20 +134,57 @@ def skip_attributes(toks: list[tuple[str, str]], index: int) -> int:
     return index
 
 
-# A #[cfg(test)] item runs to its closing brace or semicolon. Anything else
-# (a match arm, field, variant or statement) also ends at a comma at its own
-# level, or where the enclosing block closes.
+# What a #[cfg(test)] attribute covers, after any `pub` or `pub(...)`:
+# - a declaration (let, const, static, use, type) runs to its semicolon;
+# - another item (fn, mod, struct, impl, ...) runs to its closing brace or
+#   semicolon;
+# - anything else (a match arm, field, variant or expression) also ends at a
+#   comma at its own level, and at a closing brace unless the code goes on
+#   (`=>`, `.`, `?`, `else`, `as`).
+# All of them end where the enclosing block closes.
+DECLARATION_KEYWORDS = {"const", "let", "static", "type", "use"}
 ITEM_KEYWORDS = {
-    "async", "const", "enum", "extern", "fn", "impl", "let", "macro_rules",
-    "mod", "pub", "static", "struct", "trait", "type", "union", "unsafe", "use",
+    "async", "enum", "extern", "fn", "impl", "macro_rules", "mod", "struct",
+    "trait", "unsafe",
 }
 OPENERS = {"{", "(", "["}
 CLOSERS = {"}", ")", "]"}
+CONTINUES_AFTER_BRACE = {("punct", "."), ("punct", "?"), ("ident", "else"), ("ident", "as")}
+
+
+def skip_visibility(toks: list[tuple[str, str]], index: int) -> int:
+    if index < len(toks) and toks[index] == ("ident", "pub"):
+        index += 1
+        if index < len(toks) and toks[index] == ("punct", "("):
+            depth = 0
+            while index < len(toks):
+                if toks[index] == ("punct", "("):
+                    depth += 1
+                elif toks[index] == ("punct", ")"):
+                    depth -= 1
+                    if depth == 0:
+                        return index + 1
+                index += 1
+    return index
+
+
+def target_kind(toks: list[tuple[str, str]], index: int) -> str:
+    kind, value = toks[index] if index < len(toks) else ("", "")
+    if kind != "ident":
+        return "other"
+    if value in DECLARATION_KEYWORDS:
+        return "declaration"
+    if value in ITEM_KEYWORDS:
+        return "item"
+    # `union` is a keyword only before a name: `union U { ... }`.
+    if value == "union" and index + 1 < len(toks) and toks[index + 1][0] == "ident":
+        return "item"
+    return "other"
 
 
 def skip_cfg_test_target(toks: list[tuple[str, str]], index: int) -> int:
     """Index just past the code a #[cfg(test)] attribute at index applies to."""
-    item = index < len(toks) and toks[index][0] == "ident" and toks[index][1] in ITEM_KEYWORDS
+    kind_of_target = target_kind(toks, skip_visibility(toks, index))
     depth = 0
     while index < len(toks):
         kind, value = toks[index]
@@ -157,11 +195,15 @@ def skip_cfg_test_target(toks: list[tuple[str, str]], index: int) -> int:
                 if depth == 0:
                     return index
                 depth -= 1
-                if depth == 0 and value == "}":
-                    return index + 1
+                if depth == 0 and value == "}" and kind_of_target != "declaration":
+                    following = toks[index + 1:index + 3]
+                    goes_on = following[:1] and following[0] in CONTINUES_AFTER_BRACE
+                    arrow = following == [("punct", "="), ("punct", ">")]
+                    if kind_of_target == "item" or not (goes_on or arrow):
+                        return index + 1
             elif value == ";" and depth == 0:
                 return index + 1
-            elif value == "," and depth == 0 and not item:
+            elif value == "," and depth == 0 and kind_of_target == "other":
                 return index + 1
         index += 1
     return index
@@ -177,9 +219,10 @@ def scan(text: str) -> tuple[set[str], list[str]]:
         length = is_cfg_test(toks, index)
         if length:
             index = skip_attributes(toks, index + length)
-            if (index + 2 < len(toks) and toks[index] == ("ident", "mod")
-                    and toks[index + 2] == ("punct", ";")):
-                test_modules.append(toks[index + 1][1])
+            target = skip_visibility(toks, index)
+            if (target + 2 < len(toks) and toks[target] == ("ident", "mod")
+                    and toks[target + 2] == ("punct", ";")):
+                test_modules.append(toks[target + 1][1])
             index = skip_cfg_test_target(toks, index)
             continue
         kind, value = toks[index]
@@ -196,11 +239,18 @@ def scan(text: str) -> tuple[set[str], list[str]]:
 SELF_TEST = r"""
 //! "DOC_COMMENT_NAME" is skipped.
 const VERSION: &str = env!("BUILD_TIME_NAME");
-fn route(kind: Kind) -> Option<u8> {
+fn route(kind: Kind) -> Option<&'static str> {
     match kind {
         #[cfg(test)]
-        Kind::Fake(a, b) => None,
-        Kind::Real => std::env::var("AFTER_ARM_NAME").ok().map(|_| 1),
+        Kind::Fake(a, b) => Some("TEST_TUPLE_ARM_NAME"),
+        Kind::Real => std::env::var("AFTER_ARM_NAME").ok().map(|_| "x"),
+    }
+}
+fn struct_arm(event: Event) -> Option<&'static str> {
+    match event {
+        #[cfg(test)]
+        Event::Fake { name } => Some("TEST_STRUCT_ARM_NAME"),
+        Event::Real => std::env::var("AFTER_STRUCT_ARM_NAME").ok().map(|_| "x"),
     }
 }
 fn block_arm(kind: Kind) -> Option<u8> {
@@ -221,18 +271,30 @@ struct Last {
     #[cfg(test)]
     last: bool
 }
+struct Public {
+    #[cfg(test)]
+    pub(crate) fake: bool,
+    #[arg(env = "AFTER_PUB_FIELD_NAME")]
+    pub real: u8,
+}
 fn last_field() -> Option<String> { std::env::var("AFTER_LAST_FIELD_NAME").ok() }
 fn statement() -> Option<String> {
     #[cfg(test)]
     let _ = ("TEST_STATEMENT_NAME", 1);
+    #[cfg(test)]
+    let _ = if ready { "TEST_LET_IF_NAME" } else { "TEST_LET_ELSE_NAME" };
+    #[cfg(test)]
+    use std::{env, fs};
     let raw = r#"RAW_STRING_NAME"#;
     let _ = '"';
     std::env::var("AFTER_STATEMENT_NAME").ok()
 }
 #[cfg(test)]
-fn helper(a: u8, b: u8) -> &'static str { "TEST_FN_NAME" }
+fn helper<A, B>(a: A, b: B) -> &'static str where A: Copy, B: Copy { "TEST_FN_NAME" }
 #[cfg(test)]
 mod fixtures;
+#[cfg(test)]
+pub(crate) mod shared_fixtures;
 #[cfg(test)]
 mod tests {
     #[test]
@@ -245,13 +307,15 @@ fn last() -> Option<String> { std::env::var("LAST_NAME").ok() }
 def self_test() -> None:
     names, modules = scan(SELF_TEST)
     expected = {
-        "AFTER_ARM_NAME", "AFTER_BLOCK_ARM_NAME", "AFTER_FIELD_NAME", "AFTER_LAST_FIELD_NAME",
-        "AFTER_STATEMENT_NAME", "RAW_STRING_NAME", "LAST_NAME",
+        "AFTER_ARM_NAME", "AFTER_STRUCT_ARM_NAME", "AFTER_BLOCK_ARM_NAME", "AFTER_FIELD_NAME",
+        "AFTER_LAST_FIELD_NAME", "AFTER_PUB_FIELD_NAME", "AFTER_STATEMENT_NAME",
+        "RAW_STRING_NAME", "LAST_NAME",
     }
-    if names != expected or modules != ["fixtures"]:
+    expected_modules = ["fixtures", "shared_fixtures"]
+    if names != expected or modules != expected_modules:
         sys.exit(
             f"check_env_forwarding: scanner self-test failed: found {sorted(names)} and "
-            f"test modules {modules}, expected {sorted(expected)} and ['fixtures']"
+            f"test modules {modules}, expected {sorted(expected)} and {expected_modules}"
         )
 
 
@@ -279,7 +343,7 @@ def server_names() -> dict[str, list[str]]:
 
 def pi_names() -> set[str]:
     text = PI_EXTENSION.read_text()
-    match = re.search(r"const FORWARDED_ENVIRONMENT = \[(.*?)\]", text, re.DOTALL)
+    match = re.search(r"const FORWARDED_ENVIRONMENT = \[(.*?)\]\s*as const", text, re.DOTALL)
     if not match:
         sys.exit(f"check_env_forwarding: no FORWARDED_ENVIRONMENT list in {PI_EXTENSION.relative_to(ROOT)}")
     body = re.sub(r"//[^\n]*|/\*.*?\*/", "", match.group(1), flags=re.DOTALL)
@@ -336,7 +400,10 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"env forwarding ok: Pi and Codex pass the {len(required)} variables the server reads")
+    print(
+        f"env forwarding ok: the server reads {len(required)} variables; "
+        "Pi and Codex pass each one or list why not"
+    )
     return 0
 
 
