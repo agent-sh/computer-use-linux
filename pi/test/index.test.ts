@@ -30,6 +30,8 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 class FakeMcpClient {
 	static instances: FakeMcpClient[] = [];
+	/** A binary path whose calls fail, as a mismatched server would. */
+	static failingBinary: string | undefined;
 	static result: {
 		content?: unknown[];
 		isError?: boolean;
@@ -53,6 +55,9 @@ class FakeMcpClient {
 		signal?: AbortSignal,
 	) {
 		this.calls.push({ name, args, signal });
+		if (this.options.binaryPath === FakeMcpClient.failingBinary) {
+			throw new Error("computer-use-linux version 0.0.1 does not match");
+		}
 		return FakeMcpClient.result;
 	}
 
@@ -133,6 +138,7 @@ describe("native Pi extension", () => {
 		agentDir = mkdtempSync(join(tmpdir(), "computer-use-linux-pi-test-"));
 		vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
 		FakeMcpClient.instances = [];
+		FakeMcpClient.failingBinary = undefined;
 		FakeMcpClient.result = { content: [{ type: "text", text: "ok" }] };
 	});
 
@@ -623,6 +629,106 @@ describe("native Pi extension", () => {
 				.get("computer_use_linux_doctor")!
 				.execute("one", {}, undefined, undefined, {} as never),
 		).rejects.toThrow(/Downloading it failed: .*install\.js exited with status 1: .*missing-release-binary/);
+		expect(FakeMcpClient.instances).toHaveLength(0);
+	});
+
+	it("retries the download after a PATH fallback fails", async () => {
+		const packageRoot = stagePackageWithoutBinary();
+		const pathDir = join(agentDir, "path");
+		mkdirSync(pathDir);
+		const pathBinary = join(pathDir, "computer-use-linux");
+		writeFileSync(pathBinary, "#!/bin/sh\n");
+		chmodSync(pathBinary, 0o755);
+		FakeMcpClient.failingBinary = pathBinary;
+		vi.stubEnv("COMPUTER_USE_LINUX_BIN", "");
+		vi.stubEnv(
+			"COMPUTER_USE_LINUX_LOCAL_BINARY",
+			join(agentDir, "release-binary"),
+		);
+		vi.stubEnv("PATH", pathDir);
+		const harness = createPi();
+		createComputerUseLinuxExtension({
+			packageRoot,
+			loadClientModule: () => ({
+				ComputerUseMcpClient: FakeMcpClient as never,
+			}),
+		})(harness.pi);
+		const doctor = harness.tools.get("computer_use_linux_doctor")!;
+
+		// The download fails, so the mismatched PATH binary runs.
+		await expect(
+			doctor.execute("one", {}, undefined, undefined, {} as never),
+		).rejects.toThrow("does not match");
+		expect(FakeMcpClient.instances[0]?.options.binaryPath).toBe(pathBinary);
+		expect(FakeMcpClient.instances[0]?.closed).toBe(1);
+
+		// The download works now; the next call installs and uses it.
+		writeFileSync(join(agentDir, "release-binary"), "#!/bin/sh\n");
+		chmodSync(join(agentDir, "release-binary"), 0o755);
+		await doctor.execute("two", {}, undefined, undefined, {} as never);
+		expect(FakeMcpClient.instances[1]?.options.binaryPath).toBe(
+			join(
+				packageRoot,
+				"npm",
+				"bin",
+				`computer-use-linux-${process.platform}-${process.arch}`,
+			),
+		);
+	});
+
+	it("starts no download for a cancelled call", async () => {
+		const packageRoot = stagePackageWithoutBinary();
+		const release = join(agentDir, "release-binary");
+		writeFileSync(release, "#!/bin/sh\n");
+		chmodSync(release, 0o755);
+		vi.stubEnv("COMPUTER_USE_LINUX_BIN", "");
+		vi.stubEnv("COMPUTER_USE_LINUX_LOCAL_BINARY", release);
+		vi.stubEnv("PATH", join(agentDir, "empty-path"));
+		const harness = createPi();
+		createComputerUseLinuxExtension({
+			packageRoot,
+			loadClientModule: () => ({
+				ComputerUseMcpClient: FakeMcpClient as never,
+			}),
+		})(harness.pi);
+		const controller = new AbortController();
+		controller.abort(new Error("cancelled by the user"));
+
+		await expect(
+			harness.tools
+				.get("computer_use_linux_doctor")!
+				.execute("one", {}, controller.signal, undefined, {} as never),
+		).rejects.toThrow("cancelled by the user");
+		expect(existsSync(join(packageRoot, "npm", "bin"))).toBe(false);
+		expect(FakeMcpClient.instances).toHaveLength(0);
+	});
+
+	it("stops waiting for a download when the call is cancelled", async () => {
+		const packageRoot = join(agentDir, "package");
+		mkdirSync(join(packageRoot, "npm"), { recursive: true });
+		// An installer that is still downloading.
+		writeFileSync(
+			join(packageRoot, "npm", "install.js"),
+			"setTimeout(() => {}, 2000);\n",
+		);
+		vi.stubEnv("COMPUTER_USE_LINUX_BIN", "");
+		vi.stubEnv("PATH", join(agentDir, "empty-path"));
+		const harness = createPi();
+		createComputerUseLinuxExtension({
+			packageRoot,
+			loadClientModule: () => ({
+				ComputerUseMcpClient: FakeMcpClient as never,
+			}),
+		})(harness.pi);
+		const controller = new AbortController();
+		const call = harness.tools
+			.get("computer_use_linux_doctor")!
+			.execute("one", {}, controller.signal, undefined, {} as never);
+		const started = Date.now();
+		setTimeout(() => controller.abort(new Error("cancelled by the user")), 100);
+
+		await expect(call).rejects.toThrow("cancelled by the user");
+		expect(Date.now() - started).toBeLessThan(1500);
 		expect(FakeMcpClient.instances).toHaveLength(0);
 	});
 

@@ -361,6 +361,25 @@ function runInstaller(packageRoot: string): Promise<void> {
 	});
 }
 
+/** Settles with `promise`, or rejects with the signal's reason once it aborts. */
+function untilAborted<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+	if (!signal) return promise;
+	return new Promise((resolve, reject) => {
+		const onAbort = () => reject(signal.reason);
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(
+			(value) => {
+				signal.removeEventListener("abort", onAbort);
+				resolve(value);
+			},
+			(error) => {
+				signal.removeEventListener("abort", onAbort);
+				reject(error);
+			},
+		);
+	});
+}
+
 function defaultLoadClientModule(): NativeMcpClientModule {
 	return require("./mcp-client.bundle.cjs") as NativeMcpClientModule;
 }
@@ -648,10 +667,12 @@ export function createComputerUseLinuxExtension(
 		let enabledNativeTools = new Set<string>();
 		let install: Promise<string | undefined> | undefined;
 		let installFailure: string | undefined;
+		// True while the launch is a PATH binary taken because the package
+		// binary could not be downloaded. It may not match this extension.
+		let launchIsFallback = false;
 
 		// The package's binary comes before PATH, as after an install whose
-		// script ran: it matches this extension's catalog. A failed download
-		// falls back to PATH and is tried again on the next tool call.
+		// script ran: it matches this extension's catalog.
 		const resolveLaunch = async () => {
 			if (launch) return launch;
 			let resolved = findLocal();
@@ -665,12 +686,26 @@ export function createComputerUseLinuxExtension(
 				if (install === pending) install = undefined;
 				resolved = findLocal();
 			}
-			resolved ??= findOnPath();
+			launchIsFallback = false;
+			if (!resolved) {
+				resolved = findOnPath();
+				launchIsFallback = resolved !== null && installFailure !== undefined;
+			}
 			if (resolved) launch = resolved;
 			return resolved;
 		};
 
+		const dropClient = async () => {
+			const current = client;
+			client = undefined;
+			launch = undefined;
+			launchIsFallback = false;
+			await current?.close();
+		};
+
 		const getClient = async () => {
+			// The package binary appeared since the fallback was chosen.
+			if (launchIsFallback && findLocal()) await dropClient();
 			if (client) return client;
 			const resolved = await resolveLaunch();
 			if (client) return client;
@@ -697,6 +732,25 @@ export function createComputerUseLinuxExtension(
 			return client;
 		};
 
+		const callTool = async (
+			name: string,
+			args: Record<string, unknown>,
+			signal: AbortSignal | undefined,
+		) => {
+			// A cancelled call never starts a download. A call cancelled while
+			// one runs stops waiting; the download goes on for the next call.
+			signal?.throwIfAborted();
+			const active = await untilAborted(getClient(), signal);
+			try {
+				return await active.callTool(name, args, signal);
+			} catch (error) {
+				// A PATH binary taken after a failed download can be the wrong
+				// version. Drop it so the next call tries the download again.
+				if (launchIsFallback && client === active) await dropClient();
+				throw error;
+			}
+		};
+
 		for (const tool of AVAILABLE_MCP_TOOLS) {
 			const nativeName = `${TOOL_PREFIX}${tool.name}`;
 			pi.registerTool({
@@ -707,7 +761,7 @@ export function createComputerUseLinuxExtension(
 				outputSchema: NativeToolOutputSchema,
 				executionMode: "sequential",
 				async execute(_toolCallId, params, signal) {
-					const result = await (await getClient()).callTool(
+					const result = await callTool(
 						tool.name,
 						params as Record<string, unknown>,
 						signal,
