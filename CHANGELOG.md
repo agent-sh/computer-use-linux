@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Tools the server runs, such as `gsettings`, see the same environment under Codex as under Pi. The Codex plugin now passes `XDG_DATA_DIRS`, `XDG_CONFIG_HOME`, `GSETTINGS_SCHEMA_DIR`, `GIO_EXTRA_MODULES`, `GI_TYPELIB_PATH`, `LD_LIBRARY_PATH`, `NIX_LD`, `NIX_LD_LIBRARY_PATH`, `GDMSESSION`, `LANGUAGE` and `RUST_LOG`, and the env forwarding check fails when Codex drops a variable Pi passes.
 - Subcommands no longer ignore their flags. `setup --help` ran setup and wrote GNOME settings, `setup-window-targeting --help` installed and enabled the extension, `guard-accessibility --help` started the guard, which never exits, and `abs-test --help` clicked at 0,0. Every command now prints its own help on `-h` or `--help` and exits 0 without touching the desktop. `abs-test`, the development click probe, now needs integer X and Y.
 - Pi passes `COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND`, `COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP`, `COMPUTER_USE_LINUX_XDOTOOL_TYPE_DELAY_MS`, `NIRI_SOCKET`, `PIXELFLUX_CU` and `PIXELFLUX_CU_TOKEN` to the server. They did nothing under Pi.
 - Codex passes `COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND`, `COMPUTER_USE_LINUX_PORTAL_SCROLL_INVERT`, `PIXELFLUX_CU` and `PIXELFLUX_CU_TOKEN` to the server. They did nothing under Codex. A CI check now fails when the server reads a variable that the Pi extension or the Codex manifest does not pass.

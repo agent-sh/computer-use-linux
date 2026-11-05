@@ -12,7 +12,8 @@ counts as a variable the server may read. Each one must be passed by both
 hosts or be listed below with the reason it is not. Literals inside env! and
 option_env! are read at build time and are skipped, as are #[cfg(test)]
 items and modules. The Codex plugin launcher's variables must be in the Codex
-list too, since Codex starts the launcher.
+list too, since Codex starts the launcher. Codex must also pass everything Pi
+passes, so the tools the server runs see the same environment under both.
 
 The check sees names spelled out in this crate only. Variables read inside
 std (TMPDIR through env::temp_dir), dependencies, or the tools the server
@@ -389,6 +390,11 @@ def main() -> int:
 
     for name in sorted(launcher_names() - codex):
         errors.append(f"Codex does not pass {name}, which the plugin launcher reads; add it to env_vars in plugins/computer-use-linux/codex-mcp.json")
+
+    # The tools the server runs (gsettings, gdbus, ydotool, wtype) see the same
+    # environment under both hosts, so Codex passes everything Pi passes.
+    for name in sorted(pi - codex - CODEX_NOT_PASSED.keys()):
+        errors.append(f"Codex does not pass {name}, which Pi passes; add it to env_vars in plugins/computer-use-linux/codex-mcp.json")
 
     if errors:
         for error in errors:
