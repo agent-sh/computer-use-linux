@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.43] - 2026-11-05
+
 ### Fixed
 
 - `drag` results get the off-screen and monitor-gap warnings that `click` and `scroll` results get, one for each endpoint, naming the start or end coordinate. A drag used to get none on any route. On X11 and the uinput pointer it reported plain success when an endpoint off the screenshot had been moved to an edge. It did the same when an endpoint between monitors had landed at a monitor edge or on no visible pixel. A failed xdotool or ydotool drag on X11 gets no warning, as a failed click does.
@@ -1089,7 +1091,8 @@ pages; also bumps the MCP server's advertised version string to match.
 - Validated against GNOME 50.1 on Wayland (Ubuntu 25.10).
 - KDE / Sway / Hyprland untested — see README support matrix.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.42...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.43...HEAD
+[0.7.43]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.42...v0.7.43
 [0.7.42]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.41...v0.7.42
 [0.7.41]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.40...v0.7.41
 [0.7.40]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.39...v0.7.40
