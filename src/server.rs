@@ -2137,11 +2137,20 @@ impl ComputerUseLinux {
             if abs_pointer_ready {
                 let pointer = Arc::clone(&self.abs_pointer);
                 let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
-                    let landing =
-                        run_abs_pointer(pointer, move |pointer| pointer.move_to(x, y)).await?;
-                    sleep(Duration::from_millis(35)).await;
-                    run_ydotool(&wheel_mousemove_args(dx, dy)).await?;
-                    Ok(landing)
+                    // Move and wheel must come from the same device: a wheel
+                    // event sent through ydotool right after this device jumps
+                    // the cursor can be routed with a stale pointer position
+                    // and dropped, so the window never scrolls.
+                    run_abs_pointer(pointer, move |pointer| {
+                        let landing = pointer.move_to(x, y)?;
+                        // spawn_blocking context: a blocking sleep is fine, and
+                        // it keeps the settle delay that the old ydotool path
+                        // had between motion and wheel.
+                        std::thread::sleep(Duration::from_millis(35));
+                        pointer.wheel(dx, dy)?;
+                        Ok(landing)
+                    })
+                    .await
                 })
                 .await;
                 let _input_guard = input_guard;
@@ -9109,7 +9118,7 @@ fn abs_pointer_result(
                 implemented: true,
                 action: action.to_string(),
                 message: if action == "scroll" {
-                    "Pointer positioned through uinput; wheel input sent through ydotool."
+                    "Pointer positioned and wheel sent through the uinput absolute pointer."
                         .to_string()
                 } else {
                     "Action sent through the uinput absolute pointer.".to_string()
@@ -11364,7 +11373,14 @@ case "$*" in *"-- 5001 1301"*) echo "xdotool: test failure" >&2; exit 1 ;; esac
         let sent = if mode == "x11-monitor-gap" {
             "xdotool mousemove -- 3000 1200 click"
         } else {
-            "ydotool mousemove --wheel"
+            // The uinput route emits the wheel from the absolute pointer
+            // device itself, so no wheel command is spawned.
+            assert!(
+                !run.commands.contains("mousemove --wheel"),
+                "{mode}: {}",
+                run.commands
+            );
+            return;
         };
         assert!(run.commands.contains(sent), "{mode}: {}", run.commands);
     }
