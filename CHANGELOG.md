@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Snapshot handles. `get_app_state`, an `include_tree` observation and `get_tree_page` return the `snapshot_id` of their tree. `click`, `scroll`, `perform_action`, `set_value` and `get_tree_page` take it. The server caches one tree, and every new tree replaces it. A call that picks its element by `element_index` or selector and names a replaced snapshot is refused before any window is raised or input is sent. Before, an index from an older tree resolved silently in the newer one and could name another element: after an `include_tree` result, or when two clients share one server. Without `snapshot_id`, the element resolves in the latest tree, as before. An `element_identifier` names the AT-SPI object and is not checked. Each server process has its own id prefix, so an id from before a restart is refused. Thanks to [@berney](https://github.com/berney), whose listener proposal raised the two-client case ([#362](https://github.com/agent-sh/computer-use-linux/issues/362)).
+
 ### Fixed
 
 - A coordinate scroll on Wayland sends the wheel from the uinput absolute pointer, the device that moved the pointer. It used to move with uinput and send the wheel through ydotool's own device 35 ms later. GNOME then routed the wheel to a stale pointer position, and XWayland windows such as WeChat never scrolled while the call reported success. The route no longer needs a ydotool daemon. Thanks to [@ClarkYWHsu](https://github.com/ClarkYWHsu) for the diagnosis and the fix ([#433](https://github.com/agent-sh/computer-use-linux/pull/433)).

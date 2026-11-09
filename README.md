@@ -66,7 +66,7 @@ The crate was extracted from [`codex-desktop-linux`](https://github.com/avifenes
 | | `setup_accessibility` | Enables and verifies GNOME's `org.gnome.desktop.interface toolkit-accessibility` setting so toolkit apps expose AT-SPI trees. |
 | | `setup_window_targeting` | Installs and enables the bundled GNOME Shell extension. GNOME Wayland needs it for exact window activation and move/resize; every GNOME session needs it for the on-screen indicator. |
 | **Discovery & observation** | `get_app_state` | Combined screenshot + compacted AT-SPI accessibility tree with stable `element_index` handles. Scope with `app_name_or_bundle_identifier` or a window target (`window_id`, `pid`, `app_id`, `wm_class`, `title`). |
-| | `get_tree_page` | Page through the latest cached tree by node offset, for trees too large to return inline when the host cannot read the spill file. |
+| | `get_tree_page` | Page through the latest cached tree by node offset, for trees too large to return inline when the host cannot read the spill file. Pass `snapshot_id` to refuse a page from a tree a later snapshot replaced. |
 | | `screenshot` | Bounded PNG or JPEG capture of the full desktop (`full_screen: true` or no target) or a raised and cropped target window (`window_id`, `pid`, `app_id`, `wm_class`, `title`, `raise_window`). |
 | | `list_windows` | Compositor windows with `window_id`, title, `app_id`, `wm_class`, PID, focus state, client type (`wayland`/`x11`), bounds, and terminal TTY/process metadata. |
 | | `focused_window` | The window currently holding keyboard focus. |
@@ -83,6 +83,8 @@ The crate was extracted from [`codex-desktop-linux`](https://github.com/avifenes
 | **Opt-in host tools** | `complete_interaction` | Parameter-free desktop completion notification (`notify-send`); registered only when `COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE=1`. |
 | | `run_shell` | Bounded non-login `/bin/sh -c` execution; registered only when `COMPUTER_USE_LINUX_ENABLE_SHELL=1` (absent by default). |
 
+Every tree result carries a `snapshot_id`: `get_app_state`, an `include_tree` observation, and `get_tree_page`. The server caches one tree, and each new tree replaces it. Pass the `snapshot_id` with an `element_index` or selector to `click`, `scroll`, `perform_action`, `set_value` or `get_tree_page`: if a later tree replaced that snapshot, the call is refused before any window is raised or input is sent, since the index could name another element by then. Without `snapshot_id`, the element resolves in the latest tree. An `element_identifier` names the AT-SPI object itself and is not checked against a snapshot. Ids differ between server processes, so an id from before a restart is refused.
+
 `click`, `scroll`, `perform_action`, and `set_value` take an optional app target (`pid`, `window_id`, `app_id`, `wm_class`, `window_title`). With one, an `element_index` or selector from another app's `get_app_state` snapshot is refused; call `get_app_state` for the target app first. When the window backend reports no pid for a target window (i3 without `xprop`, COSMIC, other wlroots compositors), the snapshot must have been taken for that window, or the call is refused. `perform_action` and `set_value` do not focus the target window. An `element_identifier` is refused when its owner on the accessibility bus is a different pid than the target; it is not checked when either pid is unknown.
 
 ### Post-action observation in one round trip
@@ -91,7 +93,7 @@ All mutating tools (`click`, `drag`, `scroll`, `press_key`, `type_text`, `perfor
 
 - `screenshot_after: true | "screen" | "window" | false`: capture after the action is dispatched and the indicator overlay is hidden (`true` or `"screen"` for full desktop, `"window"` cropped to the action's target window or the focused window when untargeted)
 - `format`, `quality`, `scale`, `max_width`, `max_height`, `max_bytes`: same screenshot payload controls as `screenshot` and `get_app_state`
-- `include_tree: true`: include a fresh compacted AT-SPI accessibility tree and update cached `element_index` values
+- `include_tree: true`: include a fresh compacted AT-SPI accessibility tree and its `snapshot_id`; it replaces the cached tree, so later `element_index` values come from it
 
 When post-action screenshot capture succeeds, the image is returned as the first MCP `image` content block alongside the JSON action summary and `screenshot` metadata. If the action succeeds (`ok: true`) and only the post-action screenshot or tree capture fails, `ok` remains `true` and the error is reported in `screenshot_error` / `accessibility_error` and appended to `message`.
 

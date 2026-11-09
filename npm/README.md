@@ -163,6 +163,12 @@ does not yet forward the flag or include the tool in its catalog.
 
 ## Input & coordinate contracts
 
+- **Snapshot ids**: `get_app_state`, `include_tree` observations and
+  `get_tree_page` return the `snapshot_id` of their tree. The server caches
+  one tree, and each new tree replaces it. Pass `snapshot_id` with an
+  `element_index` or selector to `click`, `scroll`, `perform_action`,
+  `set_value` or `get_tree_page`: a call naming a replaced snapshot is refused
+  before any input. Without it, the element resolves in the latest tree.
 - **Element targets**: `click`, `scroll`, `perform_action`, and `set_value`
   accept an optional app target (`pid`, `window_id`, `app_id`, `wm_class`,
   `window_title`). With one, an `element_index` or selector from another app's

@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.47";
-export const GENERATED_TOOL_CATALOG_HASH = "5220d9a11046797491e8899ea59c66d1d5d450c1457086867d8ae9784c297acd";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "5cb7f910f9317b8b249fad1b994f1d771bd0854ddcad3a9b1f4b040ed2c050b5";
+export const GENERATED_TOOL_CATALOG_HASH = "9af110d1e3ae1e4ea62c1477b69d90df39a2da037adf44f36945b2ae1216a52c";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "0170cb6b7da3a49b88a9ca0ceea364050470bd7ccc92d16ca9926f3323274170";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -366,6 +366,14 @@ export const GENERATED_MCP_TOOLS =
           ],
           "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
         },
+        "snapshot_id": {
+          "default": null,
+          "description": "snapshot_id of the get_app_state or include_tree result the\nelement_index or selector comes from. If a later snapshot replaced\nit, the call is refused before any input. Without it, the element\nresolves in the latest snapshot.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "states": {
           "default": [],
           "description": "AT-SPI states the element must all have, case-insensitive (for\nexample focused, checked).",
@@ -594,7 +602,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "Get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Nodes are compact (empty fields left out, actions by name; verbose=true returns every field). Pass interactive_only=true for only actionable nodes, headings and status regions, with the same element_index values. A title or window_id target narrows an app with several windows under one AT-SPI root (Chromium) to that window, keeping the app's popups and dialogs. A window-targeted screenshot needs that window visible and already focused (outside Hyprland background mode); otherwise screenshot_error is set and the tree still returns, so use the screenshot tool to raise and capture it. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. Screenshot results always include coordinate_width, coordinate_height, scale, and format, plus quality for jpeg; callers can request jpeg/quality for compression before resizing.",
+    "description": "Get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Nodes are compact (empty fields left out, actions by name; verbose=true returns every field). Pass interactive_only=true for only actionable nodes, headings and status regions, with the same element_index values. A title or window_id target narrows an app with several windows under one AT-SPI root (Chromium) to that window, keeping the app's popups and dialogs. A window-targeted screenshot needs that window visible and already focused (outside Hyprland background mode); otherwise screenshot_error is set and the tree still returns, so use the screenshot tool to raise and capture it. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. The result's snapshot_id names the tree: element_index and selector actions that pass it are refused once a later tree replaced it. Screenshot results always include coordinate_width, coordinate_height, scale, and format, plus quality for jpeg; callers can request jpeg/quality for compression before resizing.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -803,7 +811,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "Return a page of the accessibility tree from the latest get_app_state or include_tree snapshot, starting at node offset (default 0). Use it when a tree was too large to return inline (accessibility_tree_spill is set) and the host cannot read the spill file; page with next_offset until it is null. Element indices match the snapshot, so element_index actions work on these nodes. It does not read the desktop again.",
+    "description": "Return a page of the accessibility tree from the latest get_app_state or include_tree snapshot, starting at node offset (default 0). Use it when a tree was too large to return inline (accessibility_tree_spill is set) and the host cannot read the spill file; page with next_offset until it is null. Element indices match the snapshot, so element_index actions work on these nodes. Pass the snapshot's snapshot_id to refuse a page from a tree a later snapshot replaced. It does not read the desktop again.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -813,6 +821,14 @@ export const GENERATED_MCP_TOOLS =
           "minimum": 0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "snapshot_id": {
+          "default": null,
+          "description": "snapshot_id of the get_app_state or include_tree result being paged.\nIf a later snapshot replaced it, no nodes are returned.",
+          "type": [
+            "string",
             "null"
           ]
         }
@@ -1195,6 +1211,14 @@ export const GENERATED_MCP_TOOLS =
             }
           ],
           "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
+        },
+        "snapshot_id": {
+          "default": null,
+          "description": "snapshot_id of the get_app_state or include_tree result the\nelement_index or selector comes from. If a later snapshot replaced\nit, the call is refused before any input. Without it, the element\nresolves in the latest snapshot.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "states": {
           "default": [],
@@ -1908,6 +1932,14 @@ export const GENERATED_MCP_TOOLS =
           ],
           "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
         },
+        "snapshot_id": {
+          "default": null,
+          "description": "snapshot_id of the get_app_state or include_tree result the\nelement_index or selector comes from. If a later snapshot replaced\nit, the call is refused before any input. Without it, the element\nresolves in the latest snapshot.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "window_id": {
           "default": null,
           "description": "Window id from a recent list_windows. The first target field set\ndecides, in this order: window_id, pid, app_id, wm_class, window_title.",
@@ -2106,6 +2138,14 @@ export const GENERATED_MCP_TOOLS =
             }
           ],
           "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
+        },
+        "snapshot_id": {
+          "default": null,
+          "description": "snapshot_id of the get_app_state or include_tree result the\nelement_index or selector comes from. If a later snapshot replaced\nit, the call is refused before any input. Without it, the element\nresolves in the latest snapshot.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "states": {
           "default": [],
