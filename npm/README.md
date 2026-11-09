@@ -170,11 +170,11 @@ does not yet forward the flag or include the tool in its catalog.
   `perform_action` or `set_value`, and to `get_tree_page`: a call naming a
   replaced snapshot is refused before any input. Without it, the element
   resolves in the latest tree. A full capture-space `x`/`y` point is not
-  checked; a `coordinate_space: "atspi"` click is.
+  checked; a `coordinate_space: "atspi"` click is checked.
 - **Element targets**: `click`, `scroll`, `perform_action`, and `set_value`
   accept an optional app target (`pid`, `window_id`, `app_id`, `wm_class`,
-  `window_title`). With one, an `element_index` or selector from another app's
-  `get_app_state` snapshot is refused. When the window backend reports no pid
+  `window_title`). With one, an `element_index` (or a selector, where the
+  tool takes one) from another app's `get_app_state` snapshot is refused. When the window backend reports no pid
   for the target window (i3 without `xprop`, COSMIC, other wlroots compositors),
   the snapshot must have been taken for that window. `perform_action` and
   `set_value` do not focus the window; an `element_identifier` is refused only
