@@ -2041,12 +2041,7 @@ impl ComputerUseLinux {
             }
             None => self.indicator.action("scroll").await,
         }
-        let (dx, dy) = match direction {
-            ScrollDirection::Up => (0, units),
-            ScrollDirection::Down => (0, -units),
-            ScrollDirection::Left => (units, 0),
-            ScrollDirection::Right => (-units, 0),
-        };
+        let (dx, dy) = wheel_deltas(direction, units);
         // Element centres are AT-SPI logical points; pixelflux wants capture pixels.
         let pixelflux_point = match (params.x.zip(params.y), params.element_index) {
             (None, Some(index)) if crate::pixelflux::PixelfluxConfig::from_env().is_some() => {
@@ -2117,23 +2112,23 @@ impl ComputerUseLinux {
         }
         // Coordinate scroll needs the same accurate positioning as click. Keep
         // the move and wheel event under one cancellation-safe input guard.
+        // The device sends both, so this route needs no ydotool daemon.
         if let Some((x, y)) = target_point {
-            let abs_pointer_ready =
-                if self.is_wayland_session() && ydotool_backend_available().await {
-                    match self.ensure_abs_pointer().await {
-                        Ok(ready) => ready,
-                        Err(failure) => {
-                            return Json(abs_pointer_not_sent(
-                                "scroll",
-                                &failure,
-                                self.pointer_retry_route().await,
-                                received,
-                            ))
-                        }
+            let abs_pointer_ready = if self.is_wayland_session() {
+                match self.ensure_abs_pointer().await {
+                    Ok(ready) => ready,
+                    Err(failure) => {
+                        return Json(abs_pointer_not_sent(
+                            "scroll",
+                            &failure,
+                            self.pointer_retry_route().await,
+                            received,
+                        ))
                     }
-                } else {
-                    false
-                };
+                }
+            } else {
+                false
+            };
             if abs_pointer_ready {
                 let pointer = Arc::clone(&self.abs_pointer);
                 let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
@@ -3205,7 +3200,7 @@ impl ComputerUseLinux {
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
     version = "0.7.47",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If readiness reports can_query_windows or can_focus_windows false on GNOME, call setup_window_targeting to install the GNOME Shell extension, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend captures size-bounded screenshots (pixelflux when configured, GNOME Shell, the XDG portal, native X11, gnome-screenshot; grim in Hyprland background mode), reads AT-SPI trees with action/value metadata, invokes native AT-SPI actions, sets AT-SPI values or editable text, lists and focuses compositor windows through registered Linux window backends when the session permits it, and attaches best-effort terminal tty/process metadata to terminal windows. Click, scroll and drag try pixelflux when configured, xdotool on native X11, the uinput pointer, the RemoteDesktop portal (an open portal session, or when ydotool is absent, on COSMIC, or when forced), then ydotool outside Wayland. On Wayland a point never goes through ydotool: without uinput or the portal a coordinate action is refused; a coordinate scroll moves the uinput pointer and sends only the wheel through ydotool. The uinput pointer is sized to the latest full screenshot; take a new one after the desktop size changes. type_text sends literal text through pixelflux when configured (an unreachable pixelflux falls through), KDE clipboard paste on Plasma Wayland (raw ydotool when Klipper cannot be read), wtype on compatible Wayland compositors, portal keysyms on other Wayland sessions, or xdotool on X11. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Mutating tools (click, type_text, press_key, scroll, drag, perform_action, set_value, activate_window, move_window, resize_window) accept optional screenshot_after (true, \"screen\", or \"window\") with format/quality/scale/max_width/max_height/max_bytes and optional include_tree=true to return post-action observation in the same tool call. A failed action returns no observation, except set_value with verified=false. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable); type_text also warns when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype passes classified nonsecret text as one literal argument after -- to avoid stdin keymap-refresh corruption; that text is visible in process arguments, so confirmed password fields are rejected (use set_value), and terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call (split larger input or expose accessibility). Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. X11 xdotool can silently substitute symbols under non-US XKB layouts (reported with br/ABNT2) or changing keymap state; inspect the text before pressing Enter or submitting it. A successful type_text result confirms dispatch only; every text backend leaves field contents unverified. Re-observe the target before retrying. Screenshot, keyboard and move/resize results warn when the target window is partly or fully off-screen; click, scroll and drag results warn when a coordinate is off the screenshot or between monitors (not through pixelflux, and not for KWin element clicks, which KWin maps onto an output). move_window and resize_window, which bring a window back on-screen, work only through the GNOME Shell extension or X11/EWMH (wmctrl). scroll accepts the same window targeting and relative coordinates as click; on both, a window target is raised and focused first, and nothing is sent when focus cannot be verified. get_app_state returns a compact readiness block and compact tree nodes (null, empty and default fields left out, actions listed by name) by default; pass verbose=true for the full diagnostics dump and full nodes. Pass interactive_only=true to get only nodes with an action, editable text or a value, plus headings, status/live regions, windows and dialogs; containers are collapsed and element_index values match the full tree. A title or window_id target narrows an app that exposes several windows under one AT-SPI application root (Chromium) to that window's subtree, keeping the app's popups and dialogs. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, read, or time budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 10000 and 64), not by lowering max_nodes. A compacted tree too large to return inline comes back as its leading nodes plus accessibility_tree_spill.path, a private JSON file with the whole tree and the same element_index values; search that file instead of requesting the tree again, or page through it with get_tree_page when files are not readable. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content."
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If readiness reports can_query_windows or can_focus_windows false on GNOME, call setup_window_targeting to install the GNOME Shell extension, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend captures size-bounded screenshots (pixelflux when configured, GNOME Shell, the XDG portal, native X11, gnome-screenshot; grim in Hyprland background mode), reads AT-SPI trees with action/value metadata, invokes native AT-SPI actions, sets AT-SPI values or editable text, lists and focuses compositor windows through registered Linux window backends when the session permits it, and attaches best-effort terminal tty/process metadata to terminal windows. Click, scroll and drag try pixelflux when configured, xdotool on native X11, the uinput pointer, the RemoteDesktop portal (an open portal session, or when ydotool is absent, on COSMIC, or when forced), then ydotool outside Wayland. On Wayland a point never goes through ydotool: without uinput or the portal a coordinate action is refused; a coordinate scroll sends the move and the wheel through the uinput pointer. The uinput pointer is sized to the latest full screenshot; take a new one after the desktop size changes. type_text sends literal text through pixelflux when configured (an unreachable pixelflux falls through), KDE clipboard paste on Plasma Wayland (raw ydotool when Klipper cannot be read), wtype on compatible Wayland compositors, portal keysyms on other Wayland sessions, or xdotool on X11. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Mutating tools (click, type_text, press_key, scroll, drag, perform_action, set_value, activate_window, move_window, resize_window) accept optional screenshot_after (true, \"screen\", or \"window\") with format/quality/scale/max_width/max_height/max_bytes and optional include_tree=true to return post-action observation in the same tool call. A failed action returns no observation, except set_value with verified=false. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable); type_text also warns when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype passes classified nonsecret text as one literal argument after -- to avoid stdin keymap-refresh corruption; that text is visible in process arguments, so confirmed password fields are rejected (use set_value), and terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call (split larger input or expose accessibility). Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. X11 xdotool can silently substitute symbols under non-US XKB layouts (reported with br/ABNT2) or changing keymap state; inspect the text before pressing Enter or submitting it. A successful type_text result confirms dispatch only; every text backend leaves field contents unverified. Re-observe the target before retrying. Screenshot, keyboard and move/resize results warn when the target window is partly or fully off-screen; click, scroll and drag results warn when a coordinate is off the screenshot or between monitors (not through pixelflux, and not for KWin element clicks, which KWin maps onto an output). move_window and resize_window, which bring a window back on-screen, work only through the GNOME Shell extension or X11/EWMH (wmctrl). scroll accepts the same window targeting and relative coordinates as click; on both, a window target is raised and focused first, and nothing is sent when focus cannot be verified. get_app_state returns a compact readiness block and compact tree nodes (null, empty and default fields left out, actions listed by name) by default; pass verbose=true for the full diagnostics dump and full nodes. Pass interactive_only=true to get only nodes with an action, editable text or a value, plus headings, status/live regions, windows and dialogs; containers are collapsed and element_index values match the full tree. A title or window_id target narrows an app that exposes several windows under one AT-SPI application root (Chromium) to that window's subtree, keeping the app's popups and dialogs. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, read, or time budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 10000 and 64), not by lowering max_nodes. A compacted tree too large to return inline comes back as its leading nodes plus accessibility_tree_spill.path, a private JSON file with the whole tree and the same element_index values; search that file instead of requesting the tree again, or page through it with get_tree_page when files are not readable. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content."
 )]
 impl ServerHandler for ComputerUseLinux {}
 
@@ -9609,6 +9604,20 @@ where
     }
 }
 
+/// Wheel notches for a scroll in the kernel's signs: `REL_WHEEL` is positive
+/// up and `REL_HWHEEL` is positive right. libinput negates only the vertical
+/// axis, so these signs hold for any device. Both wheel routes send them
+/// unchanged: the uinput pointer writes them, and `ydotool mousemove --wheel`
+/// writes its x to `REL_HWHEEL` and its y to `REL_WHEEL`.
+fn wheel_deltas(direction: ScrollDirection, units: i32) -> (i32, i32) {
+    match direction {
+        ScrollDirection::Up => (0, units),
+        ScrollDirection::Down => (0, -units),
+        ScrollDirection::Left => (-units, 0),
+        ScrollDirection::Right => (units, 0),
+    }
+}
+
 fn wheel_mousemove_args(dx: i32, dy: i32) -> Vec<String> {
     vec![
         "mousemove".to_string(),
@@ -11279,6 +11288,25 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
         assert!(!run.captured);
     }
 
+    /// A coordinate scroll on Wayland sends the move and the wheel through
+    /// the uinput pointer in kernel signs, with no ydotool daemon running.
+    #[test]
+    fn uinput_scroll_sends_kernel_signed_wheel_without_ydotool() {
+        let harness = PointerChildHarness::new("cul-uinput-scroll");
+        let missing_socket = harness.dir.join("missing.sock");
+        let run = harness.run(
+            "server::tests::pointer_dispatch_child",
+            "uinput-scroll-direction",
+            |command| {
+                command
+                    .env("CU_DISABLE_ABS_POINTER", "0")
+                    .env("YDOTOOL_SOCKET", &missing_socket);
+            },
+        );
+        assert!(!run.captured);
+        assert!(run.commands.is_empty(), "{}", run.commands);
+    }
+
     /// A uinput device sized for an earlier desktop is not reused: the
     /// compositor spreads its range across the current layout, so every
     /// point would land scaled and its result would carry no note (#389).
@@ -11600,6 +11628,41 @@ case "$*" in *"-- 5001 1301"*) echo "xdotool: test failure" >&2; exit 1 ;; esac
                         .contains("Requested coordinate 2500,500 was clamped to 1919,500"),
                     "{}",
                     result.message
+                );
+            }
+            "uinput-scroll-direction" => {
+                use crate::abs_pointer::{tests::RecordedEvents, AbsPointer};
+                use evdev::RelativeAxisCode;
+                let events = RecordedEvents::default();
+                backend.cache_desktop_size(1920, 1080);
+                *backend.abs_pointer.lock().unwrap() =
+                    Some(AbsPointer::with_events(events.clone(), 1920, 1080));
+                for direction in ["left", "right", "up", "down"] {
+                    let scroll: ScrollParams = serde_json::from_value(
+                        serde_json::json!({"x":500,"y":400,"direction":direction}),
+                    )
+                    .unwrap();
+                    let result = backend.dispatch_scroll(scroll).await.0;
+                    assert!(result.ok, "{direction}: {}", result.message);
+                    assert_eq!(
+                        result.message,
+                        "Pointer positioned and wheel sent through the uinput absolute pointer."
+                    );
+                }
+                // Each wheel call writes both axes; the unused one is 0.
+                let wheel: Vec<(u16, i32)> = events
+                    .wheel_events()
+                    .into_iter()
+                    .filter(|(_, value)| *value != 0)
+                    .collect();
+                assert_eq!(
+                    wheel,
+                    [
+                        (RelativeAxisCode::REL_HWHEEL.0, -5),
+                        (RelativeAxisCode::REL_HWHEEL.0, 5),
+                        (RelativeAxisCode::REL_WHEEL.0, 5),
+                        (RelativeAxisCode::REL_WHEEL.0, -5),
+                    ]
                 );
             }
             "x11-monitor-gap" | "uinput-monitor-gap" => {
@@ -15357,6 +15420,16 @@ esac
             xdotool_scroll_timeout(0, 12),
             INPUT_COMMAND_TIMEOUT + Duration::from_millis(12)
         );
+    }
+
+    /// Left is a negative `REL_HWHEEL`, as on the portal route and X11
+    /// button 6. Left used to be positive, a scroll right.
+    #[test]
+    fn wheel_deltas_use_kernel_signs() {
+        assert_eq!(wheel_deltas(ScrollDirection::Up, 5), (0, 5));
+        assert_eq!(wheel_deltas(ScrollDirection::Down, 5), (0, -5));
+        assert_eq!(wheel_deltas(ScrollDirection::Left, 5), (-5, 0));
+        assert_eq!(wheel_deltas(ScrollDirection::Right, 5), (5, 0));
     }
 
     #[test]

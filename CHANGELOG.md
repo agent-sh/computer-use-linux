@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A coordinate scroll on Wayland sends the wheel from the uinput absolute pointer, the device that moved the pointer. It used to move with uinput and send the wheel through ydotool's own device 35 ms later. GNOME then routed the wheel to a stale pointer position, and XWayland windows such as WeChat never scrolled while the call reported success. The route no longer needs a ydotool daemon. Thanks to [@ClarkYWHsu](https://github.com/ClarkYWHsu) for the diagnosis and the fix ([#433](https://github.com/agent-sh/computer-use-linux/pull/433)).
+- `direction: "left"` and `"right"` scroll the way they say on the uinput and ydotool routes. Both sent left as a positive `REL_HWHEEL`, which the kernel and libinput read as a scroll right. The portal and X11 routes were already right ([#433](https://github.com/agent-sh/computer-use-linux/pull/433)).
 - The `editable_text_normalization_mismatch_is_not_verified` test accepts `ReadbackTimedOut` as well as `MismatchAfterDeadline`, like the two other mismatch tests. Its last poll can start just before the one-second deadline and still be reading when it passes. On a slow CI runner the test failed this way. Both outcomes leave the write unverified, and neither allows a replay.
 
 ## [0.7.47] - 2026-11-05

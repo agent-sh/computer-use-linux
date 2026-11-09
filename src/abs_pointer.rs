@@ -380,6 +380,17 @@ pub(crate) mod tests {
                 .map(|(_, code, value)| (*code, *value))
                 .collect()
         }
+
+        /// The wheel events (`EV_REL`) seen so far, as `(code, value)`.
+        pub(crate) fn wheel_events(&self) -> Vec<(u16, i32)> {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(kind, _, _)| *kind == EventType::RELATIVE.0)
+                .map(|(_, code, value)| (*code, *value))
+                .collect()
+        }
     }
 
     impl PointerEvents for RecordedEvents {
@@ -480,16 +491,8 @@ pub(crate) mod tests {
 
         pointer.wheel(2, -3).unwrap();
 
-        let wheel: Vec<(u16, i32)> = events
-            .events
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(kind, _, _)| *kind == EventType::RELATIVE.0)
-            .map(|(_, code, value)| (*code, *value))
-            .collect();
         assert_eq!(
-            wheel,
+            events.wheel_events(),
             [
                 (RelativeAxisCode::REL_HWHEEL.0, 2),
                 (RelativeAxisCode::REL_WHEEL.0, -3),

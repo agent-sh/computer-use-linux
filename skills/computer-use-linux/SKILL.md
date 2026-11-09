@@ -81,7 +81,7 @@ computer-use-linux setup-window-targeting
 computer-use-linux doctor | jq .readiness
 ```
 
-If `doctor` selects ydotool as the input backend, also enable its per-user daemon. `./install.sh` creates `ydotoold.service`; Ubuntu's ydotool package ships `ydotool.service` instead (`systemctl --user enable --now ydotool`). Direct uinput, X11 xdotool, and RemoteDesktop portal input do not require `ydotoold`, but a Wayland scroll at a point needs ydotool for the wheel, or the portal.
+If `doctor` selects ydotool as the input backend, also enable its per-user daemon. `./install.sh` creates `ydotoold.service`; Ubuntu's ydotool package ships `ydotool.service` instead (`systemctl --user enable --now ydotool`). Direct uinput, X11 xdotool, and RemoteDesktop portal input do not require `ydotoold`. On Wayland, ydotool sends only untargeted scrolls; a scroll at a point goes through uinput or the portal, and without the daemon an untargeted scroll goes through the portal too.
 
 On niri, the server reads `NIRI_SOCKET` from its parent processes or the systemd
 user environment when the host does not pass it; without it, discovery needs an
