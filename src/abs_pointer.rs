@@ -38,6 +38,40 @@ pub(crate) struct DragLanding {
     pub(crate) end: PointerLanding,
 }
 
+/// The buttons, wheel axes and properties the device declares next to its
+/// absolute X/Y axes.
+struct DeviceCapabilities {
+    keys: AttributeSet<KeyCode>,
+    relative_axes: AttributeSet<RelativeAxisCode>,
+    props: AttributeSet<PropType>,
+}
+
+impl DeviceCapabilities {
+    fn new() -> Self {
+        Self {
+            keys: AttributeSet::from_iter([
+                KeyCode::BTN_LEFT,
+                KeyCode::BTN_RIGHT,
+                KeyCode::BTN_MIDDLE,
+            ]),
+            // Wheel axes keep scroll events on the same device as the motion
+            // that positioned the pointer. A wheel sent through ydotool's
+            // device right after this one jumped the cursor can be routed
+            // with a stale pointer position and dropped. The kernel drops
+            // events for codes a device did not declare, so a wheel without
+            // these axes would be dropped silently too.
+            relative_axes: AttributeSet::from_iter([
+                RelativeAxisCode::REL_WHEEL,
+                RelativeAxisCode::REL_HWHEEL,
+            ]),
+            // INPUT_PROP_DIRECT marks the device as a direct (absolute)
+            // pointer so libinput maps its axes to screen coordinates rather
+            // than treating it as a relative touchpad.
+            props: AttributeSet::from_iter([PropType::DIRECT]),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct AbsPointerGeometry {
     max_x: i32,
@@ -104,21 +138,11 @@ impl AbsPointer {
             UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, AbsInfo::new(0, 0, max_x, 0, 0, 1));
         let abs_y =
             UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, AbsInfo::new(0, 0, max_y, 0, 0, 1));
-        let keys =
-            AttributeSet::from_iter([KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE]);
-        // Wheel axes keep scroll events on the same device as the motion that
-        // positioned the pointer. Compositors route a wheel event from one
-        // device using the pointer position last reported by that device (or
-        // an as-yet-unpropagated position from another), so a wheel sent
-        // through ydotool right after this device jumps the cursor can land
-        // on a stale position and be dropped. Emitting motion and wheel from
-        // one device keeps them ordered and routed to the same point.
-        let relative_axes =
-            AttributeSet::from_iter([RelativeAxisCode::REL_WHEEL, RelativeAxisCode::REL_HWHEEL]);
-        // INPUT_PROP_DIRECT marks the device as a direct (absolute) pointer so
-        // libinput maps its axes to screen coordinates rather than treating it
-        // as a relative touchpad.
-        let props = AttributeSet::from_iter([PropType::DIRECT]);
+        let DeviceCapabilities {
+            keys,
+            relative_axes,
+            props,
+        } = DeviceCapabilities::new();
 
         let device = VirtualDevice::builder()
             .context("uinput builder (is /dev/uinput writable?)")?
@@ -381,6 +405,11 @@ pub(crate) mod tests {
                 .collect()
         }
 
+        /// Every event seen so far, as `(type, code, value)`.
+        pub(crate) fn all_events(&self) -> Vec<(u16, u16, i32)> {
+            self.events.lock().unwrap().clone()
+        }
+
         /// The wheel events (`EV_REL`) seen so far, as `(code, value)`.
         pub(crate) fn wheel_events(&self) -> Vec<(u16, i32)> {
             self.events
@@ -479,6 +508,34 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(motion[..2], [0, 10]);
         assert_eq!(motion[motion.len() - 2..], [99, 60]);
+    }
+
+    /// udev's input_id calls absolute X/Y with mouse buttons an absolute
+    /// mouse, before its touchscreen test, so INPUT_PROP_DIRECT does not
+    /// make this a touchscreen. A touch or tool button, or BTN_0/BTN_1 with
+    /// a wheel (a tablet pad), would change that. The wheel axes must be
+    /// declared, or the kernel drops the wheel events.
+    #[test]
+    fn device_declares_a_wheel_and_stays_an_absolute_mouse() {
+        use super::{DeviceCapabilities, PropType};
+        let capabilities = DeviceCapabilities::new();
+        for axis in [RelativeAxisCode::REL_WHEEL, RelativeAxisCode::REL_HWHEEL] {
+            assert!(capabilities.relative_axes.contains(axis), "{axis:?}");
+        }
+        for axis in [RelativeAxisCode::REL_X, RelativeAxisCode::REL_Y] {
+            assert!(!capabilities.relative_axes.contains(axis), "{axis:?}");
+        }
+        assert!(capabilities.keys.contains(KeyCode::BTN_LEFT));
+        for key in [
+            KeyCode::BTN_0,
+            KeyCode::BTN_1,
+            KeyCode::BTN_TOUCH,
+            KeyCode::BTN_TOOL_PEN,
+            KeyCode::BTN_TOOL_FINGER,
+        ] {
+            assert!(!capabilities.keys.contains(key), "{key:?}");
+        }
+        assert!(capabilities.props.contains(PropType::DIRECT));
     }
 
     /// Wheel deltas go out as `REL_HWHEEL`/`REL_WHEEL` pairs on the same
