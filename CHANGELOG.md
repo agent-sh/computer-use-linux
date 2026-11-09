@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.49] - 2026-11-09
+
+### Security
+
+- `rmcp` 3.9.0, which fixes RUSTSEC-2026-0462. `cargo audit` passes again.
+
+### Changed
+
+- Output schemas list nullable fields as required, as `rmcp` 3.9.0 generates them: such a field is always present and is `null` when it has no value. The server already sent these fields as `null`, so results are unchanged and still validate against their schemas. Tool names, descriptions, input schemas and annotations are unchanged. The Pi extension's catalog hashes change with the schemas, so the extension and the server are released together.
+
 ## [0.7.48] - 2026-11-09
 
 ### Added
@@ -1148,7 +1158,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.48...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.49...HEAD
+[0.7.49]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.48...v0.7.49
 [0.7.48]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.47...v0.7.48
 [0.7.47]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.46...v0.7.47
 [0.7.46]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.45...v0.7.46
