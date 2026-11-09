@@ -194,18 +194,28 @@ impl SnapshotIds {
 /// Refuse a `snapshot_id` that does not name the cached snapshot `current`.
 /// Indices and selectors resolve only against the cached tree, so once a later
 /// get_app_state, include_tree or perform_action recovery replaced the named
-/// one, its indices may name other elements.
-fn check_snapshot_id(requested: Option<&str>, current: &str) -> std::result::Result<(), String> {
+/// one, its indices may name other elements. `prefix` is this server's id
+/// prefix. An empty or blank id counts as absent, as other optional strings do.
+fn check_snapshot_id(
+    requested: Option<&str>,
+    current: &str,
+    prefix: &str,
+) -> std::result::Result<(), String> {
     let Some(requested) = trimmed_nonempty(requested) else {
         return Ok(());
     };
     if requested == current {
         return Ok(());
     }
-    let reason = if current.is_empty() {
-        "no snapshot is cached".to_string()
+    let reason = if requested
+        .split_once('-')
+        .is_none_or(|(requested_prefix, _)| requested_prefix != prefix)
+    {
+        "this server did not issue it; it may come from a server process that has since exited"
+    } else if current.is_empty() {
+        "no tree is cached now, since the last tree read failed or perform_action recovery cleared it"
     } else {
-        "a later get_app_state, include_tree or perform_action recovery replaced it".to_string()
+        "a later get_app_state, include_tree or perform_action recovery replaced it"
     };
     Err(format!(
         "snapshot_id {requested:?} is not the cached snapshot: {reason}, and its element indices could name other elements now. Call get_app_state and use the element_index values and snapshot_id it returns."
@@ -479,7 +489,11 @@ impl ComputerUseLinux {
             .map(|snapshot| (snapshot.id.clone(), snapshot.nodes.clone(), snapshot.detail))
             .unwrap_or_default();
         let offset = params.offset.unwrap_or(0);
-        if let Err(message) = check_snapshot_id(params.snapshot_id.as_deref(), &id) {
+        if let Err(message) = check_snapshot_id(
+            params.snapshot_id.as_deref(),
+            &id,
+            &self.snapshot_ids.prefix,
+        ) {
             return Json(GetTreePageOutput {
                 snapshot_id: None,
                 nodes: TreeNodes::new(Vec::new(), detail),
@@ -832,7 +846,7 @@ impl ComputerUseLinux {
                 .await;
             Some(id)
         } else {
-            self.commit_snapshot(&[], None).await;
+            self.commit_cleared_snapshot().await;
             None
         };
         let compacted_count = accessibility_tree.len();
@@ -1307,7 +1321,7 @@ impl ComputerUseLinux {
         if let Err(message) = self.check_element_snapshot(
             "click",
             params.snapshot_id.as_deref(),
-            params.element_index.is_some() || !params.selector().is_empty(),
+            click_resolves_cached_element(&params),
         ) {
             return Json(ActionOutput {
                 ok: false,
@@ -1975,7 +1989,7 @@ impl ComputerUseLinux {
         if let Err(message) = self.check_element_snapshot(
             "scroll",
             params.snapshot_id.as_deref(),
-            params.element_index.is_some(),
+            scroll_resolves_cached_element(&params),
         ) {
             return Json(ActionOutput {
                 ok: false,
@@ -2101,7 +2115,7 @@ impl ComputerUseLinux {
                 window_target = Some(portal_focus_target(target, &focus.requested_window));
             }
         }
-        if params.x.is_none() && params.y.is_none() {
+        if scroll_resolves_cached_element(&params) {
             if let Err(message) = self
                 .check_cached_element_target(
                     params.element_index,
@@ -4239,6 +4253,7 @@ struct GetTreePageParams {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 struct GetTreePageOutput {
     /// The paged snapshot; pass it with element_index actions on these nodes.
+    /// Absent when no tree is cached or the named snapshot was replaced.
     #[serde(skip_serializing_if = "Option::is_none")]
     snapshot_id: Option<String>,
     /// Nodes from `offset`, as many as fit in one result.
@@ -4710,9 +4725,9 @@ struct ScrollParams {
     #[serde(default)]
     element_index: Option<u32>,
     /// snapshot_id of the get_app_state or include_tree result the
-    /// element_index or selector comes from. If a later snapshot replaced
-    /// it, the call is refused before any input. Without it, the element
-    /// resolves in the latest snapshot.
+    /// element_index comes from. If a later snapshot replaced it, the call
+    /// is refused before any input. Without it, the element resolves in the
+    /// latest snapshot.
     #[serde(default)]
     snapshot_id: Option<String>,
     /// Point x to scroll at in raw screenshot capture pixels: the coordinate_width and
@@ -4768,6 +4783,20 @@ struct ScrollParams {
     relative: Option<bool>,
     #[serde(flatten)]
     capture: PostActionCaptureParams,
+}
+
+/// Whether a click resolves its element in the cached tree: an index or
+/// selector, unless a full capture-space point wins over it.
+fn click_resolves_cached_element(params: &ClickParams) -> bool {
+    (params.element_index.is_some() || !params.selector().is_empty())
+        && (params.x.zip(params.y).is_none()
+            || params.coordinate_space == ClickCoordinateSpace::Atspi)
+}
+
+/// Whether a scroll takes its point from a cached element: an element_index
+/// without a full x/y point. A lone x or y does not make a point.
+fn scroll_resolves_cached_element(params: &ScrollParams) -> bool {
+    params.element_index.is_some() && params.x.zip(params.y).is_none()
 }
 
 fn scroll_units(pages: Option<f64>) -> std::result::Result<i32, String> {
@@ -5602,7 +5631,7 @@ impl ComputerUseLinux {
                         .await
                         .unwrap_or(false) =>
                 {
-                    self.commit_snapshot(&[], None).await;
+                    self.commit_cleared_snapshot().await;
                     let error = "GNOME accessibility is disabled; call setup_accessibility first."
                         .to_string();
                     notes.push(format!("Post-action accessibility tree failed: {error}"));
@@ -5661,7 +5690,7 @@ impl ComputerUseLinux {
                     observation.accessibility_tree_truncated = Some(snapshot.truncated);
                 }
                 Err(error) => {
-                    self.commit_snapshot(&[], None).await;
+                    self.commit_cleared_snapshot().await;
                     let error = format!("{error:#}");
                     notes.push(format!("Post-action accessibility tree failed: {error}"));
                     observation.accessibility_tree = Some(TreeNodes::default());
@@ -6828,12 +6857,29 @@ impl ComputerUseLinux {
     /// Readers may perform slow AT-SPI owner checks before resolving a click
     /// or scroll again. Keep the snapshot stable for the whole input operation;
     /// otherwise a checked index could resolve to a different app's node.
+    #[cfg(test)]
     async fn commit_snapshot(&self, nodes: &[AccessibilityNode], target_pid: Option<u32>) {
         let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         self.cache_snapshot(nodes, target_pid);
     }
 
-    /// The snapshot_id of the cached tree, empty before the first store.
+    /// Drop the cached tree, under the input lock like every store.
+    async fn commit_cleared_snapshot(&self) {
+        let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        self.clear_snapshot();
+    }
+
+    /// Drop the cached tree and its spill file. The empty snapshot has no id,
+    /// so no result names it and every snapshot_id is refused until the next
+    /// tree is stored.
+    fn clear_snapshot(&self) {
+        self.tree_spiller.remove_current();
+        if let Ok(mut cached) = self.last_snapshot.lock() {
+            *cached = CachedAccessibilitySnapshot::default();
+        }
+    }
+
+    /// The snapshot_id of the cached tree, empty when none is cached.
     fn cached_snapshot_id(&self) -> String {
         self.last_snapshot
             .lock()
@@ -6853,8 +6899,12 @@ impl ComputerUseLinux {
         if !names_cached_element {
             return Ok(());
         }
-        check_snapshot_id(snapshot_id, &self.cached_snapshot_id())
-            .map_err(|message| format!("{action} was not sent: {message}"))
+        check_snapshot_id(
+            snapshot_id,
+            &self.cached_snapshot_id(),
+            &self.snapshot_ids.prefix,
+        )
+        .map_err(|message| format!("{action} was not sent: {message}"))
     }
 
     /// Commit a post-action tree with the window it was taken for and its
@@ -6896,10 +6946,12 @@ impl ComputerUseLinux {
         self.store_snapshot(nodes, target_pid, recovery_scope, window, shape)
     }
 
+    #[cfg(test)]
     fn cache_snapshot(&self, nodes: &[AccessibilityNode], target_pid: Option<u32>) -> String {
         self.cache_snapshot_with_scope(nodes, target_pid, None)
     }
 
+    #[cfg(test)]
     fn cache_snapshot_with_scope(
         &self,
         nodes: &[AccessibilityNode],
@@ -6909,6 +6961,7 @@ impl ComputerUseLinux {
         self.cache_snapshot_with_window(nodes, target_pid, recovery_scope, None)
     }
 
+    #[cfg(test)]
     fn cache_snapshot_with_window(
         &self,
         nodes: &[AccessibilityNode],
@@ -6974,7 +7027,7 @@ impl ComputerUseLinux {
 
     #[cfg(test)]
     fn clear_cached_nodes(&self) {
-        self.cache_snapshot(&[], None);
+        self.clear_snapshot();
     }
 
     /// The window the cached snapshot was taken for, with its backend.
@@ -7628,7 +7681,7 @@ impl ComputerUseLinux {
         );
         // A recovery tree has not been shown to the caller. Its compacted
         // indices must never silently replace indices from get_app_state.
-        self.cache_snapshot(&[], None);
+        self.clear_snapshot();
         let recovered = match resolve_semantic_node(
             &nodes,
             &params.selector(),
@@ -11954,6 +12007,54 @@ case "$*" in *"-- 5001 1301"*) echo "xdotool: test failure" >&2; exit 1 ;; esac
                 .unwrap();
                 let result = backend.perform_element_action(&action, None).await.0;
                 refused("perform_action", result.ok, &result.message);
+                // Scroll checks before raising its window too, and a lone x
+                // still takes the element's point.
+                let scroll: ScrollParams = serde_json::from_value(serde_json::json!({
+                    "element_index": 0, "snapshot_id": first, "direction": "down",
+                    "window_id": 7
+                }))
+                .unwrap();
+                let result = backend.dispatch_scroll(scroll).await.0;
+                refused("scroll", result.ok, &result.message);
+                let scroll: ScrollParams = serde_json::from_value(serde_json::json!({
+                    "element_index": 0, "snapshot_id": first, "direction": "down", "x": 500
+                }))
+                .unwrap();
+                let result = backend.dispatch_scroll(scroll).await.0;
+                refused("scroll", result.ok, &result.message);
+
+                // The current id, and a full point that wins over the index,
+                // pass the snapshot check and reach the input routes, which
+                // refuse here: this test session has no usable pointer.
+                let current = backend.cached_snapshot_id();
+                let passed = |action: &str, message: &str| {
+                    assert!(
+                        !message.starts_with(&format!("{action} was not sent: snapshot_id")),
+                        "{message}"
+                    );
+                };
+                for click in [
+                    serde_json::json!({"element_index": 0, "snapshot_id": current}),
+                    serde_json::json!({"element_index": 0, "snapshot_id": first, "x": 140, "y": 110}),
+                ] {
+                    let click: ClickParams = serde_json::from_value(click).unwrap();
+                    passed("click", &backend.dispatch_click(click).await.0.message);
+                }
+                for scroll in [
+                    serde_json::json!({"element_index": 0, "snapshot_id": current, "direction": "down"}),
+                    serde_json::json!({"element_index": 0, "snapshot_id": first, "direction": "down", "x": 140, "y": 110}),
+                ] {
+                    let scroll: ScrollParams = serde_json::from_value(scroll).unwrap();
+                    passed("scroll", &backend.dispatch_scroll(scroll).await.0.message);
+                }
+                let set_value: SetValueParams = serde_json::from_value(serde_json::json!({
+                    "element_index": 0, "snapshot_id": current, "value": "typed"
+                }))
+                .unwrap();
+                passed(
+                    "set_value",
+                    &backend.dispatch_set_value(set_value).await.0.message,
+                );
             }
             "x11-monitor-gap" | "uinput-monitor-gap" => {
                 use crate::abs_pointer::{tests::RecordedEvents, AbsPointer};
@@ -20593,19 +20694,74 @@ mod snapshot_handle_tests {
 
     #[test]
     fn snapshot_id_check() {
-        assert_eq!(check_snapshot_id(None, "ab-2"), Ok(()));
-        assert_eq!(check_snapshot_id(Some("  "), "ab-2"), Ok(()));
-        assert_eq!(check_snapshot_id(Some("ab-2"), "ab-2"), Ok(()));
-        assert_eq!(check_snapshot_id(Some(" ab-2 "), "ab-2"), Ok(()));
+        let check =
+            |requested: Option<&str>, current: &str| check_snapshot_id(requested, current, "ab");
+        assert_eq!(check(None, "ab-2"), Ok(()));
+        assert_eq!(check(Some("  "), "ab-2"), Ok(()));
+        assert_eq!(check(Some("ab-2"), "ab-2"), Ok(()));
+        assert_eq!(check(Some(" ab-2 "), "ab-2"), Ok(()));
         assert_eq!(
-            check_snapshot_id(Some("ab-1"), "ab-2"),
+            check(Some("ab-1"), "ab-2"),
             Err("snapshot_id \"ab-1\" is not the cached snapshot: a later get_app_state, include_tree or perform_action recovery replaced it, and its element indices could name other elements now. Call get_app_state and use the element_index values and snapshot_id it returns.".to_string())
         );
-        assert!(check_snapshot_id(Some("ab-1"), "")
-            .unwrap_err()
-            .starts_with(
-                "snapshot_id \"ab-1\" is not the cached snapshot: no snapshot is cached,"
-            ));
+        let reason = |requested: &str, current: &str| {
+            let message = check(Some(requested), current).unwrap_err();
+            let (_, reason) = message.split_once("is not the cached snapshot: ").unwrap();
+            reason.split_once(", and its").unwrap().0.to_string()
+        };
+        assert_eq!(
+            reason("ab-1", ""),
+            "no tree is cached now, since the last tree read failed or perform_action recovery cleared it"
+        );
+        let foreign =
+            "this server did not issue it; it may come from a server process that has since exited";
+        assert_eq!(reason("cd-1", "ab-1"), foreign);
+        assert_eq!(reason("cd-1", ""), foreign);
+        assert_eq!(reason("ab1", "ab-1"), foreign);
+    }
+
+    #[test]
+    fn only_calls_that_resolve_a_cached_element_name_a_snapshot() {
+        let click =
+            |value: serde_json::Value| -> ClickParams { serde_json::from_value(value).unwrap() };
+        let scroll = |value: serde_json::Value| -> ScrollParams {
+            let mut value = value;
+            value["direction"] = "down".into();
+            serde_json::from_value(value).unwrap()
+        };
+        use serde_json::json;
+        assert!(click_resolves_cached_element(&click(
+            json!({"element_index": 1})
+        )));
+        assert!(click_resolves_cached_element(&click(
+            json!({"role": "button"})
+        )));
+        // A lone x falls back to the element, as the click target resolves it.
+        assert!(click_resolves_cached_element(&click(
+            json!({"element_index": 1, "x": 5})
+        )));
+        assert!(click_resolves_cached_element(&click(
+            json!({"element_index": 1, "x": 5, "y": 6, "coordinate_space": "atspi"})
+        )));
+        assert!(!click_resolves_cached_element(&click(
+            json!({"element_index": 1, "x": 5, "y": 6})
+        )));
+        assert!(!click_resolves_cached_element(&click(
+            json!({"x": 5, "y": 6})
+        )));
+        assert!(scroll_resolves_cached_element(&scroll(
+            json!({"element_index": 1})
+        )));
+        assert!(scroll_resolves_cached_element(&scroll(
+            json!({"element_index": 1, "x": 5})
+        )));
+        assert!(scroll_resolves_cached_element(&scroll(
+            json!({"element_index": 1, "y": 6})
+        )));
+        assert!(!scroll_resolves_cached_element(&scroll(
+            json!({"element_index": 1, "x": 5, "y": 6})
+        )));
+        assert!(!scroll_resolves_cached_element(&scroll(json!({"x": 5}))));
     }
 
     /// Two callers share one server and its one cached snapshot. After the
@@ -20712,6 +20868,21 @@ mod snapshot_handle_tests {
                 .starts_with(&format!("snapshot_id {first:?} is not the cached snapshot")),
             "{}",
             stale.message
+        );
+
+        // A cleared cache names no snapshot and refuses every id.
+        backend.clear_snapshot();
+        assert_eq!(backend.cached_snapshot_id(), "");
+        let cleared = page(None).await;
+        assert_eq!(cleared.snapshot_id, None);
+        assert_eq!(cleared.node_count, 0);
+        let refused = page(Some(&second)).await;
+        assert!(
+            refused.message.starts_with(&format!(
+                "snapshot_id {second:?} is not the cached snapshot: no tree is cached now"
+            )),
+            "{}",
+            refused.message
         );
     }
 }

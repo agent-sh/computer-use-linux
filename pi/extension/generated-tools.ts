@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.47";
-export const GENERATED_TOOL_CATALOG_HASH = "9af110d1e3ae1e4ea62c1477b69d90df39a2da037adf44f36945b2ae1216a52c";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "0170cb6b7da3a49b88a9ca0ceea364050470bd7ccc92d16ca9926f3323274170";
+export const GENERATED_TOOL_CATALOG_HASH = "2d363dbef08a07c77fca38591d9e667d6501543b816fbd910504264d4360b249";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "92618cb44d6df6dbb898de69e4f4499781e9dcd86ebe691ac430ffb9e14c0372";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -1934,7 +1934,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "snapshot_id": {
           "default": null,
-          "description": "snapshot_id of the get_app_state or include_tree result the\nelement_index or selector comes from. If a later snapshot replaced\nit, the call is refused before any input. Without it, the element\nresolves in the latest snapshot.",
+          "description": "snapshot_id of the get_app_state or include_tree result the\nelement_index comes from. If a later snapshot replaced it, the call\nis refused before any input. Without it, the element resolves in the\nlatest snapshot.",
           "type": [
             "string",
             "null"
