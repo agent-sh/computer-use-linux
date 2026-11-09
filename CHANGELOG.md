@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.48] - 2026-11-09
+
 ### Added
 
 - Snapshot handles. `get_app_state`, an `include_tree` observation and `get_tree_page` return the `snapshot_id` of their tree. `click`, `scroll`, `perform_action`, `set_value` and `get_tree_page` take it. The server caches one tree, and every new tree replaces it. A call that picks its element by `element_index` or selector and names a replaced snapshot is refused before any window is raised or input is sent. Before, an index from an older tree resolved silently in the newer one and could name another element: after an `include_tree` result, or when two clients share one server. Without `snapshot_id`, the element resolves in the latest tree, as before. An `element_identifier` names the AT-SPI object and is not checked. Each server process has its own id prefix, so an id from before a restart is refused. Thanks to [@berney](https://github.com/berney), whose listener proposal raised the two-client case ([#362](https://github.com/agent-sh/computer-use-linux/issues/362)).
@@ -1146,7 +1148,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.47...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.48...HEAD
+[0.7.48]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.47...v0.7.48
 [0.7.47]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.46...v0.7.47
 [0.7.46]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.45...v0.7.46
 [0.7.45]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.44...v0.7.45
