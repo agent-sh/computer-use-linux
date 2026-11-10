@@ -65,6 +65,8 @@ libc = "0.2"
 reis = { version = "0.7.1", features = ["tokio"] }
 rmcp = { version = "3.5.1", features = ["transport-io", "transport-streamable-http-server"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+hyper = { version = "1.12", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio", "service"] }
 schemars = "1.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

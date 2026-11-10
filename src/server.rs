@@ -3623,12 +3623,14 @@ async fn execute_shell(params: RunShellParams) -> RunShellOutput {
 
 pub async fn serve_mcp(listen: Option<crate::http_listen::ListenConfig>) -> Result<()> {
     let server = ComputerUseLinux::default();
-    if let Some(config) = listen {
-        return crate::http_listen::serve_http(server, config).await;
-    }
-    let indicator = Arc::clone(&server.indicator);
     let tree_spiller = Arc::clone(&server.tree_spiller);
     tree_spiller.sweep();
+    if let Some(config) = listen {
+        let signal = crate::http_listen::serve_http(server, config).await?;
+        tree_spiller.remove_current();
+        std::process::exit(128 + signal);
+    }
+    let indicator = Arc::clone(&server.indicator);
     let running = server.serve(rmcp::transport::stdio()).await?;
     // Legacy initialization supplies the client name through the peer.
     // Discovery-only hosts use the indicator's configured name or Agent fallback.

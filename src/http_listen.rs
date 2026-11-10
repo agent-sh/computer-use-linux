@@ -6,11 +6,16 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
+use hyper::server::conn::http1;
+use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::service::TowerToHyperService;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use sha2::Digest;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::signal::unix::{signal, SignalKind};
 
 pub(crate) struct ListenConfig {
     pub addr: SocketAddr,
@@ -82,7 +87,11 @@ pub(crate) fn bearer_matches(header: Option<&HeaderValue>, expected: &[u8; 32]) 
     diff == 0
 }
 
-pub(crate) async fn serve_http(server: ComputerUseLinux, config: ListenConfig) -> Result<()> {
+/// Hyper only enforces this with a timer, which `axum::serve` does not set.
+pub(crate) const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Serves until SIGTERM or SIGINT and returns that signal's number.
+pub(crate) async fn serve_http(server: ComputerUseLinux, config: ListenConfig) -> Result<i32> {
     let ListenConfig {
         addr,
         allowed_hosts: allowed_hosts_extra,
@@ -90,6 +99,8 @@ pub(crate) async fn serve_http(server: ComputerUseLinux, config: ListenConfig) -
     } = config;
     let digest = token_digest(&token);
     drop(token);
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("could not listen on {addr}"))?;
@@ -102,6 +113,7 @@ pub(crate) async fn serve_http(server: ComputerUseLinux, config: ListenConfig) -
     let http_config = StreamableHttpServerConfig::default()
         .with_allowed_hosts(allowed_hosts)
         .enforce_origin_validation();
+    let shutdown = http_config.cancellation_token.clone();
     let service = StreamableHttpService::new(
         {
             let server = server.clone();
@@ -121,10 +133,47 @@ pub(crate) async fn serve_http(server: ComputerUseLinux, config: ListenConfig) -
                 }
             },
         ));
-    axum::serve(listener, app)
-        .await
-        .context("MCP HTTP listener stopped")?;
-    Ok(())
+    let service = TowerToHyperService::new(app);
+    let mut connections = tokio::task::JoinSet::new();
+    let signal = loop {
+        let stream = tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) => stream,
+                Err(error) => {
+                    // Usually fd exhaustion; back off instead of spinning, as axum::serve does.
+                    eprintln!("[computer-use-linux] accept failed: {error}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            },
+            _ = terminate.recv() => break libc::SIGTERM,
+            _ = interrupt.recv() => break libc::SIGINT,
+        };
+        let service = service.clone();
+        let shutdown = shutdown.clone();
+        connections.spawn(async move {
+            let connection = http1::Builder::new()
+                .timer(TokioTimer::new())
+                .header_read_timeout(HEADER_READ_TIMEOUT)
+                .serve_connection(TokioIo::new(stream), service);
+            tokio::pin!(connection);
+            tokio::select! {
+                _ = connection.as_mut() => {}
+                _ = shutdown.cancelled() => {
+                    connection.as_mut().graceful_shutdown();
+                    let _ = connection.await;
+                }
+            }
+        });
+    };
+    drop(listener);
+    // Ends rmcp's sessions and SSE streams so open connections can finish.
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await;
+    Ok(signal)
 }
 
 fn unauthorized() -> Response {

@@ -446,6 +446,8 @@ dependencies = [
  "evdev",
  "futures-util",
  "getrandom",
+ "hyper",
+ "hyper-util",
  "image",
  "libc",
  "mimalloc",

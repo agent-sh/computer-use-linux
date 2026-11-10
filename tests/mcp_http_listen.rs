@@ -399,3 +399,46 @@ fn stateless_request_from_the_newer_protocol() {
     assert!(text.contains("get_app_state"), "{text}");
     assert_eq!(hermetic.recorded(), "");
 }
+
+#[test]
+fn sigterm_stops_the_listener() {
+    let hermetic = Hermetic::new();
+    let mut child = spawn(&hermetic, Some(TOKEN));
+    let port = bound_port(&mut child);
+    initialize(port, "cul");
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("server did not exit within 5 seconds of SIGTERM");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(status.code(), Some(143), "{status:?}");
+    assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+    assert_eq!(hermetic.recorded(), "");
+}
+
+#[test]
+fn slow_headers_are_dropped() {
+    let hermetic = Hermetic::new();
+    let mut child = spawn(&hermetic, Some(TOKEN));
+    let port = bound_port(&mut child);
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    // HEADER_READ_TIMEOUT (10s) plus 2s of slack.
+    stream
+        .set_read_timeout(Some(Duration::from_secs(12)))
+        .unwrap();
+    stream
+        .write_all(b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+        .unwrap();
+    let mut raw = Vec::new();
+    let result = stream.read_to_end(&mut raw);
+    let _ = child.kill();
+    assert!(result.is_ok(), "connection still open: {result:?}");
+    assert_eq!(hermetic.recorded(), "");
+}
