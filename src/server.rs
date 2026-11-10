@@ -3347,7 +3347,7 @@ impl ServerHandler for ComputerUseLinux {
     }
 }
 
-fn shell_execution_enabled() -> bool {
+pub(crate) fn shell_execution_enabled() -> bool {
     shell_execution_enabled_value(env::var(SHELL_ENABLE_ENV).ok().as_deref())
 }
 
@@ -3621,11 +3621,10 @@ async fn execute_shell(params: RunShellParams) -> RunShellOutput {
     }
 }
 
-pub async fn serve_mcp(listen: Option<std::net::SocketAddr>) -> Result<()> {
+pub async fn serve_mcp(listen: Option<crate::http_listen::ListenConfig>) -> Result<()> {
     let server = ComputerUseLinux::default();
-    if let Some(addr) = listen {
-        let token = std::env::var("COMPUTER_USE_LINUX_MCP_TOKEN").unwrap_or_default();
-        return crate::http_listen::serve_http(server, addr, token).await;
+    if let Some(config) = listen {
+        return crate::http_listen::serve_http(server, config).await;
     }
     let indicator = Arc::clone(&server.indicator);
     let tree_spiller = Arc::clone(&server.tree_spiller);

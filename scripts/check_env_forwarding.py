@@ -66,6 +66,7 @@ NOT_ENVIRONMENT = {
 # Variables the server reads that hosts are not expected to pass.
 NOT_PASSED = {
     "COMPUTER_USE_LINUX_MCP_TOKEN": "read only by `mcp --listen`, which an MCP host never starts; a host spawns the server over stdio",
+    "COMPUTER_USE_LINUX_MCP_TOKEN_FILE": "read only by `mcp --listen`, which an MCP host never starts",
     "GTK_MODULES": "describes the desktop's apps; the server reads it from the compositor process when the host does not pass it",
     "QT_LINUX_ACCESSIBILITY_ALWAYS_ON": "describes the desktop's apps; the server reads it from the compositor process when the host does not pass it",
     "WAYLAND_SOCKET": "a file descriptor a compositor hands to a process it starts; it does not survive an MCP host in between",

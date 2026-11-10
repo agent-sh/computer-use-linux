@@ -209,8 +209,31 @@ fn listen_requires_token() {
         let mut err = String::new();
         child.stderr.unwrap().read_to_string(&mut err).unwrap();
         assert!(!status.success(), "{err}");
-        assert!(err.contains("COMPUTER_USE_LINUX_MCP_TOKEN"), "{err}");
+        assert!(
+            err.contains(
+                "--listen needs COMPUTER_USE_LINUX_MCP_TOKEN_FILE or COMPUTER_USE_LINUX_MCP_TOKEN"
+            ),
+            "{err}"
+        );
     }
+    assert_eq!(hermetic.recorded(), "");
+}
+
+#[test]
+fn listen_refuses_shell() {
+    let hermetic = Hermetic::new();
+    let output = hermetic
+        .command()
+        .args(["mcp", "--listen", "127.0.0.1:0"])
+        .env("COMPUTER_USE_LINUX_MCP_TOKEN", TOKEN)
+        .env("COMPUTER_USE_LINUX_ENABLE_SHELL", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{err}");
+    assert!(err.contains("COMPUTER_USE_LINUX_ENABLE_SHELL=1"), "{err}");
+    assert_eq!(hermetic.recorded(), "");
 }
 
 #[test]
