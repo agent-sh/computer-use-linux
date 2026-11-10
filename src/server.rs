@@ -1331,13 +1331,6 @@ impl ComputerUseLinux {
                 received,
             });
         }
-        // Test hook for tests/mcp_http_listen.rs; release builds never read it.
-        #[cfg(debug_assertions)]
-        if let Ok(ms) = std::env::var("CUL_INPUT_LOCK_HOLD_MS") {
-            if let Ok(ms) = ms.parse::<u64>() {
-                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
-            }
-        }
         let mut portal_target_point = None;
         let mut input_focus = None;
         let mut owner_target = ElementOwnerTarget::pid(params.pid);

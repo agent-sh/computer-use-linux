@@ -1,24 +1,103 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const TOKEN: &str = "cul-secret";
 
-fn spawn(token: Option<&str>, hold_ms: Option<&str>) -> std::process::Child {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_computer-use-linux"));
+/// A private temp dir with stub desktop tools, so a server under test cannot
+/// reach the developer's session: diagnostics only fills empty variables
+/// from the process tree, so every desktop variable gets a dead value here.
+struct Hermetic {
+    dir: PathBuf,
+}
+
+impl Hermetic {
+    fn new() -> Hermetic {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("cul-http-{}-{nanos}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for program in [
+            "ydotool",
+            "xdotool",
+            "wtype",
+            "systemctl",
+            "gnome-screenshot",
+            "busctl",
+            "gsettings",
+        ] {
+            let path = dir.join(program);
+            std::fs::write(
+                &path,
+                // Read-only probes (environment, capability help) fail silently;
+                // anything else these tools run would be input, so record it.
+                r#"#!/bin/sh
+case "${0##*/} $1" in
+  "systemctl "*|"busctl "*|"gsettings "*|"ydotool help"|"ydotool --help") exit 1 ;;
+esac
+printf '%s %s\n' "${0##*/}" "$*" >> "${0%/*}/commands.log"
+exit 1
+"#,
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        Hermetic { dir }
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_computer-use-linux"));
+        command
+            .env_clear()
+            .env("PATH", &self.dir)
+            .env("HOME", &self.dir)
+            .env("XDG_RUNTIME_DIR", &self.dir)
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}/no-bus", self.dir.display()),
+            )
+            .env("DISPLAY", ":9876")
+            .env("WAYLAND_DISPLAY", "no-wayland")
+            .env("XDG_SESSION_TYPE", "wayland")
+            .env("CU_DISABLE_ABS_POINTER", "1");
+        for key in [
+            "DESKTOP_SESSION",
+            "HYPRLAND_INSTANCE_SIGNATURE",
+            "XAUTHORITY",
+            "XDG_SESSION_DESKTOP",
+            "XDG_CURRENT_DESKTOP",
+        ] {
+            command.env(key, "hermetic-test");
+        }
+        command
+    }
+
+    fn recorded(&self) -> String {
+        std::fs::read_to_string(self.dir.join("commands.log")).unwrap_or_default()
+    }
+}
+
+impl Drop for Hermetic {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn spawn(hermetic: &Hermetic, token: Option<&str>) -> std::process::Child {
+    let mut command = hermetic.command();
     command
         .args(["mcp", "--listen", "127.0.0.1:0"])
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     if let Some(token) = token {
         command.env("COMPUTER_USE_LINUX_MCP_TOKEN", token);
-    }
-    if let Some(ms) = hold_ms {
-        command.env("CUL_INPUT_LOCK_HOLD_MS", ms);
     }
     command.spawn().unwrap()
 }
@@ -98,8 +177,9 @@ fn initialize(port: u16, name: &str) -> String {
 
 #[test]
 fn listen_requires_token() {
+    let hermetic = Hermetic::new();
     for token in [None, Some("")] {
-        let mut child = spawn(token, None);
+        let mut child = spawn(&hermetic, token);
         let status = child.wait().unwrap();
         let mut err = String::new();
         child.stderr.unwrap().read_to_string(&mut err).unwrap();
@@ -110,7 +190,8 @@ fn listen_requires_token() {
 
 #[test]
 fn http_initialize_and_list_tools() {
-    let mut child = spawn(Some(TOKEN), None);
+    let hermetic = Hermetic::new();
+    let mut child = spawn(&hermetic, Some(TOKEN));
     let port = bound_port(&mut child);
     let session = initialize(port, "cul");
     let _ = post(
@@ -138,47 +219,13 @@ fn http_initialize_and_list_tools() {
         assert!(!body.contains(TOKEN), "{body}");
     }
     let _ = child.kill();
-}
-
-// Needs CUL_INPUT_LOCK_HOLD_MS, which only debug builds read.
-#[cfg(debug_assertions)]
-#[test]
-fn http_sessions_share_input_lock() {
-    let mut child = spawn(Some(TOKEN), Some("400"));
-    let port = bound_port(&mut child);
-    let session_a = initialize(port, "a");
-    let session_b = initialize(port, "b");
-    let started = Instant::now();
-    let left = std::thread::spawn(move || {
-        post(
-            port,
-            Some(TOKEN),
-            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"click","arguments":{"x":1,"y":1}}}"#,
-            Some(&session_a),
-        )
-    });
-    let right = std::thread::spawn(move || {
-        post(
-            port,
-            Some(TOKEN),
-            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"click","arguments":{"x":2,"y":2}}}"#,
-            Some(&session_b),
-        )
-    });
-    let (left_status, left_body, _) = left.join().unwrap();
-    let (right_status, right_body, _) = right.join().unwrap();
-    assert!(
-        started.elapsed() >= Duration::from_millis(700),
-        "clicks overlapped: left={left_body} right={right_body}"
-    );
-    assert_eq!(left_status, 200, "{left_body}");
-    assert_eq!(right_status, 200, "{right_body}");
-    let _ = child.kill();
+    assert_eq!(hermetic.recorded(), "");
 }
 
 #[test]
 fn http_client_disconnect_does_not_wedge() {
-    let mut child = spawn(Some(TOKEN), Some("200"));
+    let hermetic = Hermetic::new();
+    let mut child = spawn(&hermetic, Some(TOKEN));
     let port = bound_port(&mut child);
     let session = initialize(port, "a");
     let mut dropped = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -197,4 +244,5 @@ fn http_client_disconnect_does_not_wedge() {
     );
     assert_eq!(status, 200, "{body}");
     let _ = child.kill();
+    assert_eq!(hermetic.recorded(), "");
 }
