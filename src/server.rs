@@ -3379,6 +3379,20 @@ impl ServerHandler for ComputerUseLinux {
         context.peer.set_peer_info(request.clone());
         self.negotiate_initialize(&request)
     }
+
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+        // Each HTTP client names itself per request; a shared field would show the last to initialize.
+        let agent = context
+            .client_info()
+            .filter(|info| !info.name.trim().is_empty())
+            .map(|info| crate::indicator::agent_display_name(&info.name, info.title.as_deref()));
+        let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        crate::indicator::with_request_agent(agent, self.mcp_tool_router().call(call)).await
+    }
 }
 
 pub(crate) fn shell_execution_enabled() -> bool {
