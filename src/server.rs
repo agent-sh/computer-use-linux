@@ -260,6 +260,8 @@ pub struct ComputerUseLinux {
     /// it.
     diagnostics: Arc<DiagnosticsCache<DoctorReport>>,
     accessibility_check: AccessibilityCheck,
+    /// Set for HTTP: clients share the cached tree, so element calls must name it.
+    require_snapshot_ids: bool,
 }
 
 /// The monitor layout of the cached capture. `generation` counts captures,
@@ -489,11 +491,16 @@ impl ComputerUseLinux {
             .map(|snapshot| (snapshot.id.clone(), snapshot.nodes.clone(), snapshot.detail))
             .unwrap_or_default();
         let offset = params.offset.unwrap_or(0);
-        if let Err(message) = check_snapshot_id(
-            params.snapshot_id.as_deref(),
-            &id,
-            &self.snapshot_ids.prefix,
-        ) {
+        let checked = self
+            .require_snapshot_id("get_tree_page", params.snapshot_id.as_deref())
+            .and_then(|()| {
+                check_snapshot_id(
+                    params.snapshot_id.as_deref(),
+                    &id,
+                    &self.snapshot_ids.prefix,
+                )
+            });
+        if let Err(message) = checked {
             return Json(GetTreePageOutput {
                 snapshot_id: None,
                 nodes: TreeNodes::new(Vec::new(), detail),
@@ -3622,10 +3629,11 @@ async fn execute_shell(params: RunShellParams) -> RunShellOutput {
 }
 
 pub async fn serve_mcp(listen: Option<crate::http_listen::ListenConfig>) -> Result<()> {
-    let server = ComputerUseLinux::default();
+    let mut server = ComputerUseLinux::default();
     let tree_spiller = Arc::clone(&server.tree_spiller);
     tree_spiller.sweep();
     if let Some(config) = listen {
+        server.require_snapshot_ids = true;
         let signal = crate::http_listen::serve_http(server, config).await?;
         tree_spiller.remove_current();
         std::process::exit(128 + signal);
@@ -6917,12 +6925,27 @@ impl ComputerUseLinux {
         if !names_cached_element {
             return Ok(());
         }
+        self.require_snapshot_id(action, snapshot_id)?;
         check_snapshot_id(
             snapshot_id,
             &self.cached_snapshot_id(),
             &self.snapshot_ids.prefix,
         )
         .map_err(|message| format!("{action} was not sent: {message}"))
+    }
+
+    /// Over HTTP, refuse a cached-element call that names no snapshot.
+    fn require_snapshot_id(
+        &self,
+        action: &str,
+        snapshot_id: Option<&str>,
+    ) -> std::result::Result<(), String> {
+        if self.require_snapshot_ids && trimmed_nonempty(snapshot_id).is_none() {
+            return Err(format!(
+                "{action} was not sent: snapshot_id is required over HTTP for element_index and selector calls, because another client's get_app_state can replace the cached tree. Pass the snapshot_id from your get_app_state result."
+            ));
+        }
+        Ok(())
     }
 
     /// Commit a post-action tree with the window it was taken for and its
@@ -20902,5 +20925,90 @@ mod snapshot_handle_tests {
             "{}",
             refused.message
         );
+    }
+
+    const HTTP_REQUIRED: &str = "click was not sent: snapshot_id is required over HTTP for element_index and selector calls, because another client's get_app_state can replace the cached tree. Pass the snapshot_id from your get_app_state result.";
+
+    /// The click checks of `http_clients_must_name_their_snapshot`, on any
+    /// server; returns each call's check result.
+    fn click_checks(backend: &ComputerUseLinux) -> (String, Vec<std::result::Result<(), String>>) {
+        let a = backend.clone();
+        let b = backend.clone();
+        let first = a.cache_snapshot(&[node(FIRST_REF)], None);
+        b.cache_snapshot(&[node(SECOND_REF)], None);
+        let check = |value: serde_json::Value| {
+            let params: ClickParams = serde_json::from_value(value).unwrap();
+            a.check_element_snapshot(
+                "click",
+                params.snapshot_id.as_deref(),
+                click_resolves_cached_element(&params),
+            )
+        };
+        use serde_json::json;
+        let results = vec![
+            check(json!({"element_index": 0, "snapshot_id": first})),
+            check(json!({"element_index": 0})),
+            check(json!({"element_index": 0, "snapshot_id": "  "})),
+            check(json!({"element_identifier": IDENTIFIER_REF})),
+            check(json!({"x": 5, "y": 6})),
+        ];
+        (first, results)
+    }
+
+    #[test]
+    fn http_clients_must_name_their_snapshot() {
+        let backend = ComputerUseLinux {
+            require_snapshot_ids: true,
+            ..Default::default()
+        };
+        let (first, results) = click_checks(&backend);
+        assert!(results[0].as_ref().unwrap_err().starts_with(&format!(
+            "click was not sent: snapshot_id {first:?} is not the cached snapshot: a later get_app_state"
+        )));
+        assert_eq!(results[1], Err(HTTP_REQUIRED.to_string()));
+        assert_eq!(results[2], Err(HTTP_REQUIRED.to_string()));
+        assert_eq!(results[3], Ok(()));
+        assert_eq!(results[4], Ok(()));
+    }
+
+    #[test]
+    fn stdio_snapshot_id_stays_optional() {
+        let (_, results) = click_checks(&ComputerUseLinux::default());
+        assert!(results[0].is_err());
+        assert_eq!(results[1..], [Ok(()), Ok(()), Ok(()), Ok(())]);
+    }
+
+    #[tokio::test]
+    async fn http_tree_page_needs_a_snapshot_id() {
+        let backend = ComputerUseLinux {
+            require_snapshot_ids: true,
+            ..Default::default()
+        };
+        let id = backend.cache_snapshot(&[node(FIRST_REF)], None);
+        for missing in [None, Some("  ".to_string())] {
+            let page = backend
+                .get_tree_page(Parameters(GetTreePageParams {
+                    offset: None,
+                    snapshot_id: missing,
+                }))
+                .await
+                .0;
+            assert_eq!(page.node_count, 0);
+            assert!(page.nodes.is_empty());
+            assert_eq!(page.snapshot_id, None);
+            assert_eq!(
+                page.message,
+                HTTP_REQUIRED.replacen("click", "get_tree_page", 1)
+            );
+        }
+        let page = backend
+            .get_tree_page(Parameters(GetTreePageParams {
+                offset: None,
+                snapshot_id: Some(id.clone()),
+            }))
+            .await
+            .0;
+        assert_eq!(page.node_count, 1);
+        assert_eq!(page.snapshot_id, Some(id));
     }
 }

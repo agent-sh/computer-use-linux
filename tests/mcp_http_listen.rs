@@ -442,3 +442,24 @@ fn slow_headers_are_dropped() {
     assert!(result.is_ok(), "connection still open: {result:?}");
     assert_eq!(hermetic.recorded(), "");
 }
+
+#[test]
+fn http_index_click_without_snapshot_id_is_refused() {
+    let hermetic = Hermetic::new();
+    let mut child = spawn(&hermetic, Some(TOKEN));
+    let port = bound_port(&mut child);
+    let session = initialize(port, "cul");
+    let (status, body, _) = post(
+        port,
+        Some(TOKEN),
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"click","arguments":{"element_index":0}}}"#,
+        Some(&session),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains("click was not sent: snapshot_id is required over HTTP for element_index and selector calls, because another client's get_app_state can replace the cached tree. Pass the snapshot_id from your get_app_state result."),
+        "{body}"
+    );
+    let _ = child.kill();
+    assert_eq!(hermetic.recorded(), "");
+}
