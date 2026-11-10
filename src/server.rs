@@ -588,7 +588,7 @@ impl ComputerUseLinux {
         let capture = params.capture.clone();
         let target = params.clone().into_target();
         let Json(output) = self.dispatch_activate_window(params).await;
-        self.finish_activate_window_output(output, &capture, &target)
+        self.finish_activate_window_output(output, &capture, &target, None)
             .await
     }
 
@@ -1316,9 +1316,16 @@ impl ComputerUseLinux {
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
         let target = params.window_target();
+        let named_snapshot = params.snapshot_id.clone();
         let Json(output) = self.dispatch_click(params).await;
-        self.finish_action_output(output, &capture, target.as_ref(), TargetRaised::Yes)
-            .await
+        self.finish_action_output(
+            output,
+            &capture,
+            target.as_ref(),
+            TargetRaised::Yes,
+            named_snapshot.as_deref(),
+        )
+        .await
     }
 
     async fn dispatch_click(&self, mut params: ClickParams) -> Json<ActionOutput> {
@@ -1839,8 +1846,14 @@ impl ComputerUseLinux {
         let Json(output) = self
             .perform_element_action(&params, Some(requested_action))
             .await;
-        self.finish_action_output(output, &capture, target.as_ref(), TargetRaised::No)
-            .await
+        self.finish_action_output(
+            output,
+            &capture,
+            target.as_ref(),
+            TargetRaised::No,
+            params.snapshot_id.as_deref(),
+        )
+        .await
     }
 
     #[tool(
@@ -1860,9 +1873,16 @@ impl ComputerUseLinux {
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
         let target = params.target.window_target();
+        let named_snapshot = params.snapshot_id.clone();
         let (output, verified) = self.dispatch_set_value(params).await;
-        self.finish_set_value_output(output, verified, &capture, target.as_ref())
-            .await
+        self.finish_set_value_output(
+            output,
+            verified,
+            &capture,
+            target.as_ref(),
+            named_snapshot.as_deref(),
+        )
+        .await
     }
 
     async fn dispatch_set_value(&self, params: SetValueParams) -> (ActionOutput, Option<bool>) {
@@ -1973,9 +1993,16 @@ impl ComputerUseLinux {
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
         let target = params.window_target();
+        let named_snapshot = params.snapshot_id.clone();
         let Json(output) = self.dispatch_scroll(params).await;
-        self.finish_action_output(output, &capture, target.as_ref(), TargetRaised::Yes)
-            .await
+        self.finish_action_output(
+            output,
+            &capture,
+            target.as_ref(),
+            TargetRaised::Yes,
+            named_snapshot.as_deref(),
+        )
+        .await
     }
 
     async fn dispatch_scroll(&self, mut params: ScrollParams) -> Json<ActionOutput> {
@@ -2454,7 +2481,7 @@ impl ComputerUseLinux {
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
         let Json(output) = self.dispatch_drag(params).await;
-        self.finish_action_output(output, &capture, None, TargetRaised::Yes)
+        self.finish_action_output(output, &capture, None, TargetRaised::Yes, None)
             .await
     }
 
@@ -2698,7 +2725,7 @@ impl ComputerUseLinux {
         let target = params.window_target();
         let Json(output) = self.dispatch_press_key(params).await;
         let raised = keyboard_target_raised(&target);
-        self.finish_action_output(output, &capture, Some(&target), raised)
+        self.finish_action_output(output, &capture, Some(&target), raised, None)
             .await
     }
 
@@ -2961,7 +2988,7 @@ impl ComputerUseLinux {
             );
         }
         let raised = keyboard_target_raised(&target);
-        self.finish_action_output(output, &capture, Some(&target), raised)
+        self.finish_action_output(output, &capture, Some(&target), raised, None)
             .await
     }
 
@@ -3296,7 +3323,7 @@ impl ComputerUseLinux {
                 registry::move_window(&window, params.x, params.y).await
             })
             .await;
-        self.finish_window_geometry_output(output, &capture, &target)
+        self.finish_window_geometry_output(output, &capture, &target, None)
             .await
     }
 
@@ -3324,7 +3351,7 @@ impl ComputerUseLinux {
                 registry::resize_window(&window, params.width, params.height).await
             })
             .await;
-        self.finish_window_geometry_output(output, &capture, &target)
+        self.finish_window_geometry_output(output, &capture, &target, None)
             .await
     }
 }
@@ -5448,6 +5475,7 @@ impl ComputerUseLinux {
         target: Option<&WindowTarget>,
         fallback_window: Option<&WindowInfo>,
         raised: TargetRaised,
+        named_snapshot: Option<&str>,
     ) -> (
         PostActionObservation,
         Option<ScreenshotCapture>,
@@ -5591,19 +5619,12 @@ impl ComputerUseLinux {
             // that app may not be the one holding it.
             let window_targeted = resolved_window.is_some()
                 && (target.is_some_and(WindowTarget::has_target) || fallback_window.is_some());
+            let (cached_pid, cached_tree) = self.cached_post_action_context(named_snapshot);
             let target_pid = resolved_window
                 .as_ref()
                 .and_then(|window| window.pid)
                 .or_else(|| target.and_then(|target| target.pid))
-                .or_else(|| {
-                    if window_targeted {
-                        return None;
-                    }
-                    self.last_snapshot
-                        .lock()
-                        .ok()
-                        .and_then(|snapshot| snapshot.pid)
-                });
+                .or(cached_pid.filter(|_| !window_targeted));
             let candidates = accessibility_filter_candidates(resolved_window.as_ref());
             let mut app_filter = None;
             if let Some(pid) = target_pid {
@@ -5618,13 +5639,6 @@ impl ComputerUseLinux {
                 || target_pid.is_some()
                 || app_filter.is_some();
             let (max_nodes, max_depth) = crate::atspi_tree::snapshot_limits(None, None);
-            let cached_tree = self.last_snapshot.lock().ok().and_then(|snapshot| {
-                Some(CachedTreeWindow {
-                    scope: snapshot.window_scope.clone()?,
-                    pid: snapshot.pid,
-                    window: snapshot.window_id.zip(snapshot.window_backend.clone()),
-                })
-            });
             let window_title = post_action_window_title(
                 target,
                 resolved_window.as_ref(),
@@ -5759,6 +5773,7 @@ impl ComputerUseLinux {
         capture: &PostActionCaptureParams,
         target: Option<&WindowTarget>,
         raised: TargetRaised,
+        named_snapshot: Option<&str>,
     ) -> Result<CallToolResult, ErrorData> {
         if !output.ok {
             return self.action_tool_result(
@@ -5770,7 +5785,7 @@ impl ComputerUseLinux {
             );
         }
         let (observation, screenshot, notes) = self
-            .capture_post_action_observation(capture, target, None, raised)
+            .capture_post_action_observation(capture, target, None, raised, named_snapshot)
             .await;
         output = with_notes(output, notes);
         self.action_tool_result(
@@ -5788,6 +5803,7 @@ impl ComputerUseLinux {
         verified: Option<bool>,
         capture: &PostActionCaptureParams,
         target: Option<&WindowTarget>,
+        named_snapshot: Option<&str>,
     ) -> Result<CallToolResult, ErrorData> {
         if !output.ok && verified != Some(false) {
             return self.action_tool_result(
@@ -5800,7 +5816,13 @@ impl ComputerUseLinux {
             );
         }
         let (observation, screenshot, notes) = self
-            .capture_post_action_observation(capture, target, None, TargetRaised::No)
+            .capture_post_action_observation(
+                capture,
+                target,
+                None,
+                TargetRaised::No,
+                named_snapshot,
+            )
             .await;
         output = with_notes(output, notes);
         self.action_tool_result(
@@ -5818,6 +5840,7 @@ impl ComputerUseLinux {
         output: ActivateWindowOutput,
         capture: &PostActionCaptureParams,
         target: &WindowTarget,
+        named_snapshot: Option<&str>,
     ) -> Result<CallToolResult, ErrorData> {
         if !output.ok {
             return self.action_tool_result(
@@ -5840,6 +5863,7 @@ impl ComputerUseLinux {
                 Some(target),
                 fallback_window,
                 TargetRaised::Yes,
+                named_snapshot,
             )
             .await;
         let message = (!notes.is_empty()).then(|| notes.join(" "));
@@ -5858,6 +5882,7 @@ impl ComputerUseLinux {
         mut output: WindowGeometryOutput,
         capture: &PostActionCaptureParams,
         target: &WindowTarget,
+        named_snapshot: Option<&str>,
     ) -> Result<CallToolResult, ErrorData> {
         if !output.ok {
             return self.action_tool_result(
@@ -5875,6 +5900,7 @@ impl ComputerUseLinux {
                 Some(target),
                 fallback_window,
                 TargetRaised::Yes,
+                named_snapshot,
             )
             .await;
         for note in notes {
@@ -6889,10 +6915,46 @@ impl ComputerUseLinux {
         self.cache_snapshot(nodes, target_pid);
     }
 
-    /// Drop the cached tree, under the input lock like every store.
+    /// Drop the cached tree, under the input lock like every store. Over HTTP
+    /// the tree stays: other clients still hold its snapshot_id.
     async fn commit_cleared_snapshot(&self) {
+        if self.require_snapshot_ids {
+            return;
+        }
         let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         self.clear_snapshot();
+    }
+
+    /// Whether a post-action tree may reuse the cached tree's scope: always on
+    /// stdio, and over HTTP only when the action named that snapshot, since
+    /// another client's get_app_state may have stored it.
+    fn cached_scope_belongs_to_request(
+        &self,
+        cached: &CachedAccessibilitySnapshot,
+        named_snapshot: Option<&str>,
+    ) -> bool {
+        !self.require_snapshot_ids
+            || trimmed_nonempty(named_snapshot).is_some_and(|named| named == cached.id)
+    }
+
+    /// The cached tree's pid and window scope, for a post-action tree with
+    /// no target of its own; one lock section checks and reads both.
+    fn cached_post_action_context(
+        &self,
+        named_snapshot: Option<&str>,
+    ) -> (Option<u32>, Option<CachedTreeWindow>) {
+        let Ok(snapshot) = self.last_snapshot.lock() else {
+            return (None, None);
+        };
+        if !self.cached_scope_belongs_to_request(&snapshot, named_snapshot) {
+            return (None, None);
+        }
+        let window = snapshot.window_scope.clone().map(|scope| CachedTreeWindow {
+            scope,
+            pid: snapshot.pid,
+            window: snapshot.window_id.zip(snapshot.window_backend.clone()),
+        });
+        (snapshot.pid, window)
     }
 
     /// Drop the cached tree and its spill file. The empty snapshot has no id,
@@ -19777,6 +19839,7 @@ echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
                 },
                 &activate_capture,
                 &WindowTarget::default(),
+                None,
             )
             .await
             .unwrap();
@@ -19827,6 +19890,7 @@ echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
                     window_id: Some(7),
                     ..Default::default()
                 },
+                None,
             )
             .await
             .unwrap();
@@ -20119,7 +20183,7 @@ echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
         let (output, verified) =
             editable_text_action_result(EditableTextSetOutcome::MismatchAfterDeadline, None);
         let result = server
-            .finish_set_value_output(output, verified, &set_value_capture, None)
+            .finish_set_value_output(output, verified, &set_value_capture, None, None)
             .await
             .unwrap();
         assert_eq!(result.is_error, Some(true));
@@ -20137,7 +20201,7 @@ echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
         std::fs::write(&log_path, "").unwrap();
         let output = action_result("set_value", Err("pre-dispatch failure".to_string()), None);
         let result = server
-            .finish_set_value_output(output, None, &set_value_capture, None)
+            .finish_set_value_output(output, None, &set_value_capture, None, None)
             .await
             .unwrap();
         assert_eq!(result.is_error, Some(true));
@@ -21010,5 +21074,62 @@ mod snapshot_handle_tests {
             .0;
         assert_eq!(page.node_count, 1);
         assert_eq!(page.snapshot_id, Some(id));
+    }
+
+    /// Client B's tree: its app is pid 42 and it was narrowed to "Window 20".
+    fn cache_client_b_tree(backend: &ComputerUseLinux) -> String {
+        let id = backend.cache_snapshot(&[node(FIRST_REF)], Some(42));
+        backend.last_snapshot.lock().unwrap().window_scope = Some("Window 20".to_string());
+        id
+    }
+
+    #[test]
+    fn http_post_action_tree_ignores_another_clients_scope() {
+        let http = ComputerUseLinux {
+            require_snapshot_ids: true,
+            ..Default::default()
+        };
+        let b_id = cache_client_b_tree(&http);
+        // Client A's action names no snapshot: nothing comes from B's tree.
+        let (pid, window) = http.cached_post_action_context(None);
+        assert_eq!(pid, None);
+        assert!(window.is_none(), "{window:?}");
+        let (pid, window) = http.cached_post_action_context(Some("  "));
+        assert_eq!(pid, None);
+        assert!(window.is_none(), "{window:?}");
+        // Client B named its own snapshot, so its scope carries over.
+        let (pid, window) = http.cached_post_action_context(Some(&format!(" {b_id} ")));
+        assert_eq!(pid, Some(42));
+        assert_eq!(window.unwrap().scope, "Window 20");
+
+        let stdio = ComputerUseLinux::default();
+        cache_client_b_tree(&stdio);
+        let (pid, window) = stdio.cached_post_action_context(None);
+        assert_eq!(pid, Some(42));
+        let window = window.unwrap();
+        assert_eq!(window.scope, "Window 20");
+        assert_eq!(window.pid, Some(42));
+    }
+
+    #[tokio::test]
+    async fn http_failed_read_keeps_the_cached_tree() {
+        let http = ComputerUseLinux {
+            require_snapshot_ids: true,
+            ..Default::default()
+        };
+        let id = http.cache_snapshot(&[node(FIRST_REF)], None);
+        http.commit_cleared_snapshot().await;
+        assert_eq!(
+            http.check_element_snapshot("click", Some(&id), true),
+            Ok(())
+        );
+
+        let stdio = ComputerUseLinux::default();
+        let id = stdio.cache_snapshot(&[node(FIRST_REF)], None);
+        stdio.commit_cleared_snapshot().await;
+        let refused = stdio
+            .check_element_snapshot("click", Some(&id), true)
+            .unwrap_err();
+        assert!(refused.contains("no tree is cached now"), "{refused}");
     }
 }
