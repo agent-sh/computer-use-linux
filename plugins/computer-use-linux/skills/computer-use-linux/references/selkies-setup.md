@@ -5,7 +5,7 @@ description: "Run computer-use-linux inside a linuxserver.io Selkies desktop con
 
 # Selkies Container Setup
 
-linuxserver.io's Selkies images (`webtop`, `chrome`, and the other desktop apps) run a full desktop in a container. Run `computer-use-linux` inside the container and let the MCP client on the host reach it over stdio through `docker exec`. No port is opened.
+linuxserver.io's Selkies images (`webtop`, `chrome`, and the other desktop apps) run a full desktop in a container. Run `computer-use-linux` inside the container and let the MCP client on the host reach it over stdio through `docker exec`. This stdio setup opens no port. To reach the server over the network instead, see [Serve MCP over HTTP](#serve-mcp-over-http).
 
 ## Start the container with `PELORUS=true`
 
@@ -73,6 +73,29 @@ On the host, point the client at the launcher through `docker exec -i`:
   "args": ["exec", "-i", "-u", "abc", "desktop", "/config/.local/bin/computer-use-linux-selkies"]
 }
 ```
+
+## Serve MCP over HTTP
+
+When the client cannot `docker exec` into the container, for example in Kubernetes, run the launcher with `--listen`. Mount the token from a Secret and name the Service clients use:
+
+```bash
+COMPUTER_USE_LINUX_MCP_TOKEN_FILE=/run/secrets/mcp/token \
+  /config/.local/bin/computer-use-linux-selkies mcp --listen 0.0.0.0:5200 --allowed-host desktop
+```
+
+`--allowed-host` takes the Service name (`desktop`, or `desktop.ns.svc`); repeat it for each name clients use. Do not set `COMPUTER_USE_LINUX_ENABLE_SHELL=1`; `--listen` refuses to start with it. The port is plain HTTP, so put TLS in front with a service mesh, ingress or sidecar.
+
+Point the client at the URL with the bearer header:
+
+```json
+{
+  "type": "http",
+  "url": "http://desktop:5200/mcp",
+  "headers": { "Authorization": "Bearer <token>" }
+}
+```
+
+Over HTTP, pass the `snapshot_id` from your latest `get_app_state` to every call that picks an element by index or selector.
 
 ## Check it
 

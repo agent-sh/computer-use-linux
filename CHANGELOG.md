@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `mcp --listen ADDR:PORT` serves MCP over streamable HTTP at `/mcp` (#362). It needs a bearer token from `COMPUTER_USE_LINUX_MCP_TOKEN_FILE` or `COMPUTER_USE_LINUX_MCP_TOKEN`, refuses requests with an `Origin` header or a `Host` outside `--allowed-host`, and refuses to start with `COMPUTER_USE_LINUX_ENABLE_SHELL=1`. Over HTTP, element calls by index or selector must pass `snapshot_id`. Without `--listen` the server is unchanged and opens no socket.
+
 ## [0.7.49] - 2026-11-09
 
 ### Security

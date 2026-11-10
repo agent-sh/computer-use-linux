@@ -160,9 +160,16 @@ does not yet forward the flag or include the tool in its catalog.
   unknown/mixed output scaling leave window-relative coordinates unavailable;
   focus the target and inspect a fresh full-screen screenshot before using
   desktop coordinates.
+- **HTTP MCP**: `computer-use-linux mcp --listen ADDR:PORT` serves streamable
+  HTTP at `/mcp`. It needs a token from the file in `COMPUTER_USE_LINUX_MCP_TOKEN_FILE`
+  or from `COMPUTER_USE_LINUX_MCP_TOKEN`; clients send `Authorization: Bearer <token>`.
+  A bind that is not loopback needs `--allowed-host NAME` for each hostname clients
+  use. Requests with an `Origin` header are refused, and `--listen` refuses to start
+  with `COMPUTER_USE_LINUX_ENABLE_SHELL=1`. Over HTTP, calls that pick an element by
+  index or selector must pass `snapshot_id`. The port is plain HTTP; put TLS in front
+  (service mesh, ingress or sidecar).
 
 ## Input & coordinate contracts
-- **HTTP MCP**: `computer-use-linux mcp --listen 127.0.0.1:5200` needs `COMPUTER_USE_LINUX_MCP_TOKEN`. Clients send `Authorization: Bearer <token>`. The port is plain HTTP; keep it on loopback or a private network.
 
 - **Snapshot ids**: `get_app_state`, `include_tree` observations and
   `get_tree_page` return the `snapshot_id` of their tree. The server caches
