@@ -148,6 +148,8 @@ pub(crate) async fn serve_http(server: ComputerUseLinux, config: ListenConfig) -
             },
             _ = terminate.recv() => break libc::SIGTERM,
             _ = interrupt.recv() => break libc::SIGINT,
+            // Drop finished connections so the set does not grow for the server's lifetime.
+            Some(_) = connections.join_next(), if !connections.is_empty() => continue,
         };
         let service = service.clone();
         let shutdown = shutdown.clone();
