@@ -83,9 +83,9 @@ COMPUTER_USE_LINUX_MCP_TOKEN_FILE=/run/secrets/mcp/token \
   /config/.local/bin/computer-use-linux-selkies mcp --listen 0.0.0.0:5200 --allowed-host desktop
 ```
 
-`--allowed-host` takes the Service name (`desktop`, or `desktop.ns.svc`); repeat it for each name clients use. Do not set `COMPUTER_USE_LINUX_ENABLE_SHELL=1`; `--listen` refuses to start with it. The port is plain HTTP, so put TLS in front with a service mesh, ingress or sidecar.
+`--allowed-host` takes the Service name (`desktop`, or `desktop.ns.svc`); repeat it for each name clients use. A loopback bind such as `127.0.0.1:5200` needs no `--allowed-host`. Do not set `COMPUTER_USE_LINUX_ENABLE_SHELL=1`; `--listen` refuses to start with it. The port is plain HTTP, so put TLS in front with a service mesh, ingress or sidecar.
 
-Point the client at the URL with the bearer header:
+For Claude Code, add the server to `.mcp.json` with the URL and the bearer header:
 
 ```json
 {
@@ -94,6 +94,8 @@ Point the client at the URL with the bearer header:
   "headers": { "Authorization": "Bearer <token>" }
 }
 ```
+
+Other clients take the same URL and `Authorization: Bearer <token>` header in their own config format.
 
 Over HTTP, pass the `snapshot_id` from your latest `get_app_state` to every call that picks an element by index or selector.
 
