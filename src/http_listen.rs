@@ -1,13 +1,14 @@
 use crate::server::ComputerUseLinux;
 use anyhow::{Context, Result};
 use axum::extract::Request;
-use axum::http::header::AUTHORIZATION;
+use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
+use sha2::Digest;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -15,6 +16,10 @@ pub(crate) struct ListenConfig {
     pub addr: SocketAddr,
     pub allowed_hosts: Vec<String>,
     pub token: String,
+}
+
+pub(crate) fn token_digest(token: &str) -> [u8; 32] {
+    sha2::Sha256::digest(token.as_bytes()).into()
 }
 
 /// Reads the bearer token, then removes both variables so children do not inherit them.
@@ -58,28 +63,33 @@ pub(crate) fn validate_listen(config: &ListenConfig, shell_enabled: bool) -> Res
     Ok(())
 }
 
-pub(crate) fn token_matches(header: Option<&HeaderValue>, token: &str) -> bool {
-    if token.is_empty() {
-        return false;
-    }
+pub(crate) fn bearer_matches(header: Option<&HeaderValue>, expected: &[u8; 32]) -> bool {
     let Some(header) = header.and_then(|value| value.to_str().ok()) else {
         return false;
     };
-    let Some(presented) = header.strip_prefix("Bearer ") else {
+    let Some((scheme, credentials)) = header.split_once(' ') else {
         return false;
     };
-    if presented.len() != token.len() {
+    let credentials = credentials.trim();
+    if !scheme.eq_ignore_ascii_case("bearer") || credentials.is_empty() {
         return false;
     }
-    let mut diff = 0u8;
-    for (left, right) in presented.bytes().zip(token.bytes()) {
-        diff |= left ^ right;
-    }
+    let presented = token_digest(credentials);
+    let diff = presented
+        .iter()
+        .zip(expected)
+        .fold(0u8, |diff, (left, right)| diff | (left ^ right));
     diff == 0
 }
 
 pub(crate) async fn serve_http(server: ComputerUseLinux, config: ListenConfig) -> Result<()> {
-    let ListenConfig { addr, token, .. } = config;
+    let ListenConfig {
+        addr,
+        allowed_hosts: allowed_hosts_extra,
+        token,
+    } = config;
+    let digest = token_digest(&token);
+    drop(token);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("could not listen on {addr}"))?;
@@ -87,8 +97,11 @@ pub(crate) async fn serve_http(server: ComputerUseLinux, config: ListenConfig) -
         .local_addr()
         .context("could not read the bound address")?;
     eprintln!("listening {bound}");
-    let mut http_config = StreamableHttpServerConfig::default();
-    http_config.json_response = true;
+    let mut allowed_hosts = vec!["localhost".to_string(), "127.0.0.1".into(), "::1".into()];
+    allowed_hosts.extend(allowed_hosts_extra);
+    let http_config = StreamableHttpServerConfig::default()
+        .with_allowed_hosts(allowed_hosts)
+        .enforce_origin_validation();
     let service = StreamableHttpService::new(
         {
             let server = server.clone();
@@ -97,19 +110,17 @@ pub(crate) async fn serve_http(server: ComputerUseLinux, config: ListenConfig) -
         Arc::new(LocalSessionManager::default()),
         http_config,
     );
-    let token = Arc::<str>::from(token);
     let app = Router::new()
         .nest_service("/mcp", service)
-        .layer(middleware::from_fn(move |request: Request, next: Next| {
-            let token = Arc::clone(&token);
-            async move {
-                if token_matches(request.headers().get(AUTHORIZATION), &token) {
+        .layer(middleware::from_fn(
+            move |request: Request, next: Next| async move {
+                if bearer_matches(request.headers().get(AUTHORIZATION), &digest) {
                     next.run(request).await
                 } else {
                     unauthorized()
                 }
-            }
-        }));
+            },
+        ));
     axum::serve(listener, app)
         .await
         .context("MCP HTTP listener stopped")?;
@@ -117,7 +128,12 @@ pub(crate) async fn serve_http(server: ComputerUseLinux, config: ListenConfig) -
 }
 
 fn unauthorized() -> Response {
-    (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
+    (
+        StatusCode::UNAUTHORIZED,
+        [(WWW_AUTHENTICATE, "Bearer")],
+        "unauthorized",
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -129,17 +145,27 @@ mod tests {
     }
 
     #[test]
-    fn token_matches_only_exact_bearer() {
-        assert!(token_matches(Some(&header("Bearer secret")), "secret"));
-        assert!(!token_matches(None, "secret"));
-        assert!(!token_matches(Some(&header("Basic secret")), "secret"));
-        assert!(!token_matches(Some(&header("Bearer other")), "secret"));
-        assert!(!token_matches(
-            Some(&header("Bearer secret-extra")),
-            "secret"
-        ));
-        assert!(!token_matches(Some(&header("bearer secret")), "secret"));
-        assert!(!token_matches(Some(&header("Bearer secret")), ""));
+    fn bearer_matches_any_case_and_only_the_token() {
+        let expected = token_digest("secret");
+        for good in [
+            "Bearer secret",
+            "bearer secret",
+            "BEARER secret",
+            "Bearer   secret",
+        ] {
+            assert!(bearer_matches(Some(&header(good)), &expected), "{good}");
+        }
+        for bad in [
+            "Bearer secre",
+            "Bearer secrets",
+            "Bearer",
+            "Bearer ",
+            "Basic secret",
+            "secret",
+        ] {
+            assert!(!bearer_matches(Some(&header(bad)), &expected), "{bad}");
+        }
+        assert!(!bearer_matches(None, &expected));
     }
 
     const FILE_VAR: &str = "COMPUTER_USE_LINUX_MCP_TOKEN_FILE";

@@ -115,9 +115,14 @@ impl Drop for Hermetic {
 }
 
 fn spawn(hermetic: &Hermetic, token: Option<&str>) -> std::process::Child {
+    spawn_with(hermetic, token, &[])
+}
+
+fn spawn_with(hermetic: &Hermetic, token: Option<&str>, args: &[&str]) -> std::process::Child {
     let mut command = hermetic.command();
     command
         .args(["mcp", "--listen", "127.0.0.1:0"])
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -157,12 +162,28 @@ fn post(
     body: &str,
     session: Option<&str>,
 ) -> (u16, String, Option<String>) {
+    post_with(port, token, body, session, &[])
+}
+
+/// `extra` headers are sent as given; a `Host` entry replaces the default one.
+fn post_with(
+    port: u16,
+    token: Option<&str>,
+    body: &str,
+    session: Option<&str>,
+    extra: &[(&str, &str)],
+) -> (u16, String, Option<String>) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(12)))
         .unwrap();
+    let default_host = format!("127.0.0.1:{port}");
+    let host = extra
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+        .map_or(default_host.as_str(), |(_, value)| value);
     let mut headers = format!(
-        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n",
+        "POST /mcp HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
     );
     if let Some(token) = token {
@@ -170,6 +191,11 @@ fn post(
     }
     if let Some(session) = session {
         headers.push_str(&format!("Mcp-Session-Id: {session}\r\n"));
+    }
+    for (name, value) in extra {
+        if !name.eq_ignore_ascii_case("host") {
+            headers.push_str(&format!("{name}: {value}\r\n"));
+        }
     }
     headers.push_str("\r\n");
     stream.write_all(headers.as_bytes()).unwrap();
@@ -191,10 +217,14 @@ fn post(
     (status, text, session)
 }
 
-fn initialize(port: u16, name: &str) -> String {
-    let body = format!(
+fn initialize_body(name: &str) -> String {
+    format!(
         r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2024-11-05","capabilities":{{}},"clientInfo":{{"name":"{name}","version":"0"}}}}}}"#
-    );
+    )
+}
+
+fn initialize(port: u16, name: &str) -> String {
+    let body = initialize_body(name);
     let (status, text, session) = post(port, Some(TOKEN), &body, None);
     assert_eq!(status, 200, "{text}");
     session.expect("session id")
@@ -292,5 +322,80 @@ fn http_client_disconnect_does_not_wedge() {
     );
     assert_eq!(status, 200, "{body}");
     let _ = child.kill();
+    assert_eq!(hermetic.recorded(), "");
+}
+
+#[test]
+fn unauthorized_says_bearer() {
+    let hermetic = Hermetic::new();
+    let mut child = spawn(&hermetic, Some(TOKEN));
+    let port = bound_port(&mut child);
+    let (status, text, _) = post(port, None, &initialize_body("cul"), None);
+    let _ = child.kill();
+    assert_eq!(status, 401, "{text}");
+    assert!(
+        text.lines()
+            .any(|line| line.eq_ignore_ascii_case("www-authenticate: Bearer")),
+        "{text}"
+    );
+    assert_eq!(hermetic.recorded(), "");
+}
+
+#[test]
+fn allowed_and_unknown_hosts() {
+    let hermetic = Hermetic::new();
+    let mut child = spawn_with(
+        &hermetic,
+        Some(TOKEN),
+        &["--allowed-host", "desktop.ns.svc"],
+    );
+    let port = bound_port(&mut child);
+    let body = initialize_body("cul");
+    let results: Vec<_> = ["desktop.ns.svc:5200", "Desktop.NS.svc", "evil.example"]
+        .iter()
+        .map(|host| post_with(port, Some(TOKEN), &body, None, &[("Host", host)]))
+        .collect();
+    let _ = child.kill();
+    assert_eq!(results[0].0, 200, "{}", results[0].1);
+    assert_eq!(results[1].0, 200, "{}", results[1].1);
+    assert_eq!(results[2].0, 403, "{}", results[2].1);
+    assert_eq!(hermetic.recorded(), "");
+}
+
+#[test]
+fn any_origin_is_refused() {
+    let hermetic = Hermetic::new();
+    let mut child = spawn(&hermetic, Some(TOKEN));
+    let port = bound_port(&mut child);
+    let (status, text, _) = post_with(
+        port,
+        Some(TOKEN),
+        &initialize_body("cul"),
+        None,
+        &[("Origin", "http://127.0.0.1")],
+    );
+    let _ = child.kill();
+    assert_eq!(status, 403, "{text}");
+    assert_eq!(hermetic.recorded(), "");
+}
+
+#[test]
+fn stateless_request_from_the_newer_protocol() {
+    let hermetic = Hermetic::new();
+    let mut child = spawn(&hermetic, Some(TOKEN));
+    let port = bound_port(&mut child);
+    let (status, text, _) = post_with(
+        port,
+        Some(TOKEN),
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"cul","version":"0"},"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+        None,
+        &[
+            ("MCP-Protocol-Version", "2026-07-28"),
+            ("Mcp-Method", "tools/list"),
+        ],
+    );
+    let _ = child.kill();
+    assert_eq!(status, 200, "{text}");
+    assert!(text.contains("get_app_state"), "{text}");
     assert_eq!(hermetic.recorded(), "");
 }
