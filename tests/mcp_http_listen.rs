@@ -65,7 +65,12 @@ exit 1
             .env("DISPLAY", ":9876")
             .env("WAYLAND_DISPLAY", "no-wayland")
             .env("XDG_SESSION_TYPE", "wayland")
+            .env("YDOTOOL_SOCKET", self.dir.join("no-ydotool"))
+            .env("NIRI_SOCKET", self.dir.join("no-niri"))
             .env("CU_DISABLE_ABS_POINTER", "1");
+        // Keep in step with DESKTOP_ENV_KEYS in src/diagnostics.rs: the server
+        // fills any empty one from the process tree; checked by
+        // hermetic_sets_every_desktop_key.
         for key in [
             "DESKTOP_SESSION",
             "HYPRLAND_INSTANCE_SIGNATURE",
@@ -80,6 +85,26 @@ exit 1
 
     fn recorded(&self) -> String {
         std::fs::read_to_string(self.dir.join("commands.log")).unwrap_or_default()
+    }
+}
+
+#[test]
+fn hermetic_sets_every_desktop_key() {
+    let source = include_str!("../src/diagnostics.rs");
+    let list = source
+        .split_once("const DESKTOP_ENV_KEYS: &[&str] = &[")
+        .and_then(|(_, rest)| rest.split_once("];"))
+        .expect("DESKTOP_ENV_KEYS not found in src/diagnostics.rs")
+        .0;
+    let hermetic = Hermetic::new();
+    let command = hermetic.command();
+    let keys: Vec<&str> = list.split('"').skip(1).step_by(2).collect();
+    assert!(!keys.is_empty());
+    for key in keys {
+        let set = command
+            .get_envs()
+            .any(|(name, value)| name == key && value.is_some_and(|v| !v.is_empty()));
+        assert!(set, "Hermetic::command() leaves {key} empty");
     }
 }
 
