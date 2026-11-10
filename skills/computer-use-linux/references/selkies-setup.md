@@ -76,11 +76,10 @@ On the host, point the client at the launcher through `docker exec -i`:
 
 ## Serve MCP over HTTP
 
-When the client cannot `docker exec` into the container, for example in Kubernetes, run the launcher with `--listen`. Mount the token from a Secret and name the Service clients use:
+When the client cannot `docker exec` into the container, for example in Kubernetes, run the launcher with `--listen`. Mount the token from a Secret and set `COMPUTER_USE_LINUX_MCP_TOKEN_FILE=/run/secrets/mcp/token` in the container environment (`docker run -e …` or the pod spec's `env:`). The launcher runs under s6 `with-contenv`, which drops variables set inline on its command line and loads only the container environment. Then name the Service clients use:
 
 ```bash
-COMPUTER_USE_LINUX_MCP_TOKEN_FILE=/run/secrets/mcp/token \
-  /config/.local/bin/computer-use-linux-selkies mcp --listen 0.0.0.0:5200 --allowed-host desktop
+/config/.local/bin/computer-use-linux-selkies mcp --listen 0.0.0.0:5200 --allowed-host desktop
 ```
 
 `--allowed-host` takes the Service name (`desktop`, or `desktop.ns.svc`); repeat it for each name clients use. A loopback bind such as `127.0.0.1:5200` needs no `--allowed-host`. Do not set `COMPUTER_USE_LINUX_ENABLE_SHELL=1`; `--listen` refuses to start with it. The port is plain HTTP, so put TLS in front with a service mesh, ingress or sidecar.
@@ -97,7 +96,7 @@ For Claude Code, add the server to `.mcp.json` with the URL and the bearer heade
 
 Other clients take the same URL and `Authorization: Bearer <token>` header in their own config format.
 
-Over HTTP, pass the `snapshot_id` from your latest `get_app_state` to every call that picks an element by index or selector.
+Over HTTP, pass the `snapshot_id` from your latest `get_app_state` to every `get_tree_page` call and every call that picks an element by index or selector.
 
 ## Check it
 

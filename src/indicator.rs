@@ -270,7 +270,6 @@ pub(crate) struct Indicator {
     mask_text: bool,
     agent_override: Option<String>,
     peer: OnceLock<Peer<RoleServer>>,
-    client_name: Mutex<Option<String>>,
     socket: Option<UnixDatagram>,
     /// The overlay's socket.
     path: Option<PathBuf>,
@@ -294,7 +293,6 @@ impl Default for Indicator {
                 .ok()
                 .filter(|name| !name.trim().is_empty()),
             peer: OnceLock::new(),
-            client_name: Mutex::new(None),
             socket,
             path: live.then(socket_path).flatten(),
             overlay: Mutex::new(Overlay::NotStarted),
@@ -341,20 +339,11 @@ impl Indicator {
         let _ = self.peer.set(peer);
     }
 
-    pub(crate) fn remember_client(&self, name: &str, title: Option<&str>) {
-        if let Ok(mut guard) = self.client_name.lock() {
-            *guard = Some(agent_display_name(name, title));
-        }
-    }
-
     fn agent(&self) -> String {
         if let Some(name) = &self.agent_override {
             return name.clone();
         }
         if let Ok(name) = REQUEST_AGENT.try_with(String::clone) {
-            return name;
-        }
-        if let Some(name) = self.client_name.lock().ok().and_then(|guard| guard.clone()) {
             return name;
         }
         self.peer
@@ -716,12 +705,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_agent_wins_over_the_last_initialize() {
+    async fn request_agent_names_each_event_and_unscoped_events_fall_back() {
         let indicator = Indicator {
             agent_override: None,
             ..Indicator::default()
         };
-        indicator.remember_client("Gamma", None);
         let named = |agent: &'static str| {
             with_request_agent(Some(agent.to_string()), async {
                 tokio::task::yield_now().await;
@@ -730,10 +718,10 @@ mod tests {
         };
         let (alpha, beta) = tokio::join!(named("Alpha"), named("Beta"));
         assert_eq!((alpha.as_str(), beta.as_str()), ("Alpha", "Beta"));
-        assert_eq!(indicator.event("click").agent, "Gamma");
+        assert_eq!(indicator.event("click").agent, "Agent");
         assert_eq!(
             with_request_agent(None, async { indicator.event("click").agent }).await,
-            "Gamma"
+            "Agent"
         );
     }
 
@@ -808,7 +796,6 @@ mod tests {
             mask_text: false,
             agent_override: None,
             peer: OnceLock::new(),
-            client_name: Mutex::new(None),
             socket: Some(socket),
             path: Some(path.to_path_buf()),
             overlay: Mutex::new(Overlay::Unavailable),

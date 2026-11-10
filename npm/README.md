@@ -165,8 +165,8 @@ does not yet forward the flag or include the tool in its catalog.
   or from `COMPUTER_USE_LINUX_MCP_TOKEN`; clients send `Authorization: Bearer <token>`.
   A bind that is not loopback needs `--allowed-host NAME` for each hostname clients
   use. Requests with an `Origin` header are refused, and `--listen` refuses to start
-  with `COMPUTER_USE_LINUX_ENABLE_SHELL=1`. Over HTTP, calls that pick an element by
-  index or selector must pass `snapshot_id`. The port is plain HTTP; put TLS in front
+  with `COMPUTER_USE_LINUX_ENABLE_SHELL=1`. Over HTTP, `get_tree_page` and calls that pick
+  an element by index or selector must pass `snapshot_id`. The port is plain HTTP; put TLS in front
   (service mesh, ingress or sidecar).
 
 ## Input & coordinate contracts

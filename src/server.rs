@@ -588,7 +588,7 @@ impl ComputerUseLinux {
         let capture = params.capture.clone();
         let target = params.clone().into_target();
         let Json(output) = self.dispatch_activate_window(params).await;
-        self.finish_activate_window_output(output, &capture, &target, None)
+        self.finish_activate_window_output(output, &capture, &target)
             .await
     }
 
@@ -3323,7 +3323,7 @@ impl ComputerUseLinux {
                 registry::move_window(&window, params.x, params.y).await
             })
             .await;
-        self.finish_window_geometry_output(output, &capture, &target, None)
+        self.finish_window_geometry_output(output, &capture, &target)
             .await
     }
 
@@ -3351,7 +3351,7 @@ impl ComputerUseLinux {
                 registry::resize_window(&window, params.width, params.height).await
             })
             .await;
-        self.finish_window_geometry_output(output, &capture, &target, None)
+        self.finish_window_geometry_output(output, &capture, &target)
             .await
     }
 }
@@ -3367,19 +3367,6 @@ impl ComputerUseLinux {
     instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If readiness reports can_query_windows or can_focus_windows false on GNOME, call setup_window_targeting to install the GNOME Shell extension, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend captures size-bounded screenshots (pixelflux when configured, GNOME Shell, the XDG portal, native X11, gnome-screenshot; grim in Hyprland background mode), reads AT-SPI trees with action/value metadata, invokes native AT-SPI actions, sets AT-SPI values or editable text, lists and focuses compositor windows through registered Linux window backends when the session permits it, and attaches best-effort terminal tty/process metadata to terminal windows. Click, scroll and drag try pixelflux when configured, xdotool on native X11, the uinput pointer, the RemoteDesktop portal (an open portal session, or when ydotool is absent, on COSMIC, or when forced), then ydotool outside Wayland. On Wayland a point never goes through ydotool: without uinput or the portal a coordinate action is refused; a coordinate scroll sends the move and the wheel through the uinput pointer, and an untargeted scroll sends the wheel through ydotool, or the portal without its daemon. The uinput pointer is sized to the latest full screenshot; take a new one after the desktop size changes. type_text sends literal text through pixelflux when configured (an unreachable pixelflux falls through), KDE clipboard paste on Plasma Wayland (raw ydotool when Klipper cannot be read), wtype on compatible Wayland compositors, portal keysyms on other Wayland sessions, or xdotool on X11. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Mutating tools (click, type_text, press_key, scroll, drag, perform_action, set_value, activate_window, move_window, resize_window) accept optional screenshot_after (true, \"screen\", or \"window\") with format/quality/scale/max_width/max_height/max_bytes and optional include_tree=true to return post-action observation in the same tool call. A failed action returns no observation, except set_value with verified=false. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. Pass that result's snapshot_id with the index or selector: each get_app_state or include_tree tree replaces the cached one, and a call naming a replaced snapshot is refused before any input. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable); type_text also warns when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype passes classified nonsecret text as one literal argument after -- to avoid stdin keymap-refresh corruption; that text is visible in process arguments, so confirmed password fields are rejected (use set_value), and terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call (split larger input or expose accessibility). Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. X11 xdotool can silently substitute symbols under non-US XKB layouts (reported with br/ABNT2) or changing keymap state; inspect the text before pressing Enter or submitting it. A successful type_text result confirms dispatch only; every text backend leaves field contents unverified. Re-observe the target before retrying. Screenshot, keyboard and move/resize results warn when the target window is partly or fully off-screen; click, scroll and drag results warn when a coordinate is off the screenshot or between monitors (not through pixelflux, and not for KWin element clicks, which KWin maps onto an output). move_window and resize_window, which bring a window back on-screen, work only through the GNOME Shell extension or X11/EWMH (wmctrl). scroll accepts the same window targeting and relative coordinates as click; on both, a window target is raised and focused first, and nothing is sent when focus cannot be verified. get_app_state returns a compact readiness block and compact tree nodes (null, empty and default fields left out, actions listed by name) by default; pass verbose=true for the full diagnostics dump and full nodes. Pass interactive_only=true to get only nodes with an action, editable text or a value, plus headings, status/live regions, windows and dialogs; containers are collapsed and element_index values match the full tree. A title or window_id target narrows an app that exposes several windows under one AT-SPI application root (Chromium) to that window's subtree, keeping the app's popups and dialogs. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, read, or time budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 10000 and 64), not by lowering max_nodes. A compacted tree too large to return inline comes back as its leading nodes plus accessibility_tree_spill.path, a private JSON file with the whole tree and the same element_index values; search that file instead of requesting the tree again, or page through it with get_tree_page when files are not readable. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content."
 )]
 impl ServerHandler for ComputerUseLinux {
-    async fn initialize(
-        &self,
-        request: rmcp::model::InitializeRequestParams,
-        context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<rmcp::model::InitializeResult, rmcp::ErrorData> {
-        self.indicator.remember_client(
-            &request.client_info.name,
-            request.client_info.title.as_deref(),
-        );
-        context.peer.set_peer_info(request.clone());
-        self.negotiate_initialize(&request)
-    }
-
     async fn call_tool(
         &self,
         request: rmcp::model::CallToolRequestParams,
@@ -5851,7 +5838,6 @@ impl ComputerUseLinux {
         output: ActivateWindowOutput,
         capture: &PostActionCaptureParams,
         target: &WindowTarget,
-        named_snapshot: Option<&str>,
     ) -> Result<CallToolResult, ErrorData> {
         if !output.ok {
             return self.action_tool_result(
@@ -5874,7 +5860,7 @@ impl ComputerUseLinux {
                 Some(target),
                 fallback_window,
                 TargetRaised::Yes,
-                named_snapshot,
+                None,
             )
             .await;
         let message = (!notes.is_empty()).then(|| notes.join(" "));
@@ -5893,7 +5879,6 @@ impl ComputerUseLinux {
         mut output: WindowGeometryOutput,
         capture: &PostActionCaptureParams,
         target: &WindowTarget,
-        named_snapshot: Option<&str>,
     ) -> Result<CallToolResult, ErrorData> {
         if !output.ok {
             return self.action_tool_result(
@@ -5911,7 +5896,7 @@ impl ComputerUseLinux {
                 Some(target),
                 fallback_window,
                 TargetRaised::Yes,
-                named_snapshot,
+                None,
             )
             .await;
         for note in notes {
@@ -19850,7 +19835,6 @@ echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
                 },
                 &activate_capture,
                 &WindowTarget::default(),
-                None,
             )
             .await
             .unwrap();
@@ -19901,7 +19885,6 @@ echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
                     window_id: Some(7),
                     ..Default::default()
                 },
-                None,
             )
             .await
             .unwrap();
