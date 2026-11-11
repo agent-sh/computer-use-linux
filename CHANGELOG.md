@@ -7,9 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.50] - 2026-11-11
+
+### Security
+
+- `rustix` 1.1.6, which fixes RUSTSEC-2026-0486. `cargo audit` passes again.
+
 ### Added
 
-- `mcp --listen ADDR:PORT` serves MCP over streamable HTTP at `/mcp` (#362). It needs a bearer token from `COMPUTER_USE_LINUX_MCP_TOKEN_FILE` or `COMPUTER_USE_LINUX_MCP_TOKEN`, refuses requests with an `Origin` header or a `Host` outside `--allowed-host`, and refuses to start with `COMPUTER_USE_LINUX_ENABLE_SHELL=1`. Over HTTP, element calls by index or selector must pass `snapshot_id`. Without `--listen` the server is unchanged and opens no socket.
+- `mcp --listen ADDR:PORT` serves MCP over streamable HTTP at `/mcp` (#362). It needs a bearer token from `COMPUTER_USE_LINUX_MCP_TOKEN_FILE` or `COMPUTER_USE_LINUX_MCP_TOKEN`, refuses requests with an `Origin` header or a `Host` outside `--allowed-host`, and refuses to start with `COMPUTER_USE_LINUX_ENABLE_SHELL=1`. Over HTTP, element calls by index or selector must pass `snapshot_id`. Without `--listen` the server is unchanged and opens no socket. Thanks @berney (#444).
 
 ## [0.7.49] - 2026-11-09
 
@@ -1162,7 +1168,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.49...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.50...HEAD
+[0.7.50]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.49...v0.7.50
 [0.7.49]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.48...v0.7.49
 [0.7.48]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.47...v0.7.48
 [0.7.47]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.46...v0.7.47
