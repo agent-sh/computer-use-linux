@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The `mcp --listen` integration tests kill and reap their server when a test fails. A failed assertion used to leave the test's listener running after the test run ended.
+
 ## [0.7.52] - 2026-11-12
 
 ### Added
