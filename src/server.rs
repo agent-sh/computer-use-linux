@@ -145,6 +145,14 @@ struct CachedTreeWindow {
     window: Option<(u64, String)>,
 }
 
+/// The cached pid and window scope a post-action tree may reuse, taken
+/// under the action's input lock so a later snapshot cannot change it.
+#[derive(Debug, Clone, Default)]
+struct PostActionScope {
+    pid: Option<u32>,
+    tree: Option<CachedTreeWindow>,
+}
+
 /// How a cached tree was returned: its node encoding, which get_tree_page
 /// pages in, and the AT-SPI window it was narrowed to.
 #[derive(Debug, Clone, Default)]
@@ -1316,35 +1324,45 @@ impl ComputerUseLinux {
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
         let target = params.window_target();
-        let named_snapshot = params.snapshot_id.clone();
-        let Json(output) = self.dispatch_click(params).await;
-        self.finish_action_output(
-            output,
-            &capture,
-            target.as_ref(),
-            TargetRaised::Yes,
-            named_snapshot.as_deref(),
-        )
-        .await
+        let (Json(output), scope) = self.dispatch_click(params).await;
+        self.finish_action_output(output, &capture, target.as_ref(), TargetRaised::Yes, scope)
+            .await
     }
 
-    async fn dispatch_click(&self, mut params: ClickParams) -> Json<ActionOutput> {
+    async fn dispatch_click(&self, params: ClickParams) -> (Json<ActionOutput>, PostActionScope) {
         let received = Some(serde_json::json!(params.clone()));
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         // Before the window is raised: a refused call changes nothing.
-        if let Err(message) = self.check_element_snapshot(
+        match self.check_element_snapshot(
             "click",
             params.snapshot_id.as_deref(),
             click_resolves_cached_element(&params),
         ) {
-            return Json(ActionOutput {
-                ok: false,
-                implemented: true,
-                action: "click".to_string(),
-                message,
-                received,
-            });
+            Ok(scope) => (
+                self.dispatch_checked_click(params, received, input_guard)
+                    .await,
+                scope,
+            ),
+            Err(message) => (
+                Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "click".to_string(),
+                    message,
+                    received,
+                }),
+                PostActionScope::default(),
+            ),
         }
+    }
+
+    /// The rest of click, under the input lock the caller took.
+    async fn dispatch_checked_click(
+        &self,
+        mut params: ClickParams,
+        received: Option<serde_json::Value>,
+        input_guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Json<ActionOutput> {
         let mut portal_target_point = None;
         let mut input_focus = None;
         let mut owner_target = ElementOwnerTarget::pid(params.pid);
@@ -1843,17 +1861,11 @@ impl ComputerUseLinux {
         let capture = params.capture.clone();
         let requested_action = requested_or_primary_action(params.action.as_deref());
         let target = params.target.window_target();
-        let Json(output) = self
+        let (Json(output), scope) = self
             .perform_element_action(&params, Some(requested_action))
             .await;
-        self.finish_action_output(
-            output,
-            &capture,
-            target.as_ref(),
-            TargetRaised::No,
-            params.snapshot_id.as_deref(),
-        )
-        .await
+        self.finish_action_output(output, &capture, target.as_ref(), TargetRaised::No, scope)
+            .await
     }
 
     #[tool(
@@ -1873,29 +1885,29 @@ impl ComputerUseLinux {
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
         let target = params.target.window_target();
-        let named_snapshot = params.snapshot_id.clone();
-        let (output, verified) = self.dispatch_set_value(params).await;
-        self.finish_set_value_output(
-            output,
-            verified,
-            &capture,
-            target.as_ref(),
-            named_snapshot.as_deref(),
-        )
-        .await
+        let (output, verified, scope) = self.dispatch_set_value(params).await;
+        self.finish_set_value_output(output, verified, &capture, target.as_ref(), scope)
+            .await
     }
 
-    async fn dispatch_set_value(&self, params: SetValueParams) -> (ActionOutput, Option<bool>) {
+    async fn dispatch_set_value(
+        &self,
+        params: SetValueParams,
+    ) -> (ActionOutput, Option<bool>, PostActionScope) {
         let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let received = Some(serde_json::json!(params.clone()));
         // An element_identifier names the object itself, not a snapshot node.
-        if let Err(message) = self.check_element_snapshot(
+        match self.check_element_snapshot(
             "set_value",
             params.snapshot_id.as_deref(),
             trimmed_nonempty(params.element_identifier.as_deref()).is_none()
                 && (params.element_index.is_some() || !params.selector().is_empty()),
         ) {
-            return (
+            Ok(scope) => {
+                let (output, verified) = self.dispatch_checked_set_value(params, received).await;
+                (output, verified, scope)
+            }
+            Err(message) => (
                 ActionOutput {
                     ok: false,
                     implemented: true,
@@ -1904,8 +1916,17 @@ impl ComputerUseLinux {
                     received,
                 },
                 None,
-            );
+                PostActionScope::default(),
+            ),
         }
+    }
+
+    /// The rest of set_value; the caller holds the input lock.
+    async fn dispatch_checked_set_value(
+        &self,
+        params: SetValueParams,
+        received: Option<serde_json::Value>,
+    ) -> (ActionOutput, Option<bool>) {
         if let Err(message) = self
             .check_element_action_target(
                 &params.target,
@@ -1993,46 +2014,52 @@ impl ComputerUseLinux {
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
         let target = params.window_target();
-        let named_snapshot = params.snapshot_id.clone();
-        let Json(output) = self.dispatch_scroll(params).await;
-        self.finish_action_output(
-            output,
-            &capture,
-            target.as_ref(),
-            TargetRaised::Yes,
-            named_snapshot.as_deref(),
-        )
-        .await
+        let (Json(output), scope) = self.dispatch_scroll(params).await;
+        self.finish_action_output(output, &capture, target.as_ref(), TargetRaised::Yes, scope)
+            .await
     }
 
-    async fn dispatch_scroll(&self, mut params: ScrollParams) -> Json<ActionOutput> {
+    async fn dispatch_scroll(&self, params: ScrollParams) -> (Json<ActionOutput>, PostActionScope) {
         let received = Some(serde_json::json!(params.clone()));
-        let units = match scroll_units(params.pages) {
-            Ok(units) => units,
-            Err(message) => {
-                return Json(ActionOutput {
+        let refused = |message| {
+            (
+                Json(ActionOutput {
                     ok: false,
                     implemented: true,
                     action: "scroll".to_string(),
                     message,
-                    received,
-                });
-            }
+                    received: received.clone(),
+                }),
+                PostActionScope::default(),
+            )
+        };
+        let units = match scroll_units(params.pages) {
+            Ok(units) => units,
+            Err(message) => return refused(message),
         };
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
-        if let Err(message) = self.check_element_snapshot(
+        match self.check_element_snapshot(
             "scroll",
             params.snapshot_id.as_deref(),
             scroll_resolves_cached_element(&params),
         ) {
-            return Json(ActionOutput {
-                ok: false,
-                implemented: true,
-                action: "scroll".to_string(),
-                message,
-                received,
-            });
+            Ok(scope) => (
+                self.dispatch_checked_scroll(params, units, received.clone(), input_guard)
+                    .await,
+                scope,
+            ),
+            Err(message) => refused(message),
         }
+    }
+
+    /// The rest of scroll, under the input lock the caller took.
+    async fn dispatch_checked_scroll(
+        &self,
+        mut params: ScrollParams,
+        units: i32,
+        received: Option<serde_json::Value>,
+        input_guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Json<ActionOutput> {
         let mut portal_target_point = None;
         let mut owner_target = ElementOwnerTarget::pid(params.pid);
         // Raise/focus the target window first (parity with click) so wheel
@@ -2481,8 +2508,14 @@ impl ComputerUseLinux {
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
         let Json(output) = self.dispatch_drag(params).await;
-        self.finish_action_output(output, &capture, None, TargetRaised::Yes, None)
-            .await
+        self.finish_action_output(
+            output,
+            &capture,
+            None,
+            TargetRaised::Yes,
+            PostActionScope::default(),
+        )
+        .await
     }
 
     async fn dispatch_drag(&self, params: DragParams) -> Json<ActionOutput> {
@@ -2725,8 +2758,14 @@ impl ComputerUseLinux {
         let target = params.window_target();
         let Json(output) = self.dispatch_press_key(params).await;
         let raised = keyboard_target_raised(&target);
-        self.finish_action_output(output, &capture, Some(&target), raised, None)
-            .await
+        self.finish_action_output(
+            output,
+            &capture,
+            Some(&target),
+            raised,
+            PostActionScope::default(),
+        )
+        .await
     }
 
     async fn dispatch_press_key(&self, params: PressKeyParams) -> Json<ActionOutput> {
@@ -2988,8 +3027,14 @@ impl ComputerUseLinux {
             );
         }
         let raised = keyboard_target_raised(&target);
-        self.finish_action_output(output, &capture, Some(&target), raised, None)
-            .await
+        self.finish_action_output(
+            output,
+            &capture,
+            Some(&target),
+            raised,
+            PostActionScope::default(),
+        )
+        .await
     }
 
     async fn dispatch_type_text(&self, params: TypeTextParams) -> Json<ActionOutput> {
@@ -5473,7 +5518,7 @@ impl ComputerUseLinux {
         target: Option<&WindowTarget>,
         fallback_window: Option<&WindowInfo>,
         raised: TargetRaised,
-        named_snapshot: Option<&str>,
+        scope: PostActionScope,
     ) -> (
         PostActionObservation,
         Option<ScreenshotCapture>,
@@ -5617,7 +5662,15 @@ impl ComputerUseLinux {
             // that app may not be the one holding it.
             let window_targeted = resolved_window.is_some()
                 && (target.is_some_and(WindowTarget::has_target) || fallback_window.is_some());
-            let (cached_pid, cached_tree) = self.cached_post_action_context(named_snapshot);
+            // Over HTTP the scope was taken under the action's input lock.
+            let PostActionScope {
+                pid: cached_pid,
+                tree: cached_tree,
+            } = if self.require_snapshot_ids {
+                scope
+            } else {
+                self.cached_post_action_context()
+            };
             let target_pid = resolved_window
                 .as_ref()
                 .and_then(|window| window.pid)
@@ -5771,7 +5824,7 @@ impl ComputerUseLinux {
         capture: &PostActionCaptureParams,
         target: Option<&WindowTarget>,
         raised: TargetRaised,
-        named_snapshot: Option<&str>,
+        scope: PostActionScope,
     ) -> Result<CallToolResult, ErrorData> {
         if !output.ok {
             return self.action_tool_result(
@@ -5783,7 +5836,7 @@ impl ComputerUseLinux {
             );
         }
         let (observation, screenshot, notes) = self
-            .capture_post_action_observation(capture, target, None, raised, named_snapshot)
+            .capture_post_action_observation(capture, target, None, raised, scope)
             .await;
         output = with_notes(output, notes);
         self.action_tool_result(
@@ -5801,7 +5854,7 @@ impl ComputerUseLinux {
         verified: Option<bool>,
         capture: &PostActionCaptureParams,
         target: Option<&WindowTarget>,
-        named_snapshot: Option<&str>,
+        scope: PostActionScope,
     ) -> Result<CallToolResult, ErrorData> {
         if !output.ok && verified != Some(false) {
             return self.action_tool_result(
@@ -5814,13 +5867,7 @@ impl ComputerUseLinux {
             );
         }
         let (observation, screenshot, notes) = self
-            .capture_post_action_observation(
-                capture,
-                target,
-                None,
-                TargetRaised::No,
-                named_snapshot,
-            )
+            .capture_post_action_observation(capture, target, None, TargetRaised::No, scope)
             .await;
         output = with_notes(output, notes);
         self.action_tool_result(
@@ -5860,7 +5907,7 @@ impl ComputerUseLinux {
                 Some(target),
                 fallback_window,
                 TargetRaised::Yes,
-                None,
+                PostActionScope::default(),
             )
             .await;
         let message = (!notes.is_empty()).then(|| notes.join(" "));
@@ -5896,7 +5943,7 @@ impl ComputerUseLinux {
                 Some(target),
                 fallback_window,
                 TargetRaised::Yes,
-                None,
+                PostActionScope::default(),
             )
             .await;
         for note in notes {
@@ -6921,36 +6968,36 @@ impl ComputerUseLinux {
         self.clear_snapshot();
     }
 
-    /// Whether a post-action tree may reuse the cached tree's scope: always on
-    /// stdio, and over HTTP only when the action named that snapshot, since
-    /// another client's get_app_state may have stored it.
-    fn cached_scope_belongs_to_request(
+    /// The cached tree's pid and window scope, for a post-action tree with
+    /// no target of its own: always on stdio, and over HTTP only when the
+    /// action named that snapshot, since another client may have stored it.
+    fn post_action_scope(
         &self,
         cached: &CachedAccessibilitySnapshot,
         named_snapshot: Option<&str>,
-    ) -> bool {
-        !self.require_snapshot_ids
-            || trimmed_nonempty(named_snapshot).is_some_and(|named| named == cached.id)
+    ) -> PostActionScope {
+        if self.require_snapshot_ids
+            && trimmed_nonempty(named_snapshot).is_none_or(|named| named != cached.id)
+        {
+            return PostActionScope::default();
+        }
+        let tree = cached.window_scope.clone().map(|scope| CachedTreeWindow {
+            scope,
+            pid: cached.pid,
+            window: cached.window_id.zip(cached.window_backend.clone()),
+        });
+        PostActionScope {
+            pid: cached.pid,
+            tree,
+        }
     }
 
-    /// The cached tree's pid and window scope, for a post-action tree with
-    /// no target of its own; one lock section checks and reads both.
-    fn cached_post_action_context(
-        &self,
-        named_snapshot: Option<&str>,
-    ) -> (Option<u32>, Option<CachedTreeWindow>) {
-        let Ok(snapshot) = self.last_snapshot.lock() else {
-            return (None, None);
-        };
-        if !self.cached_scope_belongs_to_request(&snapshot, named_snapshot) {
-            return (None, None);
-        }
-        let window = snapshot.window_scope.clone().map(|scope| CachedTreeWindow {
-            scope,
-            pid: snapshot.pid,
-            window: snapshot.window_id.zip(snapshot.window_backend.clone()),
-        });
-        (snapshot.pid, window)
+    /// On stdio the post-action tree reads the scope cached at capture time.
+    fn cached_post_action_context(&self) -> PostActionScope {
+        self.last_snapshot
+            .lock()
+            .map(|snapshot| self.post_action_scope(&snapshot, None))
+            .unwrap_or_default()
     }
 
     /// Drop the cached tree and its spill file. The empty snapshot has no id,
@@ -6964,6 +7011,7 @@ impl ComputerUseLinux {
     }
 
     /// The snapshot_id of the cached tree, empty when none is cached.
+    #[cfg(test)]
     fn cached_snapshot_id(&self) -> String {
         self.last_snapshot
             .lock()
@@ -6971,25 +7019,34 @@ impl ComputerUseLinux {
             .unwrap_or_default()
     }
 
-    /// Refuse an element call whose `snapshot_id` names a replaced snapshot.
-    /// Callers hold the input lock, which every store takes, so the snapshot
-    /// checked here is the one the call then resolves its element in.
+    /// Refuse an element call whose `snapshot_id` names a replaced snapshot,
+    /// and return the scope its post-action tree may reuse. Callers hold the
+    /// input lock, which every store takes, so the snapshot checked here is
+    /// the one the call then resolves its element in; one lock section reads
+    /// the id and the scope.
     fn check_element_snapshot(
         &self,
         action: &str,
         snapshot_id: Option<&str>,
         names_cached_element: bool,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<PostActionScope, String> {
+        let (cached_id, scope) = self
+            .last_snapshot
+            .lock()
+            .map(|snapshot| {
+                (
+                    snapshot.id.clone(),
+                    self.post_action_scope(&snapshot, snapshot_id),
+                )
+            })
+            .unwrap_or_default();
         if !names_cached_element {
-            return Ok(());
+            return Ok(scope);
         }
         self.require_snapshot_id(action, snapshot_id)?;
-        check_snapshot_id(
-            snapshot_id,
-            &self.cached_snapshot_id(),
-            &self.snapshot_ids.prefix,
-        )
-        .map_err(|message| format!("{action} was not sent: {message}"))
+        check_snapshot_id(snapshot_id, &cached_id, &self.snapshot_ids.prefix)
+            .map_err(|message| format!("{action} was not sent: {message}"))?;
+        Ok(scope)
     }
 
     /// Over HTTP, refuse a cached-element call that names no snapshot.
@@ -7627,7 +7684,7 @@ impl ComputerUseLinux {
         &self,
         params: &ActionParams,
         requested_action: Option<&str>,
-    ) -> Json<ActionOutput> {
+    ) -> (Json<ActionOutput>, PostActionScope) {
         self.perform_element_action_with(
             params,
             requested_action,
@@ -7643,9 +7700,9 @@ impl ComputerUseLinux {
         &self,
         params: &ActionParams,
         requested_action: Option<&str>,
-        mut invoke: I,
+        invoke: I,
         refresh: R,
-    ) -> Json<ActionOutput>
+    ) -> (Json<ActionOutput>, PostActionScope)
     where
         I: FnMut(String, Option<String>) -> IFut,
         IFut: Future<Output = Result<crate::atspi_tree_impl::ActionInvocation>>,
@@ -7655,14 +7712,45 @@ impl ComputerUseLinux {
         let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let received = Some(serde_json::json!(params.clone()));
         // An element_identifier names the object itself, not a snapshot node.
-        if let Err(message) = self.check_element_snapshot(
+        match self.check_element_snapshot(
             "perform_action",
             params.snapshot_id.as_deref(),
             trimmed_nonempty(params.element_identifier.as_deref()).is_none()
                 && (params.element_index.is_some() || !params.selector().is_empty()),
         ) {
-            return action_error_output(message, &received);
+            Ok(scope) => (
+                self.perform_checked_element_action(
+                    params,
+                    requested_action,
+                    invoke,
+                    refresh,
+                    received,
+                )
+                .await,
+                scope,
+            ),
+            Err(message) => (
+                action_error_output(message, &received),
+                PostActionScope::default(),
+            ),
         }
+    }
+
+    /// The rest of perform_action; the caller holds the input lock.
+    async fn perform_checked_element_action<I, R, IFut, RFut>(
+        &self,
+        params: &ActionParams,
+        requested_action: Option<&str>,
+        mut invoke: I,
+        refresh: R,
+        received: Option<serde_json::Value>,
+    ) -> Json<ActionOutput>
+    where
+        I: FnMut(String, Option<String>) -> IFut,
+        IFut: Future<Output = Result<crate::atspi_tree_impl::ActionInvocation>>,
+        R: FnOnce(AccessibilityRecoveryScope) -> RFut,
+        RFut: Future<Output = Result<RefreshedAccessibilitySnapshot>>,
+    {
         if let Err(message) = self
             .check_element_action_target(
                 &params.target,
@@ -11869,7 +11957,7 @@ case "$*" in *"-- 5001 1301"*) echo "xdotool: test failure" >&2; exit 1 ;; esac
             "portal-start-failure" => {
                 let scroll: ScrollParams =
                     serde_json::from_value(serde_json::json!({"direction":"down"})).unwrap();
-                let result = backend.dispatch_scroll(scroll).await.0;
+                let result = backend.dispatch_scroll(scroll).await.0 .0;
                 assert!(!result.ok, "{}", result.message);
                 let (ydotool_error, portal_error) = result
                     .message
@@ -11906,7 +11994,7 @@ case "$*" in *"-- 5001 1301"*) echo "xdotool: test failure" >&2; exit 1 ;; esac
                 // last click below takes it.
                 let retry = "The stale device was removed. A retry sizes a new device to a fresh screenshot; if that fails, it is not sent, since ydotool cannot position the pointer accurately on Wayland.";
                 *backend.abs_pointer.lock().unwrap() = pointer(3840, 1080);
-                let result = backend.dispatch_click(click.clone()).await.0;
+                let result = backend.dispatch_click(click.clone()).await.0 .0;
                 assert!(!result.ok, "{}", result.message);
                 assert!(
                     result.message.contains(replace_failed),
@@ -11917,7 +12005,7 @@ case "$*" in *"-- 5001 1301"*) echo "xdotool: test failure" >&2; exit 1 ;; esac
                 assert!(backend.abs_pointer.lock().unwrap().is_none());
 
                 *backend.abs_pointer.lock().unwrap() = pointer(3840, 1080);
-                let result = backend.dispatch_scroll(scroll).await.0;
+                let result = backend.dispatch_scroll(scroll).await.0 .0;
                 assert!(!result.ok, "{}", result.message);
                 assert!(
                     result.message.contains(replace_failed),
@@ -11971,7 +12059,7 @@ case "$*" in *"-- 5001 1301"*) echo "xdotool: test failure" >&2; exit 1 ;; esac
 
                 // With no device to replace, a failed capture still leaves
                 // the other routes; here the Wayland refusal.
-                let result = backend.dispatch_click(click.clone()).await.0;
+                let result = backend.dispatch_click(click.clone()).await.0 .0;
                 assert!(!result.ok, "{}", result.message);
                 assert!(
                     result
@@ -11984,7 +12072,7 @@ case "$*" in *"-- 5001 1301"*) echo "xdotool: test failure" >&2; exit 1 ;; esac
                 // A device that matches the capture clamps an off-capture
                 // point and says where it landed.
                 *backend.abs_pointer.lock().unwrap() = pointer(1920, 1080);
-                let result = backend.dispatch_click(click).await.0;
+                let result = backend.dispatch_click(click).await.0 .0;
                 assert!(result.ok, "{}", result.message);
                 assert!(
                     result
@@ -12006,7 +12094,7 @@ case "$*" in *"-- 5001 1301"*) echo "xdotool: test failure" >&2; exit 1 ;; esac
                         serde_json::json!({"x":500,"y":400,"direction":direction}),
                     )
                     .unwrap();
-                    let result = backend.dispatch_scroll(scroll).await.0;
+                    let result = backend.dispatch_scroll(scroll).await.0 .0;
                     assert!(result.ok, "{direction}: {}", result.message);
                     assert_eq!(
                         result.message,
@@ -12079,32 +12167,32 @@ case "$*" in *"-- 5001 1301"*) echo "xdotool: test failure" >&2; exit 1 ;; esac
                     "element_index": 0, "snapshot_id": first, "window_id": 7
                 }))
                 .unwrap();
-                let result = backend.dispatch_click(click).await.0;
+                let result = backend.dispatch_click(click).await.0 .0;
                 refused("click", result.ok, &result.message);
                 let click: ClickParams = serde_json::from_value(serde_json::json!({
                     "role": "entry", "snapshot_id": first
                 }))
                 .unwrap();
-                let result = backend.dispatch_click(click).await.0;
+                let result = backend.dispatch_click(click).await.0 .0;
                 refused("click", result.ok, &result.message);
                 let scroll: ScrollParams = serde_json::from_value(serde_json::json!({
                     "element_index": 0, "snapshot_id": first, "direction": "down"
                 }))
                 .unwrap();
-                let result = backend.dispatch_scroll(scroll).await.0;
+                let result = backend.dispatch_scroll(scroll).await.0 .0;
                 refused("scroll", result.ok, &result.message);
                 let set_value: SetValueParams = serde_json::from_value(serde_json::json!({
                     "element_index": 0, "snapshot_id": first, "value": "typed"
                 }))
                 .unwrap();
-                let (result, verified) = backend.dispatch_set_value(set_value).await;
+                let (result, verified, _) = backend.dispatch_set_value(set_value).await;
                 refused("set_value", result.ok, &result.message);
                 assert_eq!(verified, None);
                 let action: ActionParams = serde_json::from_value(serde_json::json!({
                     "element_index": 0, "snapshot_id": first
                 }))
                 .unwrap();
-                let result = backend.perform_element_action(&action, None).await.0;
+                let result = backend.perform_element_action(&action, None).await.0 .0;
                 refused("perform_action", result.ok, &result.message);
                 // Scroll checks before raising its window too, and a lone x
                 // still takes the element's point.
@@ -12113,13 +12201,13 @@ case "$*" in *"-- 5001 1301"*) echo "xdotool: test failure" >&2; exit 1 ;; esac
                     "window_id": 7
                 }))
                 .unwrap();
-                let result = backend.dispatch_scroll(scroll).await.0;
+                let result = backend.dispatch_scroll(scroll).await.0 .0;
                 refused("scroll", result.ok, &result.message);
                 let scroll: ScrollParams = serde_json::from_value(serde_json::json!({
                     "element_index": 0, "snapshot_id": first, "direction": "down", "x": 500
                 }))
                 .unwrap();
-                let result = backend.dispatch_scroll(scroll).await.0;
+                let result = backend.dispatch_scroll(scroll).await.0 .0;
                 refused("scroll", result.ok, &result.message);
 
                 // The current id, and a full point that wins over the index,
@@ -12137,14 +12225,17 @@ case "$*" in *"-- 5001 1301"*) echo "xdotool: test failure" >&2; exit 1 ;; esac
                     serde_json::json!({"element_index": 0, "snapshot_id": first, "x": 140, "y": 110}),
                 ] {
                     let click: ClickParams = serde_json::from_value(click).unwrap();
-                    passed("click", &backend.dispatch_click(click).await.0.message);
+                    passed("click", &backend.dispatch_click(click).await.0 .0.message);
                 }
                 for scroll in [
                     serde_json::json!({"element_index": 0, "snapshot_id": current, "direction": "down"}),
                     serde_json::json!({"element_index": 0, "snapshot_id": first, "direction": "down", "x": 140, "y": 110}),
                 ] {
                     let scroll: ScrollParams = serde_json::from_value(scroll).unwrap();
-                    passed("scroll", &backend.dispatch_scroll(scroll).await.0.message);
+                    passed(
+                        "scroll",
+                        &backend.dispatch_scroll(scroll).await.0 .0.message,
+                    );
                 }
                 let set_value: SetValueParams = serde_json::from_value(serde_json::json!({
                     "element_index": 0, "snapshot_id": current, "value": "typed"
@@ -12170,11 +12261,11 @@ case "$*" in *"-- 5001 1301"*) echo "xdotool: test failure" >&2; exit 1 ;; esac
                     ));
                 }
                 let gap = "WARNING: coordinate 3000,1200 is on no monitor of the captured desktop (4480x1440); the input landed at a monitor edge or on no visible pixel.";
-                let result = backend.dispatch_click(click(3000, 1200)).await.0;
+                let result = backend.dispatch_click(click(3000, 1200)).await.0 .0;
                 assert!(result.ok, "{}", result.message);
                 assert!(result.message.ends_with(gap), "{}", result.message);
                 for (x, y) in [(3000, 500), (100, 1300)] {
-                    let result = backend.dispatch_click(click(x, y)).await.0;
+                    let result = backend.dispatch_click(click(x, y)).await.0 .0;
                     assert!(result.ok, "{}", result.message);
                     assert!(!result.message.contains("WARNING"), "{}", result.message);
                 }
@@ -12182,11 +12273,11 @@ case "$*" in *"-- 5001 1301"*) echo "xdotool: test failure" >&2; exit 1 ;; esac
                     serde_json::json!({"x":3000,"y":1200,"direction":"down"}),
                 )
                 .unwrap();
-                let result = backend.dispatch_scroll(scroll).await.0;
+                let result = backend.dispatch_scroll(scroll).await.0 .0;
                 assert!(result.ok, "{}", result.message);
                 assert!(result.message.ends_with(gap), "{}", result.message);
 
-                let result = backend.dispatch_click(click(5000, 1300)).await.0;
+                let result = backend.dispatch_click(click(5000, 1300)).await.0 .0;
                 assert!(result.ok, "{}", result.message);
                 let off_capture = if uinput {
                     // The device clamps the point into the gap.
@@ -12199,14 +12290,14 @@ case "$*" in *"-- 5001 1301"*) echo "xdotool: test failure" >&2; exit 1 ;; esac
 
                 if !uinput {
                     // A failed dispatch sent nothing, so it gets no warning.
-                    let result = backend.dispatch_click(click(5001, 1301)).await.0;
+                    let result = backend.dispatch_click(click(5001, 1301)).await.0 .0;
                     assert!(!result.ok, "{}", result.message);
                     assert!(!result.message.contains("WARNING"), "{}", result.message);
                 }
 
                 // A new capture reads the layout again.
                 backend.cache_desktop_size(4480, 1440);
-                let result = backend.dispatch_click(click(3000, 1200)).await.0;
+                let result = backend.dispatch_click(click(3000, 1200)).await.0 .0;
                 assert!(result.message.ends_with(gap), "{}", result.message);
 
                 // Where a retry goes after a failed device replacement.
@@ -12424,8 +12515,8 @@ case "$*" in *"-- 5001 1301"*) echo "xdotool: test failure" >&2; exit 1 ;; esac
             ..Default::default()
         };
         let results = [
-            backend.dispatch_click(click).await.0,
-            backend.dispatch_scroll(scroll).await.0,
+            backend.dispatch_click(click).await.0 .0,
+            backend.dispatch_scroll(scroll).await.0 .0,
             backend.dispatch_drag(drag).await.0,
         ];
         for result in results {
@@ -12443,7 +12534,7 @@ case "$*" in *"-- 5001 1301"*) echo "xdotool: test failure" >&2; exit 1 ;; esac
         }
         let scroll: ScrollParams =
             serde_json::from_value(serde_json::json!({"direction":"down"})).unwrap();
-        let result = backend.dispatch_scroll(scroll).await.0;
+        let result = backend.dispatch_scroll(scroll).await.0 .0;
         assert_eq!(result.ok, mode != "wayland-portal", "{}", result.message);
     }
 
@@ -15171,7 +15262,8 @@ esac
                     ..Default::default()
                 })
                 .await
-                .0;
+                .0
+                 .0;
             assert!(!output.ok);
             assert!(
                 output.message.contains("require a KWin Wayland"),
@@ -17681,7 +17773,7 @@ mod action_recovery_tests {
             Some(1234),
             Some(recovery_scope(serde_json::json!({"pid": 1234}))),
         );
-        let Json(recovered) = backend
+        let (Json(recovered), _) = backend
             .perform_element_action_with(
                 &semantic_params(),
                 Some("click"),
@@ -17708,7 +17800,7 @@ mod action_recovery_tests {
         assert!(recovered.ok, "{}", recovered.message);
 
         let stale_dispatches = Arc::new(Mutex::new(Vec::new()));
-        let Json(indexed) = backend
+        let (Json(indexed), _) = backend
             .perform_element_action_with(
                 &ActionParams {
                     element_index: Some(0),
@@ -17750,7 +17842,7 @@ mod action_recovery_tests {
             );
             let refreshes = Arc::new(AtomicUsize::new(0));
             let dispatches = Arc::new(AtomicUsize::new(0));
-            let Json(output) = backend
+            let (Json(output), _) = backend
                 .perform_element_action_with(
                     &semantic_params(),
                     Some("click"),
@@ -17809,7 +17901,7 @@ mod action_recovery_tests {
                 )
                 .await;
             let dispatches = Arc::new(AtomicUsize::new(0));
-            let Json(output) = backend
+            let (Json(output), _) = backend
                 .perform_element_action_with(
                     &semantic_params(),
                     Some("click"),
@@ -17860,7 +17952,7 @@ mod action_recovery_tests {
             )
             .await;
         let refreshes = Arc::new(AtomicUsize::new(0));
-        let Json(output) = backend
+        let (Json(output), _) = backend
             .perform_element_action_with(
                 &semantic_params(),
                 Some("click"),
@@ -17914,7 +18006,7 @@ mod action_recovery_tests {
                 )
                 .await;
             let dispatches = Arc::new(AtomicUsize::new(0));
-            let Json(output) = backend
+            let (Json(output), _) = backend
                 .perform_element_action_with(
                     &semantic_params(),
                     Some("click"),
@@ -17988,7 +18080,7 @@ mod action_recovery_tests {
         let invoked_refs = Arc::new(Mutex::new(Vec::new()));
         let params = semantic_params();
 
-        let Json(output) = backend
+        let (Json(output), _) = backend
             .perform_element_action_with(
                 &params,
                 Some("0"),
@@ -18097,7 +18189,7 @@ mod action_recovery_tests {
                 window_id,
                 ..old_window.clone()
             });
-            let Json(output) = backend
+            let (Json(output), _) = backend
                 .perform_element_action_with(
                     &semantic_params(),
                     Some("click"),
@@ -18150,7 +18242,7 @@ mod action_recovery_tests {
                 Some(&recovery_window(42, 1234)),
             );
             let queries = Arc::new(AtomicUsize::new(0));
-            let Json(output) = backend
+            let (Json(output), _) = backend
                 .perform_element_action_with(
                     &semantic_params(),
                     Some("click"),
@@ -18205,7 +18297,7 @@ mod action_recovery_tests {
         let dispatches = Arc::new(AtomicUsize::new(0));
         let params = semantic_params();
 
-        let Json(output) = backend
+        let (Json(output), _) = backend
             .perform_element_action_with(
                 &params,
                 Some("0"),
@@ -18260,7 +18352,7 @@ mod action_recovery_tests {
         let invoked_refs = Arc::new(Mutex::new(Vec::new()));
         let params = semantic_params();
 
-        let Json(output) = backend
+        let (Json(output), _) = backend
             .perform_element_action_with(
                 &params,
                 Some("0"),
@@ -18310,7 +18402,7 @@ mod action_recovery_tests {
         let invoked_refs = Arc::new(Mutex::new(Vec::new()));
         let params = semantic_params();
 
-        let Json(output) = backend
+        let (Json(output), _) = backend
             .perform_element_action_with(
                 &params,
                 Some("0"),
@@ -18366,7 +18458,7 @@ mod action_recovery_tests {
         let params = semantic_params();
         let first_refs = Arc::new(Mutex::new(Vec::new()));
 
-        let Json(output) = backend
+        let (Json(output), _) = backend
             .perform_element_action_with(
                 &params,
                 Some("0"),
@@ -18407,7 +18499,7 @@ mod action_recovery_tests {
             assert!(snapshot.recovery_scope.is_none());
         }
 
-        let Json(without_observation) = backend
+        let (Json(without_observation), _) = backend
             .perform_element_action_with(
                 &params,
                 Some("click"),
@@ -18432,7 +18524,7 @@ mod action_recovery_tests {
             .await;
 
         let second_refs = Arc::new(Mutex::new(Vec::new()));
-        let Json(output) = backend
+        let (Json(output), _) = backend
             .perform_element_action_with(
                 &params,
                 Some("0"),
@@ -18483,7 +18575,7 @@ mod action_recovery_tests {
         let queries = Arc::new(AtomicUsize::new(0));
         let params = semantic_params();
 
-        let Json(output) = backend
+        let (Json(output), _) = backend
             .perform_element_action_with(
                 &params,
                 Some("0"),
@@ -18538,7 +18630,7 @@ mod action_recovery_tests {
             let refreshes = Arc::new(AtomicUsize::new(0));
             let invoked_refs = Arc::new(Mutex::new(Vec::new()));
 
-            let Json(output) = backend
+            let (Json(output), _) = backend
                 .perform_element_action_with(
                     &params,
                     Some("0"),
@@ -18585,7 +18677,7 @@ mod action_recovery_tests {
         let refreshes = Arc::new(AtomicUsize::new(0));
         let params = semantic_params();
 
-        let Json(output) = backend
+        let (Json(output), _) = backend
             .perform_element_action_with(
                 &params,
                 Some("0"),
@@ -18632,7 +18724,7 @@ mod action_recovery_tests {
         let refreshes = Arc::new(AtomicUsize::new(0));
         let params = semantic_params();
 
-        let Json(output) = backend
+        let (Json(output), _) = backend
             .perform_element_action_with(
                 &params,
                 Some("0"),
@@ -18679,7 +18771,7 @@ mod action_recovery_tests {
         let refreshes = Arc::new(AtomicUsize::new(0));
         let params = semantic_params();
 
-        let Json(output) = backend
+        let (Json(output), _) = backend
             .perform_element_action_with(
                 &params,
                 Some("0"),
@@ -18915,7 +19007,7 @@ mod node_target_scope_tests {
         params: ActionParams,
     ) -> (ActionOutput, Vec<String>) {
         let dispatched = Arc::new(Mutex::new(Vec::new()));
-        let Json(output) = backend
+        let (Json(output), _) = backend
             .perform_element_action_with(
                 &params,
                 Some("click"),
@@ -19006,7 +19098,7 @@ mod node_target_scope_tests {
     #[tokio::test]
     async fn set_value_refuses_an_index_from_another_apps_snapshot() {
         let backend = backend_after_snapshots_of_a_then_b();
-        let (output, verified) = backend
+        let (output, verified, _) = backend
             .dispatch_set_value(SetValueParams {
                 element_index: Some(2),
                 value: "written for app A".to_string(),
@@ -20177,7 +20269,13 @@ echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
         let (output, verified) =
             editable_text_action_result(EditableTextSetOutcome::MismatchAfterDeadline, None);
         let result = server
-            .finish_set_value_output(output, verified, &set_value_capture, None, None)
+            .finish_set_value_output(
+                output,
+                verified,
+                &set_value_capture,
+                None,
+                Default::default(),
+            )
             .await
             .unwrap();
         assert_eq!(result.is_error, Some(true));
@@ -20195,7 +20293,7 @@ echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
         std::fs::write(&log_path, "").unwrap();
         let output = action_result("set_value", Err("pre-dispatch failure".to_string()), None);
         let result = server
-            .finish_set_value_output(output, None, &set_value_capture, None, None)
+            .finish_set_value_output(output, None, &set_value_capture, None, Default::default())
             .await
             .unwrap();
         assert_eq!(result.is_error, Some(true));
@@ -20888,6 +20986,7 @@ mod snapshot_handle_tests {
                     )
                     .await
                     .0
+                     .0
             }
         };
         let by_index = |snapshot_id: Option<&str>| ActionParams {
@@ -21001,6 +21100,7 @@ mod snapshot_handle_tests {
                 params.snapshot_id.as_deref(),
                 click_resolves_cached_element(&params),
             )
+            .map(drop)
         };
         use serde_json::json;
         let results = vec![
@@ -21084,25 +21184,49 @@ mod snapshot_handle_tests {
             ..Default::default()
         };
         let b_id = cache_client_b_tree(&http);
-        // Client A's action names no snapshot: nothing comes from B's tree.
-        let (pid, window) = http.cached_post_action_context(None);
-        assert_eq!(pid, None);
-        assert!(window.is_none(), "{window:?}");
-        let (pid, window) = http.cached_post_action_context(Some("  "));
-        assert_eq!(pid, None);
-        assert!(window.is_none(), "{window:?}");
+        // Client A's action names no snapshot, or not B's: nothing comes from
+        // B's tree. Coordinate calls resolve no cached element, so they pass.
+        for named in [None, Some("  "), Some("other")] {
+            let scope = http.check_element_snapshot("click", named, false).unwrap();
+            assert_eq!(scope.pid, None);
+            assert!(scope.tree.is_none(), "{:?}", scope.tree);
+        }
         // Client B named its own snapshot, so its scope carries over.
-        let (pid, window) = http.cached_post_action_context(Some(&format!(" {b_id} ")));
-        assert_eq!(pid, Some(42));
-        assert_eq!(window.unwrap().scope, "Window 20");
+        let scope = http
+            .check_element_snapshot("click", Some(&format!(" {b_id} ")), false)
+            .unwrap();
+        assert_eq!(scope.pid, Some(42));
+        assert_eq!(scope.tree.unwrap().scope, "Window 20");
 
+        // Stdio reads the cached scope at capture time, as before.
         let stdio = ComputerUseLinux::default();
         cache_client_b_tree(&stdio);
-        let (pid, window) = stdio.cached_post_action_context(None);
-        assert_eq!(pid, Some(42));
-        let window = window.unwrap();
+        let scope = stdio.cached_post_action_context();
+        assert_eq!(scope.pid, Some(42));
+        let window = scope.tree.unwrap();
         assert_eq!(window.scope, "Window 20");
         assert_eq!(window.pid, Some(42));
+    }
+
+    #[test]
+    fn http_post_action_scope_survives_a_later_snapshot() {
+        let http = ComputerUseLinux {
+            require_snapshot_ids: true,
+            ..Default::default()
+        };
+        let a_id = cache_client_b_tree(&http);
+        // Client A's action takes its scope under the input lock.
+        let scope = http
+            .check_element_snapshot("click", Some(&a_id), true)
+            .unwrap();
+        assert_eq!(scope.pid, Some(42));
+        assert_eq!(scope.tree.as_ref().unwrap().scope, "Window 20");
+        // Client B then stores a newer tree for another app and window.
+        http.cache_snapshot(&[node(SECOND_REF)], Some(7));
+        http.last_snapshot.lock().unwrap().window_scope = Some("Window 30".to_string());
+        // The scope A carries to its post-action capture is still its own.
+        assert_eq!(scope.pid, Some(42));
+        assert_eq!(scope.tree.unwrap().scope, "Window 20");
     }
 
     #[tokio::test]
@@ -21113,10 +21237,9 @@ mod snapshot_handle_tests {
         };
         let id = http.cache_snapshot(&[node(FIRST_REF)], None);
         http.commit_cleared_snapshot().await;
-        assert_eq!(
-            http.check_element_snapshot("click", Some(&id), true),
-            Ok(())
-        );
+        assert!(http
+            .check_element_snapshot("click", Some(&id), true)
+            .is_ok());
 
         let stdio = ComputerUseLinux::default();
         let id = stdio.cache_snapshot(&[node(FIRST_REF)], None);
