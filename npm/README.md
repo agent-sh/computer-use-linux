@@ -163,6 +163,8 @@ does not yet forward the flag or include the tool in its catalog.
 - **HTTP MCP**: `computer-use-linux mcp --listen ADDR:PORT` serves streamable
   HTTP at `/mcp`. It needs a token from the file in `COMPUTER_USE_LINUX_MCP_TOKEN_FILE`
   or from `COMPUTER_USE_LINUX_MCP_TOKEN`; clients send `Authorization: Bearer <token>`.
+  Prefer the file: a token in `COMPUTER_USE_LINUX_MCP_TOKEN` stays readable in
+  `/proc/<pid>/environ` while the server runs.
   A bind that is not loopback needs `--allowed-host NAME` for each hostname clients
   use. Requests with an `Origin` header are refused, and `--listen` refuses to start
   with `COMPUTER_USE_LINUX_ENABLE_SHELL=1`. Over HTTP, `get_tree_page` and calls that pick
