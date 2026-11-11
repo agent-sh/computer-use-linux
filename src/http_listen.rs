@@ -17,6 +17,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal::unix::{signal, SignalKind};
 
+/// Idle sessions close after this; rmcp's 300 s default drops agents that pause.
+const SESSION_KEEP_ALIVE: Duration = Duration::from_secs(3600);
+
 pub(crate) struct ListenConfig {
     pub addr: SocketAddr,
     pub allowed_hosts: Vec<String>,
@@ -114,12 +117,14 @@ pub(crate) async fn serve_http(server: ComputerUseLinux, config: ListenConfig) -
         .with_allowed_hosts(allowed_hosts)
         .enforce_origin_validation();
     let shutdown = http_config.cancellation_token.clone();
+    let mut session_manager = LocalSessionManager::default();
+    session_manager.session_config.keep_alive = Some(SESSION_KEEP_ALIVE);
     let service = StreamableHttpService::new(
         {
             let server = server.clone();
             move || Ok(server.clone())
         },
-        Arc::new(LocalSessionManager::default()),
+        Arc::new(session_manager),
         http_config,
     );
     let app = Router::new()

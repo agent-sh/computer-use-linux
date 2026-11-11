@@ -167,7 +167,9 @@ does not yet forward the flag or include the tool in its catalog.
   use. Requests with an `Origin` header are refused, and `--listen` refuses to start
   with `COMPUTER_USE_LINUX_ENABLE_SHELL=1`. Over HTTP, `get_tree_page` and calls that pick
   an element by index or selector must pass `snapshot_id`. The port is plain HTTP; put TLS in front
-  (service mesh, ingress or sidecar).
+  (service mesh, ingress or sidecar). Idle sessions expire after an hour. A
+  `404 Session not found` means initialize again; the cached tree and its
+  `snapshot_id` survive re-initializing.
 
 ## Input & coordinate contracts
 
