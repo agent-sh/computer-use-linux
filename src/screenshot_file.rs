@@ -183,8 +183,32 @@ fn move_without_replacing(from: &Path, to: &Path) -> io::Result<()> {
             return Err(error);
         }
     }
-    fs::hard_link(from, to)?;
-    fs::remove_file(from)
+    link_without_replacing(from, to)
+}
+
+/// The fallback for filesystems without RENAME_NOREPLACE: link `from` to
+/// `to`, which fails with `AlreadyExists` when anything is at `to` and never
+/// follows a symlink there, then remove `from`. It consumes `from` either way.
+/// Once the link exists the image is in place, so removing `from` is best
+/// effort: a leftover temp file must not turn a written file into an error.
+fn link_without_replacing(from: &Path, to: &Path) -> io::Result<()> {
+    let linked = fs::hard_link(from, to);
+    let _ = fs::remove_file(from);
+    linked.map_err(link_error)
+}
+
+/// A filesystem that refuses hard links gets a clear error instead of a write
+/// that could replace an entry.
+fn link_error(error: io::Error) -> io::Error {
+    match error.raw_os_error() {
+        Some(libc::EPERM | libc::EOPNOTSUPP | libc::ENOSYS) => io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "the filesystem supports neither a no-replace rename nor hard links, so the file cannot be created without risking a replace; pass a screenshot_file_path on another filesystem ({error})"
+            ),
+        ),
+        _ => error,
+    }
 }
 
 fn format_name(format: ScreenshotOutputFormat) -> &'static str {
@@ -356,5 +380,62 @@ mod tests {
             ["link.png", "outside.png", "shot.png"],
             "no temp file is left"
         );
+    }
+
+    #[test]
+    fn the_link_fallback_creates_only_and_consumes_the_temp_file() {
+        let dir = TempDir::new("link");
+        let temp = dir.0.join(".cul-shot.0000000000000001.tmp");
+        let target = dir.0.join("shot.png");
+        fs::write(&temp, b"image").unwrap();
+        link_without_replacing(&temp, &target).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"image");
+        assert!(!temp.exists(), "the temp file is gone");
+
+        // An existing target is kept, the error is EEXIST, and the temp file
+        // is removed.
+        let temp = dir.0.join(".cul-shot.0000000000000002.tmp");
+        fs::write(&temp, b"new").unwrap();
+        let error = link_without_replacing(&temp, &target).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&target).unwrap(), b"image");
+        assert!(!temp.exists(), "the temp file is removed");
+    }
+
+    #[test]
+    fn a_failed_temp_unlink_after_the_link_still_succeeds() {
+        // Root ignores directory permissions, so this needs an unprivileged user.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = TempDir::new("unlink");
+        let locked = dir.0.join("locked");
+        fs::create_dir(&locked).unwrap();
+        let temp = locked.join(".cul-shot.0000000000000003.tmp");
+        fs::write(&temp, b"image").unwrap();
+        // The link needs only search access to the temp file's directory,
+        // removing the temp file needs write access too.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+        let target = dir.0.join("shot.png");
+        let result = link_without_replacing(&temp, &target);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        result.expect("the image is in place, so the move succeeded");
+        assert_eq!(fs::read(&target).unwrap(), b"image");
+    }
+
+    #[test]
+    fn a_filesystem_without_links_gets_a_clear_error() {
+        for errno in [libc::EPERM, libc::EOPNOTSUPP, libc::ENOSYS] {
+            let error = link_error(io::Error::from_raw_os_error(errno));
+            assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{errno}");
+            let message = error.to_string();
+            assert!(
+                message.contains("supports neither a no-replace rename nor hard links")
+                    && message.contains("another filesystem"),
+                "{message}"
+            );
+        }
+        let exists = link_error(io::Error::from_raw_os_error(libc::EEXIST));
+        assert_eq!(exists.kind(), io::ErrorKind::AlreadyExists);
     }
 }
