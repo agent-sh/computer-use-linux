@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.52] - 2026-11-12
+
 ### Added
 
 - `screenshot`, `get_app_state` and the `screenshot_after` capture of every mutating tool take `screenshot_file_path`, an absolute path where the image is saved instead of being returned as MCP image content, so a capture costs no image tokens until the agent opens the file. The result keeps its screenshot metadata (size, coordinate size, `scale`, `format`, `bytes`) and adds `file_path`. The parent directory must exist, and the extension must match `format` (`.png`, or `.jpg`/`.jpeg` for jpeg). File output creates a new file and never replaces one: any existing entry is refused, and the image moves into place from a same-directory temp file with a step that fails if anything appeared at the path meanwhile. A bad path is refused before any capture or input. A failed write is the `screenshot` call's error, `screenshot_error` on `get_app_state`, and `screenshot_error` with `ok` kept on a mutating tool; the image is never returned inline instead. Over HTTP (`mcp --listen`) the parameter is refused, so a remote client gets no file writes on the host. Thanks to [@xchacha20-poly1305](https://github.com/xchacha20-poly1305) ([#446](https://github.com/agent-sh/computer-use-linux/issues/446)).
@@ -1189,7 +1191,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.51...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.52...HEAD
+[0.7.52]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.51...v0.7.52
 [0.7.51]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.50...v0.7.51
 [0.7.50]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.49...v0.7.50
 [0.7.49]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.48...v0.7.49
