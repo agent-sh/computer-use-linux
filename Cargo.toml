@@ -18,6 +18,7 @@ include = [
     "/src/**",
     "/tests/*.rs",
     "/tests/fixtures/keyboard-us-de.xkb",
+    "/tests/fixtures/keyboard-us-il.xkb",
     "/examples/*.rs",
     "/gnome-shell-extension/**",
     "/scripts/app_state_capture_order_test.py",

@@ -234,8 +234,11 @@ does not yet forward the flag or include the tool in its catalog.
   masks text. Both protections apply with the indicator disabled. Other compatible
   compositors retain their existing stdin path. Wtype rejects NUL and text over
   131,071 UTF-8 bytes before focusing a window or displaying text. `ok: true`
-  confirms dispatch only; every text backend leaves field contents unverified.
-  Re-observe before retrying. Exact window focus alone does not suppress missing-focus
+  from a keyboard backend confirms dispatch only and leaves field contents
+  unverified. Only the GNOME AT-SPI fallback reads the field back: its success
+  is `ok: true` with a message that starts with "Typed through AT-SPI
+  EditableText". Its failures have `ok: false` and start with "AT-SPI
+  EditableText insert was not verified". Re-observe before retrying. Exact window focus alone does not suppress missing-focus
   warnings: only a complete scoped tree containing window/menu chrome without
   content makes the feedback informational. Such trees get a conditional
   Electron/Chromium hint computed before compaction; this is not positive Electron

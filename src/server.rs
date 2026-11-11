@@ -4,7 +4,7 @@ use crate::atspi_tree::{
     perform_action as invoke_accessibility_action, perform_named_action, probe_focused_element,
     set_element_value, snapshot_accessibility_tree, AccessibilityAction, AccessibilityNode,
     AccessibleAppSummary, Bounds, EditableTextSetOutcome, FocusProbe, FocusedElementSummary,
-    ValueSetInvocation,
+    FocusedTextInsert, ValueSetInvocation,
 };
 use crate::diagnostics::{
     doctor_report, setup_accessibility_report, DoctorReport, ReadinessReport, SetupReport,
@@ -3175,7 +3175,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "type_text",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
-        description = "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Success confirms dispatch, not field-content verification; re-observe the target before retrying. X11 xdotool can silently substitute symbols under non-US or changing XKB layouts; inspect the text before pressing Enter or submitting it. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators. On Hyprland, confirmed password fields are rejected, and ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+        description = "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Keyboard success confirms dispatch, not field-content verification; re-observe the target before retrying. On GNOME, when a configured keyboard layout group cannot type a character of the text, the text goes into the focused editable field of the verified target window through AT-SPI EditableText instead: inserted at the caret, replacing a selection, and reported as ok only when the field reads it back with the rest unchanged. Password fields, text with a newline, tab or other control character, and focus outside an editable field of that active window keep the refusal. X11 xdotool can silently substitute symbols under non-US or changing XKB layouts; inspect the text before pressing Enter or submitting it. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators. On Hyprland, confirmed password fields are rejected, and ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -3190,7 +3190,7 @@ impl ComputerUseLinux {
         let capture = params.capture.clone();
         let target = params.window_target();
         let Json(mut output) = self.dispatch_type_text(params).await;
-        if output.ok {
+        if output.ok && !output.message.starts_with(TYPE_TEXT_ATSPI_ROUTE) {
             output.message.push_str(
                 " Field contents were not verified; re-observe the target before retrying.",
             );
@@ -3204,6 +3204,73 @@ impl ComputerUseLinux {
             PostActionScope::default(),
         )
         .await
+    }
+
+    /// GNOME's portal route refused the text because a layout group lacks a
+    /// character. Insert it into the target's focused field through AT-SPI
+    /// EditableText instead, and succeed only when the field reads it back.
+    /// Every other case keeps the portal refusal.
+    async fn type_text_through_atspi(
+        &self,
+        text: &str,
+        portal_target: &WindowTarget,
+        missing: crate::keyboard_keymap::MissingLayoutKeysym,
+        refusal: String,
+        received: Option<serde_json::Value>,
+        input_guard: InputOperationGuard,
+    ) -> ActionOutput {
+        if let Some(key) = key_press_character(text) {
+            return action_result(
+                "type_text",
+                Err(type_text_control_character_refusal(&refusal, key)),
+                received,
+            );
+        }
+        let focus = match self.focus_target_for_input(portal_target).await {
+            Ok(focus) => focus,
+            Err(message) => {
+                return action_result(
+                    "type_text",
+                    Err(format!("{refusal} No AT-SPI text fallback: {message}")),
+                    received,
+                )
+            }
+        };
+        // The window the compositor verified as focused: the field must be in it.
+        let window = focus.as_ref().map(|focus| {
+            focus
+                .focused_window
+                .as_ref()
+                .unwrap_or(&focus.requested_window)
+        });
+        let title = window.and_then(|window| window.title.clone());
+        let Some(pid) = window.and_then(|window| window.pid) else {
+            return action_result_with_focus(
+                "type_text",
+                Err(format!(
+                    "{refusal} No AT-SPI text fallback: the target window has no process id to find its focused field."
+                )),
+                received,
+                focus,
+            );
+        };
+        // A selection replace is DeleteText then InsertText. Finish both even
+        // if this call is cancelled, and hold the input lock until they end.
+        let owned_text = text.to_string();
+        let (_guard, insert) = run_cancellation_safe_guarded(input_guard, async move {
+            crate::atspi_tree::insert_text_at_focus(pid, title.as_deref(), &owned_text).await
+        })
+        .await;
+        let insert = insert.unwrap_or_else(|error| {
+            Ok(FocusedTextInsert::EditFailed {
+                reason: error,
+                may_have_changed: true,
+            })
+        });
+        match type_text_atspi_result(&refusal, missing, text, insert) {
+            Ok(message) => successful_action_with_focus("type_text", &message, received, focus),
+            Err(message) => action_result_with_focus("type_text", Err(message), received, focus),
+        }
     }
 
     async fn dispatch_type_text(&self, params: TypeTextParams) -> Json<ActionOutput> {
@@ -3377,6 +3444,7 @@ impl ComputerUseLinux {
         }
         if self.should_prefer_portal_text_backend() {
             let mut focus = focus;
+            let mut layout_refusal = None;
             let result = async {
                 let portal_target = self
                     .portal_keyboard_target(&window_target, focus.as_ref())
@@ -3385,9 +3453,15 @@ impl ComputerUseLinux {
                 let keysyms = keysyms_for_text(&params.text)
                     .map_err(|error| format!("Literal text was not sent: {error:#}"))?;
                 if self.is_gnome_wayland_session() {
-                    crate::keyboard_keymap::validate_gnome_text(&params.text, &keysyms)
-                        .await
-                        .map_err(|error| format!("Literal text was not sent: {error:#}"))?;
+                    if let Err(error) =
+                        crate::keyboard_keymap::validate_gnome_text(&params.text, &keysyms).await
+                    {
+                        let message = format!("Literal text was not sent: {error:#}");
+                        if let Some(missing) = atspi_fallback_trigger(&error) {
+                            layout_refusal = Some((portal_target, missing, message.clone()));
+                        }
+                        return Err(message);
+                    }
                 }
                 let session = self
                     .ensure_portal_keyboard_session()
@@ -3405,6 +3479,19 @@ impl ComputerUseLinux {
                     })
             }
             .await;
+            if let Some((portal_target, missing, refusal)) = layout_refusal {
+                return Json(
+                    self.type_text_through_atspi(
+                        &params.text,
+                        &portal_target,
+                        missing,
+                        refusal,
+                        received,
+                        input_guard,
+                    )
+                    .await,
+                );
+            }
             return Json(match result {
                 Ok(()) => {
                     let notes = self.input_landing_notes(focus.as_ref(), true).await;
@@ -3578,7 +3665,7 @@ impl ComputerUseLinux {
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
     version = "0.7.51",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If readiness reports can_query_windows or can_focus_windows false on GNOME, call setup_window_targeting to install the GNOME Shell extension, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend captures size-bounded screenshots (pixelflux when configured, GNOME Shell, the XDG portal, native X11, gnome-screenshot; grim in Hyprland background mode), reads AT-SPI trees with action/value metadata, invokes native AT-SPI actions, sets AT-SPI values or editable text, lists and focuses compositor windows through registered Linux window backends when the session permits it, and attaches best-effort terminal tty/process metadata to terminal windows. Click, scroll and drag try pixelflux when configured, xdotool on native X11, the uinput pointer, the RemoteDesktop portal (an open portal session, or when ydotool is absent, on COSMIC, or when forced), then ydotool outside Wayland. On Wayland a point never goes through ydotool: without uinput or the portal a coordinate action is refused; a coordinate scroll sends the move and the wheel through the uinput pointer, and an untargeted scroll sends the wheel through ydotool, or the portal without its daemon. The uinput pointer is sized to the latest full screenshot; take a new one after the desktop size changes. type_text sends literal text through pixelflux when configured (an unreachable pixelflux falls through), KDE clipboard paste on Plasma Wayland (raw ydotool when Klipper cannot be read), wtype on compatible Wayland compositors, portal keysyms on other Wayland sessions, or xdotool on X11. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Mutating tools (click, type_text, press_key, scroll, drag, perform_action, set_value, activate_window, move_window, resize_window) accept optional screenshot_after (true, \"screen\", or \"window\") with format/quality/scale/max_width/max_height/max_bytes, optional screenshot_file_path (an absolute path to a new file, stdio only, refused over HTTP) to save the screenshot there instead of returning image content, and optional include_tree=true to return post-action observation in the same tool call. A failed action returns no observation, except set_value with verified=false. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. Pass that result's snapshot_id with the index or selector: each get_app_state or include_tree tree replaces the cached one, and a call naming a replaced snapshot is refused before any input. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable); type_text also warns when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype passes classified nonsecret text as one literal argument after -- to avoid stdin keymap-refresh corruption; that text is visible in process arguments, so confirmed password fields are rejected (use set_value), and terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call (split larger input or expose accessibility). Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. X11 xdotool can silently substitute symbols under non-US XKB layouts (reported with br/ABNT2) or changing keymap state; inspect the text before pressing Enter or submitting it. A successful type_text result confirms dispatch only; every text backend leaves field contents unverified. Re-observe the target before retrying. Screenshot, keyboard and move/resize results warn when the target window is partly or fully off-screen; click, scroll and drag results warn when a coordinate is off the screenshot or between monitors (not through pixelflux, and not for KWin element clicks, which KWin maps onto an output). move_window and resize_window, which bring a window back on-screen, work only through the GNOME Shell extension or X11/EWMH (wmctrl). scroll accepts the same window targeting and relative coordinates as click; on both, a window target is raised and focused first, and nothing is sent when focus cannot be verified. get_app_state returns a compact readiness block and compact tree nodes (null, empty and default fields left out, actions listed by name) by default; pass verbose=true for the full diagnostics dump and full nodes. Pass interactive_only=true to get only nodes with an action, editable text or a value, plus headings, status/live regions, windows and dialogs; containers are collapsed and element_index values match the full tree. A title or window_id target narrows an app that exposes several windows under one AT-SPI application root (Chromium) to that window's subtree, keeping the app's popups and dialogs. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, read, or time budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 10000 and 64), not by lowering max_nodes. A compacted tree too large to return inline comes back as its leading nodes plus accessibility_tree_spill.path, a private JSON file with the whole tree and the same element_index values; search that file instead of requesting the tree again, or page through it with get_tree_page when files are not readable. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content."
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If readiness reports can_query_windows or can_focus_windows false on GNOME, call setup_window_targeting to install the GNOME Shell extension, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend captures size-bounded screenshots (pixelflux when configured, GNOME Shell, the XDG portal, native X11, gnome-screenshot; grim in Hyprland background mode), reads AT-SPI trees with action/value metadata, invokes native AT-SPI actions, sets AT-SPI values or editable text, lists and focuses compositor windows through registered Linux window backends when the session permits it, and attaches best-effort terminal tty/process metadata to terminal windows. Click, scroll and drag try pixelflux when configured, xdotool on native X11, the uinput pointer, the RemoteDesktop portal (an open portal session, or when ydotool is absent, on COSMIC, or when forced), then ydotool outside Wayland. On Wayland a point never goes through ydotool: without uinput or the portal a coordinate action is refused; a coordinate scroll sends the move and the wheel through the uinput pointer, and an untargeted scroll sends the wheel through ydotool, or the portal without its daemon. The uinput pointer is sized to the latest full screenshot; take a new one after the desktop size changes. type_text sends literal text through pixelflux when configured (an unreachable pixelflux falls through), KDE clipboard paste on Plasma Wayland (raw ydotool when Klipper cannot be read), wtype on compatible Wayland compositors, portal keysyms on other Wayland sessions, or xdotool on X11. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text goes into the target's focused editable field through AT-SPI EditableText and must read back, and otherwise can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Mutating tools (click, type_text, press_key, scroll, drag, perform_action, set_value, activate_window, move_window, resize_window) accept optional screenshot_after (true, \"screen\", or \"window\") with format/quality/scale/max_width/max_height/max_bytes, optional screenshot_file_path (an absolute path to a new file, stdio only, refused over HTTP) to save the screenshot there instead of returning image content, and optional include_tree=true to return post-action observation in the same tool call. A failed action returns no observation, except set_value with verified=false. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. Pass that result's snapshot_id with the index or selector: each get_app_state or include_tree tree replaces the cached one, and a call naming a replaced snapshot is refused before any input. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable); type_text also warns when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype passes classified nonsecret text as one literal argument after -- to avoid stdin keymap-refresh corruption; that text is visible in process arguments, so confirmed password fields are rejected (use set_value), and terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call (split larger input or expose accessibility). Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. X11 xdotool can silently substitute symbols under non-US XKB layouts (reported with br/ABNT2) or changing keymap state; inspect the text before pressing Enter or submitting it. A successful type_text result through a keyboard backend confirms dispatch only and leaves field contents unverified; only the GNOME AT-SPI fallback reads the field back. Re-observe the target before retrying. Screenshot, keyboard and move/resize results warn when the target window is partly or fully off-screen; click, scroll and drag results warn when a coordinate is off the screenshot or between monitors (not through pixelflux, and not for KWin element clicks, which KWin maps onto an output). move_window and resize_window, which bring a window back on-screen, work only through the GNOME Shell extension or X11/EWMH (wmctrl). scroll accepts the same window targeting and relative coordinates as click; on both, a window target is raised and focused first, and nothing is sent when focus cannot be verified. get_app_state returns a compact readiness block and compact tree nodes (null, empty and default fields left out, actions listed by name) by default; pass verbose=true for the full diagnostics dump and full nodes. Pass interactive_only=true to get only nodes with an action, editable text or a value, plus headings, status/live regions, windows and dialogs; containers are collapsed and element_index values match the full tree. A title or window_id target narrows an app that exposes several windows under one AT-SPI application root (Chromium) to that window's subtree, keeping the app's popups and dialogs. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, read, or time budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 10000 and 64), not by lowering max_nodes. A compacted tree too large to return inline comes back as its leading nodes plus accessibility_tree_spill.path, a private JSON file with the whole tree and the same element_index values; search that file instead of requesting the tree again, or page through it with get_tree_page when files are not readable. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content."
 )]
 impl ServerHandler for ComputerUseLinux {
     async fn call_tool(
@@ -5374,6 +5461,101 @@ struct SetValueToolOutput {
     verified: Option<bool>,
     #[serde(flatten)]
     observation: PostActionObservation,
+}
+
+/// Start of every type_text success message from the AT-SPI route. Those
+/// results were read back, so type_text does not add its unverified note.
+const TYPE_TEXT_ATSPI_ROUTE: &str = "Typed through AT-SPI EditableText";
+/// Start of an AT-SPI route failure after an edit was attempted.
+const TYPE_TEXT_ATSPI_UNVERIFIED: &str = "AT-SPI EditableText insert was not verified";
+
+/// The portal preflight refusal that may take the AT-SPI route: the keymap
+/// was read and a layout group cannot type a character. A keymap that could
+/// not be read or checked keeps its error.
+fn atspi_fallback_trigger(
+    error: &anyhow::Error,
+) -> Option<crate::keyboard_keymap::MissingLayoutKeysym> {
+    error
+        .downcast_ref::<crate::keyboard_keymap::MissingLayoutKeysym>()
+        .copied()
+}
+
+/// The first character that portal typing sends as a key press (Enter, Tab,
+/// BackSpace, Escape, Delete and the like), not as text.
+fn key_press_character(text: &str) -> Option<char> {
+    text.chars().find(|ch| ch.is_control())
+}
+
+fn type_text_control_character_refusal(refusal: &str, key: char) -> String {
+    format!(
+        "{refusal} The AT-SPI text fallback was not used: the text contains U+{:04X}, which typing sends as a key press such as Enter or Tab, and inserting it is not the same. Type the text without it, then send the key with press_key.",
+        key as u32
+    )
+}
+
+/// The type_text result for one AT-SPI insert outcome. `Ok` is a verified
+/// success message.
+fn type_text_atspi_result(
+    refusal: &str,
+    missing: crate::keyboard_keymap::MissingLayoutKeysym,
+    text: &str,
+    insert: Result<FocusedTextInsert>,
+) -> std::result::Result<String, String> {
+    const MAY_HAVE_CHANGED: &str = "The field may have changed; re-observe it before retrying.";
+    let because = format!("because GNOME {}", missing.summary());
+    let route = format!("{TYPE_TEXT_ATSPI_ROUTE} {because}");
+    let unverified = format!("{TYPE_TEXT_ATSPI_UNVERIFIED}: the text was sent {because}");
+    match insert {
+        Ok(FocusedTextInsert::Verified {
+            role,
+            replaced_selection,
+            caret_after_text,
+        }) => {
+            let mut message = format!(
+                "{route}. The focused {role} reads back the text at the insertion point, with the rest of the field unchanged."
+            );
+            if replaced_selection {
+                message.push_str(" The text replaced the selection.");
+            }
+            if !caret_after_text {
+                message.push_str(" The caret could not be moved after the text.");
+            }
+            Ok(message)
+        }
+        Ok(FocusedTextInsert::NotEditable(reason)) => {
+            Err(format!("{refusal} No AT-SPI text fallback: {reason}."))
+        }
+        Ok(FocusedTextInsert::PasswordField) => Err(format!(
+            "{refusal} The focused field is a password field, so the AT-SPI text fallback was not used. set_value can fill it."
+        )),
+        Ok(FocusedTextInsert::Mismatch {
+            expected_count,
+            read_count,
+            read_text,
+            read_truncated,
+        }) => Err(format!(
+            "{unverified}, but the field does not read it back: expected {text:?} at the insertion point, the rest unchanged, and {expected_count} characters in all; read {read_text:?}{} at the insertion point and {read_count} characters. {MAY_HAVE_CHANGED}",
+            if read_truncated { " (first part)" } else { "" }
+        )),
+        Ok(FocusedTextInsert::ReadbackFailed) => Err(format!(
+            "{unverified}, but reading the field back failed. {MAY_HAVE_CHANGED}"
+        )),
+        Ok(FocusedTextInsert::ReadbackTimedOut) => Err(format!(
+            "{unverified}, but reading the field back timed out. {MAY_HAVE_CHANGED}"
+        )),
+        Ok(FocusedTextInsert::EditFailed {
+            reason,
+            may_have_changed,
+        }) => Err(format!(
+            "{TYPE_TEXT_ATSPI_UNVERIFIED}: {reason}. {}",
+            if may_have_changed {
+                MAY_HAVE_CHANGED
+            } else {
+                "No text was changed."
+            }
+        )),
+        Err(error) => Err(format!("{refusal} No AT-SPI text fallback: {error:#}.")),
+    }
 }
 
 fn editable_text_action_result(
@@ -23766,5 +23948,179 @@ mod snapshot_handle_tests {
             .check_element_snapshot("click", Some(&id), true)
             .unwrap_err();
         assert!(refused.contains("no tree is cached now"), "{refused}");
+    }
+}
+
+#[cfg(test)]
+mod type_text_atspi_fallback_tests {
+    use super::*;
+    use crate::atspi_tree_impl::insert_fixture::{
+        start_field_fixture, FieldFixture, FIXTURE_WINDOW,
+    };
+    use crate::keyboard_keymap::{MissingKeysymReason, MissingLayoutKeysym};
+
+    const REFUSAL: &str =
+        "Literal text was not sent: GNOME portal cannot verify U+002F in keyboard layout group 2.";
+    const MISSING: MissingLayoutKeysym = MissingLayoutKeysym {
+        ch: '/',
+        group: 2,
+        reason: MissingKeysymReason::Absent,
+    };
+
+    fn result(insert: Result<FocusedTextInsert>) -> std::result::Result<String, String> {
+        type_text_atspi_result(REFUSAL, MISSING, "/home/x", insert)
+    }
+
+    #[test]
+    fn a_verified_insert_names_the_route_and_skips_the_unverified_note() {
+        let message = result(Ok(FocusedTextInsert::Verified {
+            role: "text".to_string(),
+            replaced_selection: true,
+            caret_after_text: true,
+        }))
+        .unwrap();
+        // type_text adds "Field contents were not verified" unless this holds.
+        assert!(message.starts_with(TYPE_TEXT_ATSPI_ROUTE), "{message}");
+        assert!(message.contains("group 2 lacks U+002F"), "{message}");
+        assert!(message.contains("reads back the text"), "{message}");
+        assert!(message.contains("replaced the selection"), "{message}");
+        assert!(!message.contains("caret"), "{message}");
+    }
+
+    #[test]
+    fn no_editable_focus_and_password_fields_keep_the_refusal() {
+        let error = result(Ok(FocusedTextInsert::NotEditable(
+            "no element in the target app has keyboard focus".to_string(),
+        )))
+        .unwrap_err();
+        assert!(error.starts_with(REFUSAL), "{error}");
+        assert!(error.contains("no element in the target app has keyboard focus"));
+
+        let error = result(Ok(FocusedTextInsert::PasswordField)).unwrap_err();
+        assert!(error.starts_with(REFUSAL), "{error}");
+        assert!(error.contains("password field"), "{error}");
+        assert!(error.contains("set_value can fill it"), "{error}");
+
+        let error = result(Err(anyhow::anyhow!("failed to connect to AT-SPI bus"))).unwrap_err();
+        assert!(error.starts_with(REFUSAL), "{error}");
+    }
+
+    #[test]
+    fn a_readback_mismatch_fails_and_quotes_the_field() {
+        let error = result(Ok(FocusedTextInsert::Mismatch {
+            expected_count: 7,
+            read_count: 6,
+            read_text: "/home/".to_string(),
+            read_truncated: false,
+        }))
+        .unwrap_err();
+        // A failure must not carry the success marker.
+        assert!(error.starts_with(TYPE_TEXT_ATSPI_UNVERIFIED), "{error}");
+        assert!(!error.starts_with(TYPE_TEXT_ATSPI_ROUTE), "{error}");
+        assert!(error.contains("does not read it back"), "{error}");
+        assert!(error.contains("\"/home/x\""), "{error}");
+        assert!(error.contains("read \"/home/\""), "{error}");
+        assert!(error.contains("may have changed"), "{error}");
+
+        let error = result(Ok(FocusedTextInsert::EditFailed {
+            reason: "the app refused InsertText".to_string(),
+            may_have_changed: false,
+        }))
+        .unwrap_err();
+        assert!(error.starts_with(TYPE_TEXT_ATSPI_UNVERIFIED), "{error}");
+        assert!(error.contains("No text was changed"), "{error}");
+        for outcome in [
+            FocusedTextInsert::ReadbackFailed,
+            FocusedTextInsert::ReadbackTimedOut,
+        ] {
+            let error = result(Ok(outcome)).unwrap_err();
+            assert!(error.starts_with(TYPE_TEXT_ATSPI_UNVERIFIED), "{error}");
+        }
+
+        // An unreachable shift level is not worded as a missing character.
+        let unreachable = MissingLayoutKeysym {
+            reason: MissingKeysymReason::UnreachableLevel,
+            ..MISSING
+        };
+        let error = type_text_atspi_result(
+            REFUSAL,
+            unreachable,
+            "/home/x",
+            Ok(FocusedTextInsert::ReadbackFailed),
+        )
+        .unwrap_err();
+        assert!(error.contains("only at a shift level"), "{error}");
+        assert!(!error.contains("lacks"), "{error}");
+    }
+
+    #[test]
+    fn only_a_missing_keysym_takes_the_atspi_route() {
+        let missing = anyhow::Error::new(MISSING).context("keyboard keymap preflight failed");
+        assert_eq!(atspi_fallback_trigger(&missing), Some(MISSING));
+        for error in [
+            anyhow::anyhow!("WAYLAND_DISPLAY is missing; cannot verify the keyboard keymap"),
+            anyhow::anyhow!("keyboard keymap read timed out; no text was sent"),
+            anyhow::anyhow!("cannot verify the complete text against the keyboard keymap"),
+        ] {
+            assert_eq!(atspi_fallback_trigger(&error), None, "{error}");
+        }
+    }
+
+    /// The issue's case: with us + il groups the portal preflight refuses
+    /// `/home/x`, and the text goes into the focused entry and reads back.
+    #[tokio::test]
+    async fn a_two_group_keymap_refusal_types_through_atspi() {
+        let keymap = include_bytes!("../tests/fixtures/keyboard-us-il.xkb");
+        assert!(crate::keyboard_keymap::validate_text_with_keymap(keymap, "/").is_ok());
+        let error =
+            crate::keyboard_keymap::validate_text_with_keymap(keymap, "/home/x").unwrap_err();
+        let refusal = format!("Literal text was not sent: {error:#}");
+        let missing = atspi_fallback_trigger(&error).expect("a layout refusal");
+        assert_eq!(
+            missing,
+            MissingLayoutKeysym {
+                ch: 'h',
+                group: 2,
+                reason: MissingKeysymReason::Absent,
+            }
+        );
+
+        let running = start_field_fixture(FieldFixture {
+            role: atspi::Role::Entry,
+            role_name: "entry",
+            ..Default::default()
+        })
+        .await;
+        let insert = crate::atspi_tree_impl::insert_text_at_focus_on(
+            &running.conn,
+            std::process::id(),
+            Some(FIXTURE_WINDOW),
+            "/home/x",
+        )
+        .await;
+        let message = type_text_atspi_result(&refusal, missing, "/home/x", insert).unwrap();
+        assert!(message.starts_with(TYPE_TEXT_ATSPI_ROUTE), "{message}");
+        assert!(message.contains("group 2 lacks U+0068"), "{message}");
+        assert_eq!(running.take_state(0).contents, "/home/x");
+    }
+
+    #[test]
+    fn control_characters_are_not_inserted() {
+        assert_eq!(key_press_character("/home/x y.txt"), None);
+        assert_eq!(key_press_character("שלום"), None);
+        for (text, code) in [
+            ("a\nb", "U+000A"),
+            ("a\tb", "U+0009"),
+            ("a\rb", "U+000D"),
+            ("a\u{8}", "U+0008"),
+            ("\u{1b}", "U+001B"),
+            ("\u{7f}", "U+007F"),
+        ] {
+            let key = key_press_character(text).unwrap();
+            let error = type_text_control_character_refusal(REFUSAL, key);
+            assert!(error.starts_with(REFUSAL), "{error}");
+            assert!(error.contains(code), "{error}");
+            assert!(error.contains("press_key"), "{error}");
+        }
     }
 }
