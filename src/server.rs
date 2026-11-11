@@ -5800,11 +5800,20 @@ impl ComputerUseLinux {
                 tree: cached_tree,
                 ..
             } = self.post_action_scope_for_capture(scope);
-            let target_pid = resolved_window
-                .as_ref()
-                .and_then(|window| window.pid)
-                .or_else(|| target.and_then(|target| target.pid))
-                .or(cached_pid.filter(|_| !window_targeted));
+            // A bound owner's pid is the element's verified bus owner. Its
+            // window's listed pid can differ: a Flatpak app's roots belong
+            // to xdg-dbus-proxy, not to the process the compositor lists.
+            let target_pid = if bound {
+                target
+                    .and_then(|target| target.pid)
+                    .or_else(|| resolved_window.as_ref().and_then(|window| window.pid))
+            } else {
+                resolved_window
+                    .as_ref()
+                    .and_then(|window| window.pid)
+                    .or_else(|| target.and_then(|target| target.pid))
+                    .or(cached_pid.filter(|_| !window_targeted))
+            };
             // A pid scopes the tree to every root it owns. A window the
             // compositor listed is alive, so when its pid owns no root (a
             // Flatpak app registers through xdg-dbus-proxy) its title finds
@@ -7193,9 +7202,7 @@ impl ComputerUseLinux {
         cached: &CachedAccessibilitySnapshot,
         named_snapshot: Option<&str>,
     ) -> PostActionScope {
-        if self.require_snapshot_ids
-            && trimmed_nonempty(named_snapshot).is_none_or(|named| named != cached.id)
-        {
+        if !self.snapshot_readable_by_call(cached, named_snapshot) {
             return PostActionScope::default();
         }
         let tree = cached.window_scope.clone().map(|scope| CachedTreeWindow {
@@ -7208,6 +7215,17 @@ impl ComputerUseLinux {
             tree,
             bound: false,
         }
+    }
+
+    /// Whether a call may read the cached snapshot: always on stdio, and over
+    /// HTTP only when the call named it, since another client may have stored it.
+    fn snapshot_readable_by_call(
+        &self,
+        cached: &CachedAccessibilitySnapshot,
+        named_snapshot: Option<&str>,
+    ) -> bool {
+        !self.require_snapshot_ids
+            || trimmed_nonempty(named_snapshot).is_some_and(|named| named == cached.id)
     }
 
     /// On stdio the post-action tree reads the scope cached at capture time.
@@ -7976,7 +7994,7 @@ impl ComputerUseLinux {
             None
         };
         let mut target = self
-            .element_observation_target_with(requested, object_ref, || async {
+            .element_observation_target_with(requested, object_ref, named_snapshot, || async {
                 object_ref_application_pid(object_ref).await
             })
             .await?;
@@ -7986,10 +8004,11 @@ impl ComputerUseLinux {
             // observed snapshot. A raw, uncached identifier has no such proof.
             let observed_pidless_window = owner.pid.is_none()
                 && self.last_snapshot.lock().ok().is_some_and(|snapshot| {
-                    snapshot
-                        .nodes
-                        .iter()
-                        .any(|node| node.object_ref == object_ref)
+                    self.snapshot_readable_by_call(&snapshot, named_snapshot)
+                        && snapshot
+                            .nodes
+                            .iter()
+                            .any(|node| node.object_ref == object_ref)
                         && owner.window.as_ref().is_some_and(|(window_id, backend)| {
                             snapshot.window_id == Some(*window_id)
                                 && snapshot.window_backend.as_ref() == Some(backend)
@@ -8023,6 +8042,7 @@ impl ComputerUseLinux {
         &self,
         requested: &ElementActionTarget,
         object_ref: &str,
+        named_snapshot: Option<&str>,
         owner_pid: F,
     ) -> std::result::Result<WindowTarget, String>
     where
@@ -8030,6 +8050,9 @@ impl ComputerUseLinux {
         Fut: Future<Output = Result<Option<u32>>>,
     {
         let cached_target = self.last_snapshot.lock().ok().and_then(|snapshot| {
+            if !self.snapshot_readable_by_call(&snapshot, named_snapshot) {
+                return None;
+            }
             let node = snapshot
                 .nodes
                 .iter()
@@ -18274,7 +18297,32 @@ printf '0x00000007 0 %s 0 0 100 100 first.First host Target 7\n0x00000008 0 %s 0
         );
         assert_eq!(server.last_snapshot.lock().unwrap().pid, None);
 
-        // A bound element owner keeps the strict pid scope: no title fallback.
+        // An element acted on in that window is bound to its bus owner, the
+        // proxy's pid here, not the pid the compositor lists for window 9.
+        let proxied_element = ElementObservationTarget {
+            owner: WindowTarget {
+                pid: Some(std::process::id()),
+                window_id: Some(9),
+                ..Default::default()
+            },
+            tree_window: None,
+        };
+        let (observation, _, notes) = server
+            .capture_post_action_observation(
+                &capture,
+                Some(&proxied_element.owner),
+                None,
+                TargetRaised::No,
+                PostActionScope::bound_to(&proxied_element),
+            )
+            .await;
+        assert_eq!(
+            observation.accessibility_tree_raw_count,
+            Some(1),
+            "{observation:?}; {notes:?}"
+        );
+
+        // An owner pid with no root keeps the strict pid scope: no title fallback.
         let bound_owner = ElementObservationTarget {
             owner: WindowTarget {
                 pid: Some(999_999),
@@ -20314,6 +20362,7 @@ mod node_target_scope_tests {
             .element_observation_target_with(
                 &ElementActionTarget::default(),
                 object_ref,
+                None,
                 || async { panic!("the observed element already has an owner") },
             )
             .await
@@ -20326,6 +20375,7 @@ mod node_target_scope_tests {
             .element_observation_target_with(
                 &ElementActionTarget::default(),
                 object_ref,
+                None,
                 || async { Ok(Some(APP_B)) },
             )
             .await
@@ -20334,7 +20384,7 @@ mod node_target_scope_tests {
         assert_eq!(target.window_id, None);
 
         let explicit = backend
-            .element_observation_target_with(&pid_target(APP_B), object_ref, || async {
+            .element_observation_target_with(&pid_target(APP_B), object_ref, None, || async {
                 panic!("the explicitly checked target must be preserved")
             })
             .await
@@ -20367,6 +20417,7 @@ mod node_target_scope_tests {
             .element_observation_target_with(
                 &ElementActionTarget::default(),
                 object_ref,
+                None,
                 || async { Ok(Some(APP_B)) },
             )
             .await
@@ -20379,7 +20430,9 @@ mod node_target_scope_tests {
             ..Default::default()
         };
         let target = backend
-            .element_observation_target_with(&explicit, object_ref, || async { Ok(Some(APP_B)) })
+            .element_observation_target_with(&explicit, object_ref, None, || async {
+                Ok(Some(APP_B))
+            })
             .await
             .unwrap();
         assert_eq!(target.pid, Some(APP_B));
@@ -20410,7 +20463,7 @@ mod node_target_scope_tests {
             let backend = ComputerUseLinux::default();
             backend.cache_snapshot(&[cached_node(2, object_ref)], cached_pid);
             let target = backend
-                .element_observation_target_with(&requested, object_ref, || async {
+                .element_observation_target_with(&requested, object_ref, None, || async {
                     assert!(cached_pid.is_none(), "reuse the observed object owner");
                     Ok(Some(APP_A))
                 })
@@ -20443,6 +20496,7 @@ mod node_target_scope_tests {
             .element_observation_target_with(
                 &ElementActionTarget::default(),
                 object_ref,
+                None,
                 || async { panic!("the app-wide snapshot establishes the process owner") },
             )
             .await
@@ -20558,6 +20612,7 @@ mod node_target_scope_tests {
             .element_observation_target_with(
                 &ElementActionTarget::default(),
                 ":1.99/uncached",
+                None,
                 || async { Ok(None) },
             )
             .await
@@ -20579,6 +20634,42 @@ mod node_target_scope_tests {
         assert!(screenshot.is_none());
         assert!(notes[0].contains("no verified app or window owner"));
         assert!(backend.cached_snapshot_id().is_empty());
+    }
+
+    #[tokio::test]
+    async fn http_owner_binding_reads_only_a_named_snapshot() {
+        let http = ComputerUseLinux {
+            require_snapshot_ids: true,
+            ..Default::default()
+        };
+        let object_ref = ":1.9/org/a11y/atspi/accessible/42";
+        http.cache_snapshot(&[cached_node(2, object_ref)], Some(APP_B));
+        // Another client's snapshot holds the object: its owner comes from
+        // the bus, not from that client's tree.
+        for named in [None, Some("other")] {
+            let owner = http
+                .element_observation_target_with(
+                    &ElementActionTarget::default(),
+                    object_ref,
+                    named,
+                    || async { Ok(Some(APP_A)) },
+                )
+                .await
+                .unwrap();
+            assert_eq!(owner.pid, Some(APP_A));
+        }
+        // The call named the snapshot, so its observed owner holds.
+        let id = http.cached_snapshot_id();
+        let owner = http
+            .element_observation_target_with(
+                &ElementActionTarget::default(),
+                object_ref,
+                Some(&id),
+                || async { panic!("the named snapshot establishes the owner") },
+            )
+            .await
+            .unwrap();
+        assert_eq!(owner.pid, Some(APP_B));
     }
 
     #[tokio::test]
