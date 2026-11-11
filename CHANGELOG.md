@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `screenshot`, `get_app_state` and the `screenshot_after` capture of every mutating tool take `screenshot_file_path`, an absolute path where the image is saved instead of being returned as MCP image content, so a capture costs no image tokens until the agent opens the file. The result keeps its screenshot metadata (size, coordinate size, `scale`, `format`, `bytes`) and adds `file_path`. The parent directory must exist, and the extension must match `format` (`.png`, or `.jpg`/`.jpeg` for jpeg). An existing regular file is replaced through a same-directory temp file and a rename; a directory or symlink is refused. A bad path is refused before any capture or input. A failed write is the `screenshot` call's error, `screenshot_error` on `get_app_state`, and `screenshot_error` with `ok` kept on a mutating tool; the image is never returned inline instead. Over HTTP (`mcp --listen`) the parameter is refused, so a remote client gets no file writes on the host. Thanks to [@xchacha20-poly1305](https://github.com/xchacha20-poly1305) ([#446](https://github.com/agent-sh/computer-use-linux/issues/446)).
+
 ## [0.7.51] - 2026-11-11
 
 ### Fixed

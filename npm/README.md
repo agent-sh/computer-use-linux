@@ -123,6 +123,12 @@ Mutating tools (`click`, `drag`, `scroll`, `press_key`, `type_text`,
 `include_tree: true` to return a post-action screenshot and/or compacted AT-SPI
 tree in the same tool result.
 
+`screenshot`, `get_app_state` and `screenshot_after` also take
+`screenshot_file_path`, an absolute path where the image is saved instead of
+returned as image content. The parent directory must exist, the extension must
+match `format`, and an existing regular file is replaced. It is refused over
+HTTP (`mcp --listen`).
+
 For an optional MCP completion notification, set
 `COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE=1` in the server environment and have the
 agent call `complete_interaction` after its desktop work. `notify-send` must be

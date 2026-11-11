@@ -114,6 +114,7 @@ POST_ACTION_CAPTURE_PROPS = {
     "max_width",
     "max_height",
     "max_bytes",
+    "screenshot_file_path",
 }
 
 READ_ONLY_TOOLS = {
@@ -466,6 +467,8 @@ def main() -> int:
                 raise AssertionError(f"{name} is missing object/semantic element selectors: {sorted(OBJECT_REF_SELECTORS - props)}")
             if name in POST_ACTION_CAPTURE_TOOLS and not POST_ACTION_CAPTURE_PROPS <= props:
                 raise AssertionError(f"{name} is missing post-action capture parameters: {sorted(POST_ACTION_CAPTURE_PROPS - props)}")
+            if name in {"screenshot", "get_app_state"} and "screenshot_file_path" not in props:
+                raise AssertionError(f"{name} is missing screenshot_file_path")
 
         doctor = client.request("tools/call", {"name": "doctor", "arguments": {}})["result"]
         content = doctor.get("content") or []

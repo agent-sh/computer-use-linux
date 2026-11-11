@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.51";
-export const GENERATED_TOOL_CATALOG_HASH = "cffd6953843133dfee35c6c5bfc4f98e177798a31cc05e711a18d6b96ae7d2e4";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "1b9f83b4ce6e5b07b25eae206dae6af7a31dda69fd073ad55d50f03bbd4bdb66";
+export const GENERATED_TOOL_CATALOG_HASH = "355d13301594e1c28d74c3e7809a720482fa307cfab5636487419929dfcf4bac";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "4ec928840c4cd1d332b7d93b187e8ec4bed604b5d3d1c486429656e8ef8902cf";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -125,6 +125,13 @@ export const GENERATED_MCP_TOOLS =
             }
           ],
           "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
+        },
+        "screenshot_file_path": {
+          "description": "Save the post-action screenshot to this absolute path instead of\nreturning it as image content; needs screenshot_after. The parent\ndirectory must exist, and the extension must match format (.png, or\n.jpg/.jpeg for jpeg). An existing regular file is replaced; a directory\nor symlink is refused. Refused over HTTP (mcp --listen). A failed write\nis reported in screenshot_error, and the action's ok stays true.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "terminal_command": {
           "default": null,
@@ -366,6 +373,13 @@ export const GENERATED_MCP_TOOLS =
           ],
           "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
         },
+        "screenshot_file_path": {
+          "description": "Save the post-action screenshot to this absolute path instead of\nreturning it as image content; needs screenshot_after. The parent\ndirectory must exist, and the extension must match format (.png, or\n.jpg/.jpeg for jpeg). An existing regular file is replaced; a directory\nor symlink is refused. Refused over HTTP (mcp --listen). A failed write\nis reported in screenshot_error, and the action's ok stays true.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "snapshot_id": {
           "default": null,
           "description": "snapshot_id of the get_app_state or include_tree result the\nelement_index or selector comes from. If a later snapshot replaced\nit, the call is refused before any input. Without it, the element\nresolves in the latest snapshot.",
@@ -560,6 +574,13 @@ export const GENERATED_MCP_TOOLS =
           ],
           "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
         },
+        "screenshot_file_path": {
+          "description": "Save the post-action screenshot to this absolute path instead of\nreturning it as image content; needs screenshot_after. The parent\ndirectory must exist, and the extension must match format (.png, or\n.jpg/.jpeg for jpeg). An existing regular file is replaced; a directory\nor symlink is refused. Refused over HTTP (mcp --listen). A failed write\nis reported in screenshot_error, and the action's ok stays true.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "start_x": {
           "description": "Start x in raw screenshot capture pixels: the coordinate_width space.\nDivide preview pixels by the screenshot scale first.",
           "format": "int32",
@@ -602,7 +623,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "Get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Nodes are compact (empty fields left out, actions by name; verbose=true returns every field). Pass interactive_only=true for only actionable nodes, headings and status regions, with the same element_index values. A title or window_id target narrows an app with several windows under one AT-SPI root (Chromium) to that window, keeping the app's popups and dialogs. A window-targeted screenshot needs that window visible and already focused (outside Hyprland background mode); otherwise screenshot_error is set and the tree still returns, so use the screenshot tool to raise and capture it. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. The result's snapshot_id names the tree: element_index and selector actions that pass it are refused once a later tree replaced it. Screenshot results always include coordinate_width, coordinate_height, scale, and format, plus quality for jpeg; callers can request jpeg/quality for compression before resizing.",
+    "description": "Get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Nodes are compact (empty fields left out, actions by name; verbose=true returns every field). Pass interactive_only=true for only actionable nodes, headings and status regions, with the same element_index values. A title or window_id target narrows an app with several windows under one AT-SPI root (Chromium) to that window, keeping the app's popups and dialogs. A window-targeted screenshot needs that window visible and already focused (outside Hyprland background mode); otherwise screenshot_error is set and the tree still returns, so use the screenshot tool to raise and capture it. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. The result's snapshot_id names the tree: element_index and selector actions that pass it are refused once a later tree replaced it. Screenshot results always include coordinate_width, coordinate_height, scale, and format, plus quality for jpeg; callers can request jpeg/quality for compression before resizing. Pass screenshot_file_path (an absolute path, stdio only) to save the screenshot to a file instead of returning image content; screenshot.file_path then names it.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -729,6 +750,14 @@ export const GENERATED_MCP_TOOLS =
           "format": "float",
           "type": [
             "number",
+            "null"
+          ]
+        },
+        "screenshot_file_path": {
+          "default": null,
+          "description": "Save the screenshot to this absolute path instead of returning it as\nimage content; screenshot.file_path then names it. The parent directory\nmust exist, and the extension must match format (.png, or .jpg/.jpeg for\njpeg). An existing regular file is replaced; a directory or symlink is\nrefused. Refused over HTTP (mcp --listen). A failed write is reported\nin screenshot_error.",
+          "type": [
+            "string",
             "null"
           ]
         },
@@ -979,6 +1008,13 @@ export const GENERATED_MCP_TOOLS =
           ],
           "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
         },
+        "screenshot_file_path": {
+          "description": "Save the post-action screenshot to this absolute path instead of\nreturning it as image content; needs screenshot_after. The parent\ndirectory must exist, and the extension must match format (.png, or\n.jpg/.jpeg for jpeg). An existing regular file is replaced; a directory\nor symlink is refused. Refused over HTTP (mcp --listen). A failed write\nis reported in screenshot_error, and the action's ok stays true.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "terminal_command": {
           "default": null,
           "description": "Substring of the command name or command line of a terminal's shell\nor foreground process, ignoring ASCII case.",
@@ -1212,6 +1248,13 @@ export const GENERATED_MCP_TOOLS =
           ],
           "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
         },
+        "screenshot_file_path": {
+          "description": "Save the post-action screenshot to this absolute path instead of\nreturning it as image content; needs screenshot_after. The parent\ndirectory must exist, and the extension must match format (.png, or\n.jpg/.jpeg for jpeg). An existing regular file is replaced; a directory\nor symlink is refused. Refused over HTTP (mcp --listen). A failed write\nis reported in screenshot_error, and the action's ok stays true.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "snapshot_id": {
           "default": null,
           "description": "snapshot_id of the get_app_state or include_tree result the\nelement_index or selector comes from. If a later snapshot replaced\nit, the call is refused before any input. Without it, the element\nresolves in the latest snapshot.",
@@ -1384,6 +1427,13 @@ export const GENERATED_MCP_TOOLS =
             }
           ],
           "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
+        },
+        "screenshot_file_path": {
+          "description": "Save the post-action screenshot to this absolute path instead of\nreturning it as image content; needs screenshot_after. The parent\ndirectory must exist, and the extension must match format (.png, or\n.jpg/.jpeg for jpeg). An existing regular file is replaced; a directory\nor symlink is refused. Refused over HTTP (mcp --listen). A failed write\nis reported in screenshot_error, and the action's ok stays true.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "terminal_command": {
           "default": null,
@@ -1571,6 +1621,13 @@ export const GENERATED_MCP_TOOLS =
           ],
           "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
         },
+        "screenshot_file_path": {
+          "description": "Save the post-action screenshot to this absolute path instead of\nreturning it as image content; needs screenshot_after. The parent\ndirectory must exist, and the extension must match format (.png, or\n.jpg/.jpeg for jpeg). An existing regular file is replaced; a directory\nor symlink is refused. Refused over HTTP (mcp --listen). A failed write\nis reported in screenshot_error, and the action's ok stays true.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "terminal_command": {
           "default": null,
           "description": "Substring of the command name or command line of a terminal's shell\nor foreground process, ignoring ASCII case.",
@@ -1651,7 +1708,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize; outside Hyprland background mode, a target without known bounds is refused, so pass full_screen=true there. Returns the image plus a JSON caption with returned and coordinate dimensions, scale, format, quality, source, cropped_to_window, and window_title. The crop origin is not reported; use relative=true on click or scroll for window-relative input. Callers can request jpeg/quality for compression before resizing.",
+    "description": "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize; outside Hyprland background mode, a target without known bounds is refused, so pass full_screen=true there. Returns the image plus a JSON caption with returned and coordinate dimensions, scale, format, quality, source, cropped_to_window, and window_title. The crop origin is not reported; use relative=true on click or scroll for window-relative input. Callers can request jpeg/quality for compression before resizing. Pass screenshot_file_path (an absolute path, stdio only) to save the image to a file instead: the result is then only the caption, with file_path.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -1752,6 +1809,14 @@ export const GENERATED_MCP_TOOLS =
           "format": "float",
           "type": [
             "number",
+            "null"
+          ]
+        },
+        "screenshot_file_path": {
+          "default": null,
+          "description": "Save the image to this absolute path instead of returning it as image\ncontent; the caption's file_path then names it. The parent directory\nmust exist, and the extension must match format (.png, or .jpg/.jpeg for\njpeg). An existing regular file is replaced; a directory or symlink is\nrefused. Refused over HTTP (mcp --listen).",
+          "type": [
+            "string",
             "null"
           ]
         },
@@ -1931,6 +1996,13 @@ export const GENERATED_MCP_TOOLS =
             }
           ],
           "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
+        },
+        "screenshot_file_path": {
+          "description": "Save the post-action screenshot to this absolute path instead of\nreturning it as image content; needs screenshot_after. The parent\ndirectory must exist, and the extension must match format (.png, or\n.jpg/.jpeg for jpeg). An existing regular file is replaced; a directory\nor symlink is refused. Refused over HTTP (mcp --listen). A failed write\nis reported in screenshot_error, and the action's ok stays true.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "snapshot_id": {
           "default": null,
@@ -2139,6 +2211,13 @@ export const GENERATED_MCP_TOOLS =
           ],
           "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
         },
+        "screenshot_file_path": {
+          "description": "Save the post-action screenshot to this absolute path instead of\nreturning it as image content; needs screenshot_after. The parent\ndirectory must exist, and the extension must match format (.png, or\n.jpg/.jpeg for jpeg). An existing regular file is replaced; a directory\nor symlink is refused. Refused over HTTP (mcp --listen). A failed write\nis reported in screenshot_error, and the action's ok stays true.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "snapshot_id": {
           "default": null,
           "description": "snapshot_id of the get_app_state or include_tree result the\nelement_index or selector comes from. If a later snapshot replaced\nit, the call is refused before any input. Without it, the element\nresolves in the latest snapshot.",
@@ -2342,6 +2421,13 @@ export const GENERATED_MCP_TOOLS =
             }
           ],
           "description": "Capture and return a post-action screenshot in the same result: `true` or\n`\"screen\"` captures the full desktop; `\"window\"` crops to the action's\ntarget window (or the focused window when untargeted); `false` disables capture."
+        },
+        "screenshot_file_path": {
+          "description": "Save the post-action screenshot to this absolute path instead of\nreturning it as image content; needs screenshot_after. The parent\ndirectory must exist, and the extension must match format (.png, or\n.jpg/.jpeg for jpeg). An existing regular file is replaced; a directory\nor symlink is refused. Refused over HTTP (mcp --listen). A failed write\nis reported in screenshot_error, and the action's ok stays true.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "terminal_command": {
           "default": null,

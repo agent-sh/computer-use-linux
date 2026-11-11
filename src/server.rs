@@ -309,6 +309,9 @@ pub struct ComputerUseLinux {
     accessibility_check: AccessibilityCheck,
     /// Set for HTTP: clients share the cached tree, so element calls must name it.
     require_snapshot_ids: bool,
+    /// Set for HTTP: a remote client gets no file writes on the host, so
+    /// screenshot_file_path is refused.
+    http_transport: bool,
 }
 
 /// The monitor layout of the cached capture. `generation` counts captures,
@@ -677,7 +680,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "get_app_state",
         output_schema = rmcp::handler::server::tool::schema_for_output::<GetAppStateOutput>(),
-        description = "Get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Nodes are compact (empty fields left out, actions by name; verbose=true returns every field). Pass interactive_only=true for only actionable nodes, headings and status regions, with the same element_index values. A title or window_id target narrows an app with several windows under one AT-SPI root (Chromium) to that window, keeping the app's popups and dialogs. A window-targeted screenshot needs that window visible and already focused (outside Hyprland background mode); otherwise screenshot_error is set and the tree still returns, so use the screenshot tool to raise and capture it. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. The result's snapshot_id names the tree: element_index and selector actions that pass it are refused once a later tree replaced it. Screenshot results always include coordinate_width, coordinate_height, scale, and format, plus quality for jpeg; callers can request jpeg/quality for compression before resizing.",
+        description = "Get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Nodes are compact (empty fields left out, actions by name; verbose=true returns every field). Pass interactive_only=true for only actionable nodes, headings and status regions, with the same element_index values. A title or window_id target narrows an app with several windows under one AT-SPI root (Chromium) to that window, keeping the app's popups and dialogs. A window-targeted screenshot needs that window visible and already focused (outside Hyprland background mode); otherwise screenshot_error is set and the tree still returns, so use the screenshot tool to raise and capture it. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. The result's snapshot_id names the tree: element_index and selector actions that pass it are refused once a later tree replaced it. Screenshot results always include coordinate_width, coordinate_height, scale, and format, plus quality for jpeg; callers can request jpeg/quality for compression before resizing. Pass screenshot_file_path (an absolute path, stdio only) to save the screenshot to a file instead of returning image content; screenshot.file_path then names it.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -738,7 +741,21 @@ impl ComputerUseLinux {
             .await;
         let mut screenshot_captured = None;
         let mut capture_note = None;
-        let (screenshot, screenshot_error) = if include_screenshot {
+        // A path that cannot be written is reported without a capture.
+        let file_refusal = params
+            .screenshot_file_path
+            .as_deref()
+            .filter(|_| include_screenshot)
+            .and_then(|path| {
+                crate::screenshot_file::validate_screenshot_file_path(
+                    path,
+                    params.format.unwrap_or(ScreenshotOutputFormat::Png),
+                    self.http_transport,
+                )
+                .err()
+            })
+            .map(|error| format!("{error:#}"));
+        let (screenshot, screenshot_error) = if include_screenshot && file_refusal.is_none() {
             let result: Result<ScreenshotCapture> = async {
                 let _pipeline = crate::screenshot_impl::screenshot_pipeline_permit().await?;
                 if let Some(window) = window_context.as_ref() {
@@ -786,6 +803,23 @@ impl ComputerUseLinux {
         } else {
             (None, None)
         };
+        // A failed file write is reported like a failed capture, but it says
+        // nothing about the desktop's screenshot readiness.
+        let screenshot_capture_failed = screenshot_error.is_some();
+        let mut screenshot_file = None;
+        let (screenshot, screenshot_error) =
+            match (screenshot, params.screenshot_file_path.as_deref()) {
+                (Some(capture), Some(path)) => {
+                    match self.save_screenshot_file(&capture, path).await {
+                        Ok(saved) => {
+                            screenshot_file = Some(saved);
+                            (Some(capture), None)
+                        }
+                        Err(error) => (None, Some(format!("{error:#}"))),
+                    }
+                }
+                (screenshot, _) => (screenshot, screenshot_error.or(file_refusal)),
+            };
         let mut tree_scoped = false;
         let mut tree_root_pid = None;
         let mut accessibility_tree_truncated = false;
@@ -870,7 +904,7 @@ impl ComputerUseLinux {
                 )
             };
         let observed = AppStateObservation {
-            screenshot_failed: screenshot_error.is_some(),
+            screenshot_failed: screenshot_capture_failed,
             window: match (&window_context, &window_error) {
                 (_, Some(_)) => WindowLookup::Failed,
                 (Some(_), None) => WindowLookup::Resolved,
@@ -964,6 +998,9 @@ impl ComputerUseLinux {
             message.push(' ');
             message.push_str(&note);
         }
+        if let Some(path) = &screenshot_file {
+            message.push_str(&format!(" The screenshot was saved to {path}."));
+        }
         if let Some(warning) = unscoped_accessibility_tree_warning(
             tree_scoped,
             accessibility_error.is_none(),
@@ -1008,7 +1045,10 @@ impl ComputerUseLinux {
             window_error,
             window_permissions_hint,
             backend: "linux-atspi".to_string(),
-            screenshot: screenshot.as_ref().map(ScreenshotSummary::from),
+            screenshot: screenshot.as_ref().map(|capture| ScreenshotSummary {
+                file_path: screenshot_file.clone(),
+                ..ScreenshotSummary::from(capture)
+            }),
             screenshot_error,
             snapshot_id,
             accessibility_tree: TreeNodes::new(Vec::new(), detail),
@@ -1035,12 +1075,13 @@ impl ComputerUseLinux {
             output.message.push(' ');
             output.message.push_str(&note);
         }
-        app_state_result(output, screenshot)
+        // A saved image is not returned inline.
+        app_state_result(output, screenshot.filter(|_| screenshot_file.is_none()))
     }
 
     #[tool(
         name = "screenshot",
-        description = "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize; outside Hyprland background mode, a target without known bounds is refused, so pass full_screen=true there. Returns the image plus a JSON caption with returned and coordinate dimensions, scale, format, quality, source, cropped_to_window, and window_title. The crop origin is not reported; use relative=true on click or scroll for window-relative input. Callers can request jpeg/quality for compression before resizing.",
+        description = "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize; outside Hyprland background mode, a target without known bounds is refused, so pass full_screen=true there. Returns the image plus a JSON caption with returned and coordinate dimensions, scale, format, quality, source, cropped_to_window, and window_title. The crop origin is not reported; use relative=true on click or scroll for window-relative input. Callers can request jpeg/quality for compression before resizing. Pass screenshot_file_path (an absolute path, stdio only) to save the image to a file instead: the result is then only the caption, with file_path.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1105,13 +1146,42 @@ impl ComputerUseLinux {
         if let Some(note) = note {
             caption["hidden_workspace_note"] = serde_json::json!(note);
         }
-        Some(Ok(CallToolResult::success(vec![
+        Some(
+            self.screenshot_tool_result(capture, caption, params.screenshot_file_path.as_deref())
+                .await,
+        )
+    }
+
+    /// The screenshot tool's result: the image and its JSON caption, or with
+    /// screenshot_file_path only the caption, naming the saved file.
+    async fn screenshot_tool_result(
+        &self,
+        capture: ScreenshotCapture,
+        mut caption: serde_json::Value,
+        file_path: Option<&str>,
+    ) -> Result<CallToolResult> {
+        if let Some(path) = file_path {
+            caption["file_path"] =
+                serde_json::json!(self.save_screenshot_file(&capture, path).await?);
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
+                caption.to_string(),
+            )]));
+        }
+        Ok(CallToolResult::success(vec![
             ContentBlock::image(data_url_payload(&capture.data_url), capture.mime_type),
             ContentBlock::text(caption.to_string()),
-        ])))
+        ]))
     }
 
     async fn capture_screenshot(&self, params: ScreenshotParams) -> Result<CallToolResult> {
+        // Refuse a bad path before anything is raised or captured.
+        if let Some(path) = params.screenshot_file_path.as_deref() {
+            crate::screenshot_file::validate_screenshot_file_path(
+                path,
+                params.format.unwrap_or(ScreenshotOutputFormat::Png),
+                self.http_transport,
+            )?;
+        }
         let _pipeline = crate::screenshot_impl::screenshot_pipeline_permit().await?;
         let target = params.window_target();
         if let (Some(target), false) = (target.as_ref(), params.full_screen.unwrap_or(false)) {
@@ -1205,10 +1275,8 @@ impl ComputerUseLinux {
             caption["window_off_screen"] = serde_json::json!(true);
             caption["off_screen_note"] = serde_json::json!(note);
         }
-        Ok(CallToolResult::success(vec![
-            ContentBlock::image(data_url_payload(&capture.data_url), capture.mime_type),
-            ContentBlock::text(caption.to_string()),
-        ]))
+        self.screenshot_tool_result(capture, caption, params.screenshot_file_path.as_deref())
+            .await
     }
 
     /// Lazily create the uinput absolute pointer, sizing its ABS range to the
@@ -3520,8 +3588,25 @@ impl ServerHandler for ComputerUseLinux {
     ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
         // Each HTTP client names itself per request; a shared field would show the last to initialize.
         let agent = crate::indicator::request_agent_name(&context.meta, context.client_info());
+        let router = self.mcp_tool_router();
+        // A bad screenshot_file_path is refused before any capture or input,
+        // so a mutating tool never acts and then drops its observation.
+        let accepts_file = router.get(&request.name).is_some_and(|tool| {
+            tool.input_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|properties| properties.contains_key("screenshot_file_path"))
+        });
+        if let Some(refusal) = screenshot_file_refusal(
+            &request.name,
+            request.arguments.as_ref(),
+            accepts_file,
+            self.http_transport,
+        ) {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(refusal)]).into());
+        }
         let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        crate::indicator::with_request_agent(agent, self.mcp_tool_router().call(call)).await
+        crate::indicator::with_request_agent(agent, router.call(call)).await
     }
 }
 
@@ -3805,6 +3890,7 @@ pub async fn serve_mcp(listen: Option<crate::http_listen::ListenConfig>) -> Resu
     tree_spiller.sweep();
     if let Some(config) = listen {
         server.require_snapshot_ids = true;
+        server.http_transport = true;
         let signal = crate::http_listen::serve_http(server, config).await?;
         tree_spiller.remove_current();
         std::process::exit(128 + signal);
@@ -3920,11 +4006,83 @@ struct PostActionCaptureParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 95))]
     quality: Option<u8>,
+    /// Save the post-action screenshot to this absolute path instead of
+    /// returning it as image content; needs screenshot_after. The parent
+    /// directory must exist, and the extension must match format (.png, or
+    /// .jpg/.jpeg for jpeg). An existing regular file is replaced; a directory
+    /// or symlink is refused. Refused over HTTP (mcp --listen). A failed write
+    /// is reported in screenshot_error, and the action's ok stays true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    screenshot_file_path: Option<String>,
     /// Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.
     /// It reads at most 1000 nodes and depth 32; when accessibility_tree_truncated
     /// is true, call get_app_state with a higher max_nodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     include_tree: Option<bool>,
+}
+
+/// The fields of a tool call that decide whether its screenshot_file_path
+/// can be used.
+#[derive(Deserialize)]
+struct ScreenshotFileRequest {
+    #[serde(default)]
+    screenshot_file_path: Option<String>,
+    #[serde(default)]
+    format: Option<ScreenshotOutputFormat>,
+    #[serde(default)]
+    include_screenshot: Option<bool>,
+    #[serde(default)]
+    screenshot_after: Option<ScreenshotAfter>,
+}
+
+/// The refusal for a call whose screenshot_file_path cannot be used: over
+/// HTTP, without a capture to save, or with a path that fails
+/// `validate_screenshot_file_path`. `accepts_file` says whether the tool takes
+/// the parameter at all. Malformed arguments are left to the tool's own
+/// parameter errors.
+fn screenshot_file_refusal(
+    tool: &str,
+    arguments: Option<&rmcp::model::JsonObject>,
+    accepts_file: bool,
+    remote: bool,
+) -> Option<String> {
+    let arguments = arguments?;
+    if !accepts_file
+        || arguments
+            .get("screenshot_file_path")
+            .is_none_or(serde_json::Value::is_null)
+    {
+        return None;
+    }
+    let request: ScreenshotFileRequest =
+        serde_json::from_value(serde_json::Value::Object(arguments.clone())).ok()?;
+    let path = request.screenshot_file_path?;
+    if remote {
+        return Some(format!(
+            "{tool} was not run: {}",
+            crate::screenshot_file::REMOTE_REFUSAL
+        ));
+    }
+    let missing_capture = match tool {
+        "screenshot" => None,
+        "get_app_state" => (!request.include_screenshot.unwrap_or(true))
+            .then_some("screenshot_file_path needs include_screenshot=true"),
+        _ => request
+            .screenshot_after
+            .and_then(ScreenshotAfter::resolve)
+            .is_none()
+            .then_some("screenshot_file_path needs screenshot_after"),
+    };
+    if let Some(reason) = missing_capture {
+        return Some(format!("{tool} was not run: {reason}"));
+    }
+    crate::screenshot_file::validate_screenshot_file_path(
+        &path,
+        request.format.unwrap_or(ScreenshotOutputFormat::Png),
+        remote,
+    )
+    .err()
+    .map(|error| format!("{tool} was not run: {error:#}"))
 }
 
 impl PostActionCaptureParams {
@@ -3946,7 +4104,7 @@ impl PostActionCaptureParams {
 
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 struct PostActionObservation {
-    /// Post-action screenshot metadata when `screenshot_after` was requested; the image itself is the first `image` content block.
+    /// Post-action screenshot metadata when `screenshot_after` was requested; the image itself is the first `image` content block, or the file at `file_path` when `screenshot_file_path` was given.
     #[serde(skip_serializing_if = "Option::is_none")]
     screenshot: Option<ScreenshotSummary>,
     /// Post-action screenshot capture error when a requested `screenshot_after` capture failed.
@@ -4222,6 +4380,14 @@ struct GetAppStateParams {
     #[serde(default)]
     #[schemars(range(min = 1, max = 95))]
     quality: Option<u8>,
+    /// Save the screenshot to this absolute path instead of returning it as
+    /// image content; screenshot.file_path then names it. The parent directory
+    /// must exist, and the extension must match format (.png, or .jpg/.jpeg for
+    /// jpeg). An existing regular file is replaced; a directory or symlink is
+    /// refused. Refused over HTTP (mcp --listen). A failed write is reported
+    /// in screenshot_error.
+    #[serde(default)]
+    screenshot_file_path: Option<String>,
     /// Include the full diagnostics report (large) and return tree nodes in the
     /// full encoding, with null and empty fields and action descriptions and
     /// keybindings. Default false: only the compact readiness block, and
@@ -4316,6 +4482,13 @@ struct ScreenshotParams {
     #[serde(default)]
     #[schemars(range(min = 1, max = 95))]
     quality: Option<u8>,
+    /// Save the image to this absolute path instead of returning it as image
+    /// content; the caption's file_path then names it. The parent directory
+    /// must exist, and the extension must match format (.png, or .jpg/.jpeg for
+    /// jpeg). An existing regular file is replaced; a directory or symlink is
+    /// refused. Refused over HTTP (mcp --listen).
+    #[serde(default)]
+    screenshot_file_path: Option<String>,
 }
 
 impl ScreenshotParams {
@@ -4355,7 +4528,7 @@ impl ScreenshotParams {
 
 /// Screenshot metadata for `get_app_state` and post-action captures. The image
 /// bytes travel as a separate `image` content block (issue #145), not inside
-/// this JSON.
+/// this JSON, or are saved to `file_path` (issue #446).
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 struct ScreenshotSummary {
     mime_type: String,
@@ -4382,6 +4555,10 @@ struct ScreenshotSummary {
     /// Title of the window when cropped to a window.
     #[serde(skip_serializing_if = "Option::is_none")]
     window_title: Option<String>,
+    /// The file the image was saved to when screenshot_file_path was given;
+    /// no image content block is returned then. bytes is its size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_path: Option<String>,
 }
 
 impl From<&ScreenshotCapture> for ScreenshotSummary {
@@ -4402,6 +4579,7 @@ impl From<&ScreenshotCapture> for ScreenshotSummary {
             quality: capture.quality,
             cropped_to_window: None,
             window_title: None,
+            file_path: None,
         }
     }
 }
@@ -5613,6 +5791,32 @@ impl ComputerUseLinux {
         Ok(window)
     }
 
+    /// Saves a prepared screenshot to `path` for screenshot_file_path and
+    /// returns the path. The caller then returns no image content for it.
+    async fn save_screenshot_file(
+        &self,
+        capture: &ScreenshotCapture,
+        path: &str,
+    ) -> Result<String> {
+        let target = crate::screenshot_file::validate_screenshot_file_path(
+            path,
+            capture.format,
+            self.http_transport,
+        )?;
+        let bytes = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .decode(data_url_payload(&capture.data_url))
+                .context("failed to decode the screenshot for screenshot_file_path")?
+        };
+        tokio::task::spawn_blocking(move || {
+            crate::screenshot_file::write_screenshot_file(&target, &bytes)
+        })
+        .await
+        .context("screenshot file writer stopped")??;
+        Ok(path.to_string())
+    }
+
     async fn capture_post_action_observation(
         &self,
         capture: &PostActionCaptureParams,
@@ -5665,7 +5869,22 @@ impl ComputerUseLinux {
 
         if let Some(scope) = screenshot_scope {
             let options = capture.screenshot_options();
-            let result: Result<(ScreenshotCapture, bool, Option<String>, Option<String>)> = async {
+            #[allow(clippy::type_complexity)]
+            let result: Result<(
+                ScreenshotCapture,
+                bool,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            )> = async {
+                // A path that cannot be written is reported without a capture.
+                if let Some(path) = capture.screenshot_file_path.as_deref() {
+                    crate::screenshot_file::validate_screenshot_file_path(
+                        path,
+                        options.format.unwrap_or(ScreenshotOutputFormat::Png),
+                        self.http_transport,
+                    )?;
+                }
                 let _pipeline = crate::screenshot_impl::screenshot_pipeline_permit().await?;
                 let crop_window = match scope {
                     ScreenshotAfterScope::Screen => None,
@@ -5735,17 +5954,25 @@ impl ComputerUseLinux {
                 })
                 .await
                 .context("post-action screenshot resize failed")?;
-                Ok((prepared, cropped, window_label, off_screen_note))
+                let file_path = match capture.screenshot_file_path.as_deref() {
+                    Some(path) => Some(self.save_screenshot_file(&prepared, path).await?),
+                    None => None,
+                };
+                Ok((prepared, cropped, window_label, off_screen_note, file_path))
             }
             .await;
 
             match result {
-                Ok((prepared, cropped, window_title, off_screen_note)) => {
+                Ok((prepared, cropped, window_title, off_screen_note, file_path)) => {
                     let mut summary = ScreenshotSummary::from(&prepared);
                     summary.cropped_to_window = Some(cropped);
                     summary.window_title = window_title;
+                    // A saved image is not returned inline.
+                    if file_path.is_none() {
+                        screenshot_capture = Some(prepared);
+                    }
+                    summary.file_path = file_path;
                     observation.screenshot = Some(summary);
-                    screenshot_capture = Some(prepared);
                     if let Some(note) = off_screen_note {
                         notes.push(note);
                     }
@@ -21243,6 +21470,7 @@ mod post_action_capture_tests {
                 "max_width",
                 "max_height",
                 "max_bytes",
+                "screenshot_file_path",
             ] {
                 assert!(
                     properties.contains_key(prop),
@@ -21959,6 +22187,571 @@ echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
         assert!(structured.get("accessibility_tree").is_none());
         assert!(structured.get("accessibility_error").is_none());
         assert!(std::fs::read_to_string(&log_path).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod screenshot_file_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn solid_png(width: u32, height: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(width, height, image::Rgba([32, 128, 192, 255]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    fn refusal(tool: &str, arguments: serde_json::Value, remote: bool) -> Option<String> {
+        let serde_json::Value::Object(arguments) = arguments else {
+            panic!("arguments must be an object");
+        };
+        screenshot_file_refusal(tool, Some(&arguments), true, remote)
+    }
+
+    #[test]
+    fn file_output_parameters_are_in_every_screenshot_schema() {
+        let server = ComputerUseLinux::default();
+        let router = server.mcp_tool_router();
+        for name in [
+            "screenshot",
+            "get_app_state",
+            "click",
+            "type_text",
+            "press_key",
+            "scroll",
+            "drag",
+            "perform_action",
+            "set_value",
+            "activate_window",
+            "move_window",
+            "resize_window",
+        ] {
+            let tool = router
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} is registered"));
+            assert!(
+                tool.input_schema["properties"]
+                    .as_object()
+                    .unwrap()
+                    .contains_key("screenshot_file_path"),
+                "{name} lacks screenshot_file_path"
+            );
+        }
+    }
+
+    #[test]
+    fn preflight_refuses_unusable_screenshot_file_paths_before_the_tool_runs() {
+        let dir = std::env::temp_dir().join(format!(
+            "cul-shot-preflight-{}-{:016x}",
+            std::process::id(),
+            getrandom::u64().unwrap()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+        let png = dir.join("shot.png");
+        let png = png.to_str().unwrap();
+
+        // Usable paths pass, and a call without the parameter is untouched.
+        assert_eq!(refusal("screenshot", serde_json::json!({}), true), None);
+        assert_eq!(
+            refusal(
+                "screenshot",
+                serde_json::json!({"screenshot_file_path": null}),
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            refusal(
+                "screenshot",
+                serde_json::json!({"screenshot_file_path": png}),
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            refusal(
+                "get_app_state",
+                serde_json::json!({"screenshot_file_path": png}),
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            refusal(
+                "click",
+                serde_json::json!({"x": 1, "y": 1, "screenshot_after": "window", "screenshot_file_path": png}),
+                false
+            ),
+            None
+        );
+        // A tool without the parameter ignores it like any unknown argument.
+        let serde_json::Value::Object(arguments) =
+            serde_json::json!({"screenshot_file_path": "relative.png"})
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            screenshot_file_refusal("list_windows", Some(&arguments), false, true),
+            None
+        );
+
+        // Over HTTP every use is refused, even a valid path.
+        for (tool, arguments) in [
+            (
+                "screenshot",
+                serde_json::json!({"screenshot_file_path": png}),
+            ),
+            (
+                "get_app_state",
+                serde_json::json!({"screenshot_file_path": png}),
+            ),
+            (
+                "click",
+                serde_json::json!({"x": 1, "y": 1, "screenshot_after": true, "screenshot_file_path": png}),
+            ),
+        ] {
+            let message = refusal(tool, arguments, true).expect("refused over HTTP");
+            assert!(
+                message.starts_with(&format!("{tool} was not run: "))
+                    && message.contains("refused over HTTP (mcp --listen)"),
+                "{message}"
+            );
+        }
+
+        // Without a capture there is nothing to save.
+        assert!(refusal(
+            "get_app_state",
+            serde_json::json!({"include_screenshot": false, "screenshot_file_path": png}),
+            false
+        )
+        .unwrap()
+        .contains("needs include_screenshot=true"));
+        for screenshot_after in [serde_json::Value::Null, serde_json::json!(false)] {
+            assert!(refusal(
+                "click",
+                serde_json::json!({"x": 1, "y": 1, "screenshot_after": screenshot_after, "screenshot_file_path": png}),
+                false
+            )
+            .unwrap()
+            .contains("needs screenshot_after"));
+        }
+
+        // Bad paths, with the format the call selects.
+        let missing = dir.join("missing").join("shot.png");
+        for (arguments, expected) in [
+            (
+                serde_json::json!({"screenshot_file_path": "shot.png"}),
+                "must be an absolute path",
+            ),
+            (
+                serde_json::json!({"screenshot_file_path": missing}),
+                "does not exist",
+            ),
+            (
+                serde_json::json!({"screenshot_file_path": dir}),
+                "does not match format png",
+            ),
+            (
+                serde_json::json!({"screenshot_file_path": png, "format": "jpeg"}),
+                "does not match format jpeg",
+            ),
+        ] {
+            let message = refusal("screenshot", arguments.clone(), false)
+                .unwrap_or_else(|| panic!("{arguments} must be refused"));
+            assert!(message.contains(expected), "{arguments}: {message}");
+        }
+        let as_dir = dir.join("dir.png");
+        std::fs::create_dir(&as_dir).unwrap();
+        assert!(refusal(
+            "screenshot",
+            serde_json::json!({"screenshot_file_path": as_dir}),
+            false
+        )
+        .unwrap()
+        .contains("is a directory"));
+    }
+
+    #[test]
+    fn screenshot_file_output_writes_files_and_returns_no_image_content() {
+        let dir = std::env::temp_dir().join(format!(
+            "cul-shot-file-{}-{:016x}",
+            std::process::id(),
+            getrandom::u64().unwrap()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let locked = self.0.join("locked");
+                let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700));
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+
+        let sample_png = dir.join("sample.png");
+        std::fs::write(&sample_png, solid_png(64, 48)).unwrap();
+        let xdotool = dir.join("xdotool");
+        std::fs::write(
+            &xdotool,
+            "#!/bin/sh\nprintf 'xdotool\\n' >> \"$CUL_SHOT_FILE_LOG\"\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&xdotool, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let gnome_screenshot = dir.join("gnome-screenshot");
+        std::fs::write(
+            &gnome_screenshot,
+            r#"#!/bin/sh
+printf 'gnome-screenshot\n' >> "$CUL_SHOT_FILE_LOG"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-f" ] && [ "$#" -ge 2 ]; then
+    /bin/cp "$CUL_SHOT_FILE_PNG" "$2"
+    exit 0
+  fi
+  shift
+done
+exit 1
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&gnome_screenshot, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let out = dir.join("out");
+        std::fs::create_dir(&out).unwrap();
+
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "server::screenshot_file_tests::screenshot_file_output_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PATH", &dir)
+            .env("HOME", &dir)
+            .env("XDG_RUNTIME_DIR", &dir)
+            .env("DISPLAY", ":9876")
+            .env("WAYLAND_DISPLAY", "")
+            .env("XDG_SESSION_TYPE", "x11")
+            .env("CU_DISABLE_ABS_POINTER", "1")
+            .env("COMPUTER_USE_LINUX_SCREENSHOT_BACKEND", "gnome-screenshot")
+            .env("CUL_SHOT_FILE_CHILD", "1")
+            .env("CUL_SHOT_FILE_LOG", dir.join("events.log"))
+            .env("CUL_SHOT_FILE_PNG", &sample_png)
+            .env("CUL_SHOT_FILE_OUT", &out)
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}/no-bus", dir.display()),
+            );
+        for key in [
+            "DESKTOP_SESSION",
+            "HYPRLAND_INSTANCE_SIGNATURE",
+            "XAUTHORITY",
+            "XDG_SESSION_DESKTOP",
+            "XDG_CURRENT_DESKTOP",
+        ] {
+            command.env(key, "screenshot-file-test");
+        }
+        let output = crate::command_runner::output_blocking_with_timeout(
+            &mut command,
+            "screenshot file child",
+            Duration::from_secs(20),
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+            "screenshot file child must execute its assertions"
+        );
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn caption(result: &CallToolResult) -> serde_json::Value {
+        assert_eq!(result.content.len(), 1, "only the caption: {result:?}");
+        assert!(result.content[0].as_image().is_none());
+        serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap()
+    }
+
+    fn assert_no_image(result: &CallToolResult) {
+        assert!(
+            result
+                .content
+                .iter()
+                .all(|block| block.as_image().is_none()),
+            "no image content: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated environment subprocess; invoked by screenshot_file_output_writes_files_and_returns_no_image_content"]
+    async fn screenshot_file_output_child() {
+        use image::GenericImageView as _;
+        assert_eq!(std::env::var("CUL_SHOT_FILE_CHILD").as_deref(), Ok("1"));
+        let log = std::path::PathBuf::from(std::env::var("CUL_SHOT_FILE_LOG").unwrap());
+        let out = std::path::PathBuf::from(std::env::var("CUL_SHOT_FILE_OUT").unwrap());
+        let events = || std::fs::read_to_string(&log).unwrap_or_default();
+        let clear = || std::fs::write(&log, "").unwrap();
+        let (server, _) = super::tests::server_with_labelled_diagnostics(|| false, || false);
+        let unprivileged = unsafe { libc::geteuid() } != 0;
+        let locked = out.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        // 1. The screenshot tool saves a png and returns only the caption.
+        let path = out.join("shot.png");
+        let result = server
+            .screenshot(Parameters(
+                serde_json::from_value(serde_json::json!({"screenshot_file_path": path})).unwrap(),
+            ))
+            .await;
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let caption_value = caption(&result);
+        let written = std::fs::read(&path).unwrap();
+        assert_eq!(caption_value["file_path"], serde_json::json!(path));
+        assert_eq!(caption_value["bytes"], serde_json::json!(written.len()));
+        assert_eq!(caption_value["format"], serde_json::json!("png"));
+        assert_eq!(caption_value["width"], serde_json::json!(64));
+        assert_eq!(caption_value["height"], serde_json::json!(48));
+        assert_eq!(caption_value["coordinate_width"], serde_json::json!(64));
+        assert_eq!(caption_value["coordinate_height"], serde_json::json!(48));
+        assert_eq!(caption_value["scale"], serde_json::json!(1.0));
+        assert_eq!(
+            image::load_from_memory(&written).unwrap().dimensions(),
+            (64, 48)
+        );
+        assert_eq!(events(), "gnome-screenshot\n");
+
+        // An existing regular file is replaced, here with a jpeg.
+        let jpeg = out.join("shot.jpg");
+        std::fs::write(&jpeg, b"old").unwrap();
+        let result = server
+            .screenshot(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "screenshot_file_path": jpeg,
+                    "format": "jpeg",
+                    "scale": 0.5
+                }))
+                .unwrap(),
+            ))
+            .await;
+        let caption_value = caption(&result);
+        let written = std::fs::read(&jpeg).unwrap();
+        assert!(written.starts_with(&[0xff, 0xd8]), "a jpeg file");
+        assert_eq!(caption_value["format"], serde_json::json!("jpeg"));
+        assert_eq!(caption_value["width"], serde_json::json!(32));
+        assert_eq!(caption_value["coordinate_width"], serde_json::json!(64));
+        assert_eq!(caption_value["scale"], serde_json::json!(0.5));
+        assert_eq!(caption_value["bytes"], serde_json::json!(written.len()));
+
+        // 2. Bad paths are refused before any capture.
+        clear();
+        let as_dir = out.join("dir.png");
+        std::fs::create_dir(&as_dir).unwrap();
+        for (arguments, expected) in [
+            (
+                serde_json::json!({"screenshot_file_path": "shot.png"}),
+                "must be an absolute path",
+            ),
+            (
+                serde_json::json!({"screenshot_file_path": out.join("missing").join("shot.png")}),
+                "does not exist",
+            ),
+            (
+                serde_json::json!({"screenshot_file_path": as_dir}),
+                "is a directory",
+            ),
+            (
+                serde_json::json!({"screenshot_file_path": out.join("shot.jpeg")}),
+                "does not match format png",
+            ),
+        ] {
+            let result = server
+                .screenshot(Parameters(
+                    serde_json::from_value(arguments.clone()).unwrap(),
+                ))
+                .await;
+            assert_eq!(result.is_error, Some(true), "{arguments}");
+            assert_no_image(&result);
+            let text = &result.content[0].as_text().unwrap().text;
+            assert!(text.contains(expected), "{arguments}: {text}");
+        }
+        assert_eq!(events(), "", "a refused path captures nothing");
+        assert!(!out.join("missing").exists());
+
+        // 3. Over HTTP the screenshot tool refuses file output.
+        let http = ComputerUseLinux {
+            http_transport: true,
+            ..Default::default()
+        };
+        let remote = out.join("remote.png");
+        let result = http
+            .screenshot(Parameters(
+                serde_json::from_value(serde_json::json!({"screenshot_file_path": remote}))
+                    .unwrap(),
+            ))
+            .await;
+        assert_eq!(result.is_error, Some(true));
+        assert!(result.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("refused over HTTP"));
+        assert!(!remote.exists());
+        assert_eq!(events(), "");
+
+        // A failed write is the call's error, with no inline fallback.
+        if unprivileged {
+            let result = server
+                .screenshot(Parameters(
+                    serde_json::from_value(
+                        serde_json::json!({"screenshot_file_path": locked.join("shot.png")}),
+                    )
+                    .unwrap(),
+                ))
+                .await;
+            assert_eq!(result.is_error, Some(true));
+            assert_no_image(&result);
+            assert!(result.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("failed to write screenshot file"));
+        }
+
+        // 4. get_app_state saves its screenshot and names the file.
+        let state = out.join("state.png");
+        let params: GetAppStateParams =
+            serde_json::from_value(serde_json::json!({"screenshot_file_path": state})).unwrap();
+        let result = server.app_state(params).await.unwrap();
+        assert_no_image(&result);
+        let structured = result.structured_content.unwrap();
+        let written = std::fs::read(&state).unwrap();
+        assert_eq!(
+            structured["screenshot"]["file_path"],
+            serde_json::json!(state)
+        );
+        assert_eq!(
+            structured["screenshot"]["bytes"],
+            serde_json::json!(written.len())
+        );
+        assert_eq!(
+            structured["screenshot"]["coordinate_width"],
+            serde_json::json!(64)
+        );
+        assert_eq!(structured["screenshot"]["scale"], serde_json::json!(1.0));
+        assert!(structured
+            .get("screenshot_error")
+            .is_none_or(serde_json::Value::is_null));
+        assert!(structured["message"]
+            .as_str()
+            .unwrap()
+            .contains("The screenshot was saved to"));
+
+        // A failed write is reported in screenshot_error, without the image.
+        if unprivileged {
+            let params: GetAppStateParams = serde_json::from_value(
+                serde_json::json!({"screenshot_file_path": locked.join("state.png")}),
+            )
+            .unwrap();
+            let result = server.app_state(params).await.unwrap();
+            assert_no_image(&result);
+            let structured = result.structured_content.unwrap();
+            assert!(structured["screenshot"].is_null());
+            assert!(structured["screenshot_error"]
+                .as_str()
+                .unwrap()
+                .contains("failed to write screenshot file"));
+        }
+
+        // 5. A post-action screenshot is saved after the action.
+        clear();
+        let after = out.join("after.png");
+        let click: ClickParams = serde_json::from_value(serde_json::json!({
+            "x": 10,
+            "y": 10,
+            "screenshot_after": true,
+            "screenshot_file_path": after
+        }))
+        .unwrap();
+        let result = server.click(Parameters(click)).await.unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        assert_no_image(&result);
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["ok"], serde_json::json!(true));
+        assert_eq!(
+            structured["screenshot"]["file_path"],
+            serde_json::json!(after)
+        );
+        assert_eq!(
+            structured["screenshot"]["bytes"],
+            serde_json::json!(std::fs::read(&after).unwrap().len())
+        );
+        assert_eq!(
+            structured["screenshot"]["coordinate_height"],
+            serde_json::json!(48)
+        );
+        assert_eq!(events(), "xdotool\ngnome-screenshot\n");
+
+        // A failed post-action write keeps the action's ok and reports
+        // screenshot_error like any failed post-action capture.
+        if unprivileged {
+            let click: ClickParams = serde_json::from_value(serde_json::json!({
+                "x": 10,
+                "y": 10,
+                "screenshot_after": "screen",
+                "screenshot_file_path": locked.join("after.png")
+            }))
+            .unwrap();
+            let result = server.click(Parameters(click)).await.unwrap();
+            assert_ne!(result.is_error, Some(true));
+            assert_no_image(&result);
+            let structured = result.structured_content.unwrap();
+            assert_eq!(structured["ok"], serde_json::json!(true));
+            assert!(structured.get("screenshot").is_none());
+            assert!(structured["screenshot_error"]
+                .as_str()
+                .unwrap()
+                .contains("failed to write screenshot file"));
+            assert!(structured["message"]
+                .as_str()
+                .unwrap()
+                .contains("Post-action screenshot failed:"));
+        }
+
+        // A bad post-action path is reported without a capture.
+        clear();
+        let click: ClickParams = serde_json::from_value(serde_json::json!({
+            "x": 10,
+            "y": 10,
+            "screenshot_after": true,
+            "screenshot_file_path": "after.png"
+        }))
+        .unwrap();
+        let result = server.click(Parameters(click)).await.unwrap();
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["ok"], serde_json::json!(true));
+        assert!(structured["screenshot_error"]
+            .as_str()
+            .unwrap()
+            .contains("must be an absolute path"));
+        assert_eq!(events(), "xdotool\n");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 }
 

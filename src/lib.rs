@@ -18,6 +18,7 @@ mod keyboard_keymap;
 mod pixelflux;
 mod pointer_path;
 mod remote_desktop;
+mod screenshot_file;
 #[path = "screenshot.rs"]
 mod screenshot_impl;
 mod server;
