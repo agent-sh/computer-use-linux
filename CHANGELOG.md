@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.51] - 2026-11-11
+
 ### Fixed
 
 - A pid target reads every AT-SPI root its process owns. A Qt Quick app can register an empty GTK root for native dialogs next to its populated Qt root, and `get_app_state(pid=...)` used to read only the first, so it returned no controls. A pid that owns no root now returns an empty scoped tree with a note, not the whole desktop. Thanks to [@OnlyHa1bara](https://github.com/OnlyHa1bara) ([#445](https://github.com/agent-sh/computer-use-linux/pull/445)).
@@ -1174,7 +1176,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.50...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.51...HEAD
+[0.7.51]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.50...v0.7.51
 [0.7.50]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.49...v0.7.50
 [0.7.49]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.48...v0.7.49
 [0.7.48]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.47...v0.7.48
