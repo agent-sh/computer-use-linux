@@ -680,7 +680,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "get_app_state",
         output_schema = rmcp::handler::server::tool::schema_for_output::<GetAppStateOutput>(),
-        description = "Get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Nodes are compact (empty fields left out, actions by name; verbose=true returns every field). Pass interactive_only=true for only actionable nodes, headings and status regions, with the same element_index values. A title or window_id target narrows an app with several windows under one AT-SPI root (Chromium) to that window, keeping the app's popups and dialogs. A window-targeted screenshot needs that window visible and already focused (outside Hyprland background mode); otherwise screenshot_error is set and the tree still returns, so use the screenshot tool to raise and capture it. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. The result's snapshot_id names the tree: element_index and selector actions that pass it are refused once a later tree replaced it. Screenshot results always include coordinate_width, coordinate_height, scale, and format, plus quality for jpeg; callers can request jpeg/quality for compression before resizing. Pass screenshot_file_path (an absolute path, stdio only) to save the screenshot to a file instead of returning image content; screenshot.file_path then names it.",
+        description = "Get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Nodes are compact (empty fields left out, actions by name; verbose=true returns every field). Pass interactive_only=true for only actionable nodes, headings and status regions, with the same element_index values. A title or window_id target narrows an app with several windows under one AT-SPI root (Chromium) to that window, keeping the app's popups and dialogs. A window-targeted screenshot needs that window visible and already focused (outside Hyprland background mode); otherwise screenshot_error is set and the tree still returns, so use the screenshot tool to raise and capture it. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. The result's snapshot_id names the tree: element_index and selector actions that pass it are refused once a later tree replaced it. Screenshot results always include coordinate_width, coordinate_height, scale, and format, plus quality for jpeg; callers can request jpeg/quality for compression before resizing. Pass screenshot_file_path (an absolute path to a new file, stdio only; an existing path is refused) to save the screenshot there instead of returning image content; screenshot.file_path then names it.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1081,7 +1081,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "screenshot",
-        description = "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize; outside Hyprland background mode, a target without known bounds is refused, so pass full_screen=true there. Returns the image plus a JSON caption with returned and coordinate dimensions, scale, format, quality, source, cropped_to_window, and window_title. The crop origin is not reported; use relative=true on click or scroll for window-relative input. Callers can request jpeg/quality for compression before resizing. Pass screenshot_file_path (an absolute path, stdio only) to save the image to a file instead: the result is then only the caption, with file_path.",
+        description = "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize; outside Hyprland background mode, a target without known bounds is refused, so pass full_screen=true there. Returns the image plus a JSON caption with returned and coordinate dimensions, scale, format, quality, source, cropped_to_window, and window_title. The crop origin is not reported; use relative=true on click or scroll for window-relative input. Callers can request jpeg/quality for compression before resizing. Pass screenshot_file_path (an absolute path to a new file, stdio only; an existing path is refused) to save the image there instead: the result is then only the caption, with file_path.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -3578,7 +3578,7 @@ impl ComputerUseLinux {
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
     version = "0.7.51",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If readiness reports can_query_windows or can_focus_windows false on GNOME, call setup_window_targeting to install the GNOME Shell extension, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend captures size-bounded screenshots (pixelflux when configured, GNOME Shell, the XDG portal, native X11, gnome-screenshot; grim in Hyprland background mode), reads AT-SPI trees with action/value metadata, invokes native AT-SPI actions, sets AT-SPI values or editable text, lists and focuses compositor windows through registered Linux window backends when the session permits it, and attaches best-effort terminal tty/process metadata to terminal windows. Click, scroll and drag try pixelflux when configured, xdotool on native X11, the uinput pointer, the RemoteDesktop portal (an open portal session, or when ydotool is absent, on COSMIC, or when forced), then ydotool outside Wayland. On Wayland a point never goes through ydotool: without uinput or the portal a coordinate action is refused; a coordinate scroll sends the move and the wheel through the uinput pointer, and an untargeted scroll sends the wheel through ydotool, or the portal without its daemon. The uinput pointer is sized to the latest full screenshot; take a new one after the desktop size changes. type_text sends literal text through pixelflux when configured (an unreachable pixelflux falls through), KDE clipboard paste on Plasma Wayland (raw ydotool when Klipper cannot be read), wtype on compatible Wayland compositors, portal keysyms on other Wayland sessions, or xdotool on X11. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Mutating tools (click, type_text, press_key, scroll, drag, perform_action, set_value, activate_window, move_window, resize_window) accept optional screenshot_after (true, \"screen\", or \"window\") with format/quality/scale/max_width/max_height/max_bytes and optional include_tree=true to return post-action observation in the same tool call. A failed action returns no observation, except set_value with verified=false. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. Pass that result's snapshot_id with the index or selector: each get_app_state or include_tree tree replaces the cached one, and a call naming a replaced snapshot is refused before any input. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable); type_text also warns when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype passes classified nonsecret text as one literal argument after -- to avoid stdin keymap-refresh corruption; that text is visible in process arguments, so confirmed password fields are rejected (use set_value), and terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call (split larger input or expose accessibility). Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. X11 xdotool can silently substitute symbols under non-US XKB layouts (reported with br/ABNT2) or changing keymap state; inspect the text before pressing Enter or submitting it. A successful type_text result confirms dispatch only; every text backend leaves field contents unverified. Re-observe the target before retrying. Screenshot, keyboard and move/resize results warn when the target window is partly or fully off-screen; click, scroll and drag results warn when a coordinate is off the screenshot or between monitors (not through pixelflux, and not for KWin element clicks, which KWin maps onto an output). move_window and resize_window, which bring a window back on-screen, work only through the GNOME Shell extension or X11/EWMH (wmctrl). scroll accepts the same window targeting and relative coordinates as click; on both, a window target is raised and focused first, and nothing is sent when focus cannot be verified. get_app_state returns a compact readiness block and compact tree nodes (null, empty and default fields left out, actions listed by name) by default; pass verbose=true for the full diagnostics dump and full nodes. Pass interactive_only=true to get only nodes with an action, editable text or a value, plus headings, status/live regions, windows and dialogs; containers are collapsed and element_index values match the full tree. A title or window_id target narrows an app that exposes several windows under one AT-SPI application root (Chromium) to that window's subtree, keeping the app's popups and dialogs. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, read, or time budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 10000 and 64), not by lowering max_nodes. A compacted tree too large to return inline comes back as its leading nodes plus accessibility_tree_spill.path, a private JSON file with the whole tree and the same element_index values; search that file instead of requesting the tree again, or page through it with get_tree_page when files are not readable. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content."
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If readiness reports can_query_windows or can_focus_windows false on GNOME, call setup_window_targeting to install the GNOME Shell extension, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend captures size-bounded screenshots (pixelflux when configured, GNOME Shell, the XDG portal, native X11, gnome-screenshot; grim in Hyprland background mode), reads AT-SPI trees with action/value metadata, invokes native AT-SPI actions, sets AT-SPI values or editable text, lists and focuses compositor windows through registered Linux window backends when the session permits it, and attaches best-effort terminal tty/process metadata to terminal windows. Click, scroll and drag try pixelflux when configured, xdotool on native X11, the uinput pointer, the RemoteDesktop portal (an open portal session, or when ydotool is absent, on COSMIC, or when forced), then ydotool outside Wayland. On Wayland a point never goes through ydotool: without uinput or the portal a coordinate action is refused; a coordinate scroll sends the move and the wheel through the uinput pointer, and an untargeted scroll sends the wheel through ydotool, or the portal without its daemon. The uinput pointer is sized to the latest full screenshot; take a new one after the desktop size changes. type_text sends literal text through pixelflux when configured (an unreachable pixelflux falls through), KDE clipboard paste on Plasma Wayland (raw ydotool when Klipper cannot be read), wtype on compatible Wayland compositors, portal keysyms on other Wayland sessions, or xdotool on X11. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Mutating tools (click, type_text, press_key, scroll, drag, perform_action, set_value, activate_window, move_window, resize_window) accept optional screenshot_after (true, \"screen\", or \"window\") with format/quality/scale/max_width/max_height/max_bytes, optional screenshot_file_path (an absolute path to a new file, stdio only, refused over HTTP) to save the screenshot there instead of returning image content, and optional include_tree=true to return post-action observation in the same tool call. A failed action returns no observation, except set_value with verified=false. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. Pass that result's snapshot_id with the index or selector: each get_app_state or include_tree tree replaces the cached one, and a call naming a replaced snapshot is refused before any input. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable); type_text also warns when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype passes classified nonsecret text as one literal argument after -- to avoid stdin keymap-refresh corruption; that text is visible in process arguments, so confirmed password fields are rejected (use set_value), and terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call (split larger input or expose accessibility). Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. X11 xdotool can silently substitute symbols under non-US XKB layouts (reported with br/ABNT2) or changing keymap state; inspect the text before pressing Enter or submitting it. A successful type_text result confirms dispatch only; every text backend leaves field contents unverified. Re-observe the target before retrying. Screenshot, keyboard and move/resize results warn when the target window is partly or fully off-screen; click, scroll and drag results warn when a coordinate is off the screenshot or between monitors (not through pixelflux, and not for KWin element clicks, which KWin maps onto an output). move_window and resize_window, which bring a window back on-screen, work only through the GNOME Shell extension or X11/EWMH (wmctrl). scroll accepts the same window targeting and relative coordinates as click; on both, a window target is raised and focused first, and nothing is sent when focus cannot be verified. get_app_state returns a compact readiness block and compact tree nodes (null, empty and default fields left out, actions listed by name) by default; pass verbose=true for the full diagnostics dump and full nodes. Pass interactive_only=true to get only nodes with an action, editable text or a value, plus headings, status/live regions, windows and dialogs; containers are collapsed and element_index values match the full tree. A title or window_id target narrows an app that exposes several windows under one AT-SPI application root (Chromium) to that window's subtree, keeping the app's popups and dialogs. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, read, or time budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 10000 and 64), not by lowering max_nodes. A compacted tree too large to return inline comes back as its leading nodes plus accessibility_tree_spill.path, a private JSON file with the whole tree and the same element_index values; search that file instead of requesting the tree again, or page through it with get_tree_page when files are not readable. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content."
 )]
 impl ServerHandler for ComputerUseLinux {
     async fn call_tool(
@@ -4009,9 +4009,10 @@ struct PostActionCaptureParams {
     /// Save the post-action screenshot to this absolute path instead of
     /// returning it as image content; needs screenshot_after. The parent
     /// directory must exist, and the extension must match format (.png, or
-    /// .jpg/.jpeg for jpeg). An existing regular file is replaced; a directory
-    /// or symlink is refused. Refused over HTTP (mcp --listen). A failed write
-    /// is reported in screenshot_error, and the action's ok stays true.
+    /// .jpg/.jpeg for jpeg). The file must not exist: file output creates a
+    /// new file and never replaces one. Refused over HTTP (mcp --listen). A
+    /// failed write is reported in screenshot_error, and the action's ok stays
+    /// true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     screenshot_file_path: Option<String>,
     /// Include a fresh compacted AT-SPI accessibility tree snapshot after the action (default false). Also refreshes cached element_index values.
@@ -4383,9 +4384,9 @@ struct GetAppStateParams {
     /// Save the screenshot to this absolute path instead of returning it as
     /// image content; screenshot.file_path then names it. The parent directory
     /// must exist, and the extension must match format (.png, or .jpg/.jpeg for
-    /// jpeg). An existing regular file is replaced; a directory or symlink is
-    /// refused. Refused over HTTP (mcp --listen). A failed write is reported
-    /// in screenshot_error.
+    /// jpeg). The file must not exist: file output creates a new file and
+    /// never replaces one. Refused over HTTP (mcp --listen). A failed write is
+    /// reported in screenshot_error.
     #[serde(default)]
     screenshot_file_path: Option<String>,
     /// Include the full diagnostics report (large) and return tree nodes in the
@@ -4485,8 +4486,8 @@ struct ScreenshotParams {
     /// Save the image to this absolute path instead of returning it as image
     /// content; the caption's file_path then names it. The parent directory
     /// must exist, and the extension must match format (.png, or .jpg/.jpeg for
-    /// jpeg). An existing regular file is replaced; a directory or symlink is
-    /// refused. Refused over HTTP (mcp --listen).
+    /// jpeg). The file must not exist: file output creates a new file and
+    /// never replaces one. Refused over HTTP (mcp --listen).
     #[serde(default)]
     screenshot_file_path: Option<String>,
 }
@@ -5866,9 +5867,13 @@ impl ComputerUseLinux {
         let mut screenshot_capture = None;
         let mut notes = Vec::new();
         let mut resolved_window: Option<WindowInfo> = None;
+        // A failed file output is reported like a failed capture, but it says
+        // nothing about the desktop, so it leaves the diagnostics cached.
+        let mut screenshot_capture_failed = false;
 
         if let Some(scope) = screenshot_scope {
             let options = capture.screenshot_options();
+            let mut file_output_failed = false;
             #[allow(clippy::type_complexity)]
             let result: Result<(
                 ScreenshotCapture,
@@ -5879,11 +5884,14 @@ impl ComputerUseLinux {
             )> = async {
                 // A path that cannot be written is reported without a capture.
                 if let Some(path) = capture.screenshot_file_path.as_deref() {
-                    crate::screenshot_file::validate_screenshot_file_path(
+                    if let Err(error) = crate::screenshot_file::validate_screenshot_file_path(
                         path,
                         options.format.unwrap_or(ScreenshotOutputFormat::Png),
                         self.http_transport,
-                    )?;
+                    ) {
+                        file_output_failed = true;
+                        return Err(error);
+                    }
                 }
                 let _pipeline = crate::screenshot_impl::screenshot_pipeline_permit().await?;
                 let crop_window = match scope {
@@ -5955,7 +5963,13 @@ impl ComputerUseLinux {
                 .await
                 .context("post-action screenshot resize failed")?;
                 let file_path = match capture.screenshot_file_path.as_deref() {
-                    Some(path) => Some(self.save_screenshot_file(&prepared, path).await?),
+                    Some(path) => match self.save_screenshot_file(&prepared, path).await {
+                        Ok(saved) => Some(saved),
+                        Err(error) => {
+                            file_output_failed = true;
+                            return Err(error);
+                        }
+                    },
                     None => None,
                 };
                 Ok((prepared, cropped, window_label, off_screen_note, file_path))
@@ -5978,6 +5992,7 @@ impl ComputerUseLinux {
                     }
                 }
                 Err(error) => {
+                    screenshot_capture_failed = !file_output_failed;
                     let error = format!("{error:#}");
                     notes.push(format!("Post-action screenshot failed: {error}"));
                     observation.screenshot_error = Some(error);
@@ -6171,7 +6186,7 @@ impl ComputerUseLinux {
             }
         }
 
-        if observation.screenshot_error.is_some()
+        if screenshot_capture_failed
             || observation.accessibility_error.is_some()
             || observation.accessibility_tree_raw_count == Some(0)
         {
@@ -22370,15 +22385,30 @@ mod screenshot_file_tests {
                 .unwrap_or_else(|| panic!("{arguments} must be refused"));
             assert!(message.contains(expected), "{arguments}: {message}");
         }
+        // File output only creates: an existing entry is refused before the
+        // tool runs, on read-only and mutating tools alike.
         let as_dir = dir.join("dir.png");
         std::fs::create_dir(&as_dir).unwrap();
-        assert!(refusal(
-            "screenshot",
-            serde_json::json!({"screenshot_file_path": as_dir}),
-            false
-        )
-        .unwrap()
-        .contains("is a directory"));
+        let existing = dir.join("existing.png");
+        std::fs::write(&existing, b"keep").unwrap();
+        for (tool, arguments) in [
+            (
+                "screenshot",
+                serde_json::json!({"screenshot_file_path": as_dir}),
+            ),
+            (
+                "get_app_state",
+                serde_json::json!({"screenshot_file_path": existing}),
+            ),
+            (
+                "click",
+                serde_json::json!({"x": 1, "y": 1, "screenshot_after": true, "screenshot_file_path": existing}),
+            ),
+        ] {
+            let message = refusal(tool, arguments, false).expect("an existing entry is refused");
+            assert!(message.contains("already exists"), "{message}");
+        }
+        assert_eq!(std::fs::read(&existing).unwrap(), b"keep");
     }
 
     #[test]
@@ -22507,7 +22537,7 @@ exit 1
         let out = std::path::PathBuf::from(std::env::var("CUL_SHOT_FILE_OUT").unwrap());
         let events = || std::fs::read_to_string(&log).unwrap_or_default();
         let clear = || std::fs::write(&log, "").unwrap();
-        let (server, _) = super::tests::server_with_labelled_diagnostics(|| false, || false);
+        let (server, probes) = super::tests::server_with_labelled_diagnostics(|| false, || false);
         let unprivileged = unsafe { libc::geteuid() } != 0;
         let locked = out.join("locked");
         std::fs::create_dir(&locked).unwrap();
@@ -22536,10 +22566,10 @@ exit 1
             (64, 48)
         );
         assert_eq!(events(), "gnome-screenshot\n");
+        let written_png = written;
 
-        // An existing regular file is replaced, here with a jpeg.
+        // A jpeg, scaled down.
         let jpeg = out.join("shot.jpg");
-        std::fs::write(&jpeg, b"old").unwrap();
         let result = server
             .screenshot(Parameters(
                 serde_json::from_value(serde_json::json!({
@@ -22574,11 +22604,20 @@ exit 1
             ),
             (
                 serde_json::json!({"screenshot_file_path": as_dir}),
-                "is a directory",
+                "already exists",
             ),
             (
                 serde_json::json!({"screenshot_file_path": out.join("shot.jpeg")}),
                 "does not match format png",
+            ),
+            // File output never replaces a file, so an earlier capture stays.
+            (
+                serde_json::json!({"screenshot_file_path": path}),
+                "already exists",
+            ),
+            (
+                serde_json::json!({"screenshot_file_path": format!("{}/", out.join("slash.png").display())}),
+                "must end with the file name",
             ),
         ] {
             let result = server
@@ -22593,6 +22632,7 @@ exit 1
         }
         assert_eq!(events(), "", "a refused path captures nothing");
         assert!(!out.join("missing").exists());
+        assert_eq!(std::fs::read(&path).unwrap(), written_png);
 
         // 3. Over HTTP the screenshot tool refuses file output.
         let http = ComputerUseLinux {
@@ -22698,9 +22738,10 @@ exit 1
             structured["screenshot"]["file_path"],
             serde_json::json!(after)
         );
+        let after_bytes = std::fs::read(&after).unwrap();
         assert_eq!(
             structured["screenshot"]["bytes"],
-            serde_json::json!(std::fs::read(&after).unwrap().len())
+            serde_json::json!(after_bytes.len())
         );
         assert_eq!(
             structured["screenshot"]["coordinate_height"],
@@ -22709,7 +22750,10 @@ exit 1
         assert_eq!(events(), "xdotool\ngnome-screenshot\n");
 
         // A failed post-action write keeps the action's ok and reports
-        // screenshot_error like any failed post-action capture.
+        // screenshot_error like any failed post-action capture. It says
+        // nothing about the desktop, so the cached diagnostics stay.
+        server.diagnostics.report(false).await;
+        let probes_before = probes.load(std::sync::atomic::Ordering::SeqCst);
         if unprivileged {
             let click: ClickParams = serde_json::from_value(serde_json::json!({
                 "x": 10,
@@ -22734,23 +22778,36 @@ exit 1
                 .contains("Post-action screenshot failed:"));
         }
 
-        // A bad post-action path is reported without a capture.
-        clear();
-        let click: ClickParams = serde_json::from_value(serde_json::json!({
-            "x": 10,
-            "y": 10,
-            "screenshot_after": true,
-            "screenshot_file_path": "after.png"
-        }))
-        .unwrap();
-        let result = server.click(Parameters(click)).await.unwrap();
-        let structured = result.structured_content.unwrap();
-        assert_eq!(structured["ok"], serde_json::json!(true));
-        assert!(structured["screenshot_error"]
-            .as_str()
-            .unwrap()
-            .contains("must be an absolute path"));
-        assert_eq!(events(), "xdotool\n");
+        // A bad post-action path is reported without a capture, and an
+        // existing file is never replaced.
+        for (bad, expected) in [
+            (serde_json::json!("after.png"), "must be an absolute path"),
+            (serde_json::json!(after), "already exists"),
+        ] {
+            clear();
+            let click: ClickParams = serde_json::from_value(serde_json::json!({
+                "x": 10,
+                "y": 10,
+                "screenshot_after": true,
+                "screenshot_file_path": bad
+            }))
+            .unwrap();
+            let result = server.click(Parameters(click)).await.unwrap();
+            let structured = result.structured_content.unwrap();
+            assert_eq!(structured["ok"], serde_json::json!(true));
+            assert!(structured["screenshot_error"]
+                .as_str()
+                .unwrap()
+                .contains(expected));
+            assert_eq!(events(), "xdotool\n");
+        }
+        assert_eq!(std::fs::read(&after).unwrap(), after_bytes);
+        server.diagnostics.report(false).await;
+        assert_eq!(
+            probes.load(std::sync::atomic::Ordering::SeqCst),
+            probes_before,
+            "a file output failure keeps the cached diagnostics"
+        );
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 }

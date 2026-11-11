@@ -2,10 +2,12 @@
 //! on the host instead of returned as MCP image content, so a caller that does
 //! not need to look at every capture spends no image tokens on it.
 //!
-//! The path is checked before anything is captured and again when the file is
-//! written. The write goes to a private temp file in the same directory, which
-//! is then renamed over the requested path: a reader never sees a partial
-//! image, and an existing symlink at the path is never followed.
+//! File output only creates a new file; it never replaces anything. The path
+//! is checked before anything is captured and again when the file is written.
+//! The write goes to a private temp file in the same directory, which is then
+//! moved to the requested path with a step that fails if anything exists
+//! there: a reader never sees a partial image, and an entry created meanwhile,
+//! a symlink included, is neither followed nor replaced.
 
 use std::fs;
 use std::io::{self, Write};
@@ -45,6 +47,17 @@ pub(crate) fn validate_screenshot_file_path(
             path.display()
         );
     };
+    // file_name() drops a trailing "/" or "/.", which the write would not.
+    if !path
+        .as_os_str()
+        .as_encoded_bytes()
+        .ends_with(name.as_encoded_bytes())
+    {
+        bail!(
+            "screenshot_file_path must end with the file name, got {}",
+            path.display()
+        );
+    }
     let extension = Path::new(name)
         .extension()
         .and_then(|extension| extension.to_str())
@@ -90,46 +103,32 @@ pub(crate) fn validate_screenshot_file_path(
     Ok(path.to_path_buf())
 }
 
-/// An existing regular file may be replaced. A directory, a symlink, or any
-/// other kind of entry is refused.
+/// Any existing entry is refused: a file, a directory, a symlink, dangling
+/// or not.
 fn check_existing_entry(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            let kind = metadata.file_type();
-            if kind.is_symlink() {
-                bail!(
-                    "screenshot_file_path {} is a symlink; pass the real path",
-                    path.display()
-                );
-            }
-            if kind.is_dir() {
-                bail!("screenshot_file_path {} is a directory", path.display());
-            }
-            if !kind.is_file() {
-                bail!(
-                    "screenshot_file_path {} exists and is not a regular file",
-                    path.display()
-                );
-            }
-            Ok(())
-        }
+        Ok(_) => bail!(already_exists(path)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error)
             .with_context(|| format!("cannot inspect screenshot_file_path {}", path.display())),
     }
 }
 
-/// Writes `bytes` to `path` through a temp file in the same directory and a
-/// rename. The file is created with owner-only permissions.
+fn already_exists(path: &Path) -> String {
+    format!(
+        "screenshot_file_path {} already exists; file output creates a new file and never replaces one",
+        path.display()
+    )
+}
+
+/// Writes `bytes` to the new file `path` through a temp file in the same
+/// directory, moved into place only if nothing exists at `path`. The file is
+/// created with owner-only permissions. The temp name is short and fixed, so
+/// any name that fits the directory also leaves room for it.
 pub(crate) fn write_screenshot_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    check_existing_entry(path)?;
     let parent = path.parent().unwrap_or(Path::new("/"));
-    let name = path
-        .file_name()
-        .context("screenshot_file_path must name a file")?
-        .to_string_lossy();
     let suffix = getrandom::u64().context("cannot pick a temp file name")?;
-    let temp = parent.join(format!(".{name}.{suffix:016x}.tmp"));
+    let temp = parent.join(format!(".cul-shot.{suffix:016x}.tmp"));
     let written = (|| -> io::Result<()> {
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -140,14 +139,52 @@ pub(crate) fn write_screenshot_file(path: &Path, bytes: &[u8]) -> Result<()> {
         file.write_all(bytes)?;
         file.flush()?;
         drop(file);
-        fs::rename(&temp, path)
+        move_without_replacing(&temp, path)
     })();
     if let Err(error) = written {
         let _ = fs::remove_file(&temp);
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            bail!(already_exists(path));
+        }
         return Err(error)
             .with_context(|| format!("failed to write screenshot file {}", path.display()));
     }
     Ok(())
+}
+
+/// Moves `from` to `to`, failing with `AlreadyExists` when anything is at
+/// `to`. Neither step follows a symlink at `to`.
+fn move_without_replacing(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let from_c = CString::new(from.as_os_str().as_bytes())?;
+        let to_c = CString::new(to.as_os_str().as_bytes())?;
+        // SAFETY: both paths are NUL-terminated C strings that outlive the call.
+        let result = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                from_c.as_ptr(),
+                libc::AT_FDCWD,
+                to_c.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        // A filesystem or kernel without RENAME_NOREPLACE falls back to link.
+        if !matches!(
+            error.raw_os_error(),
+            Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)
+        ) {
+            return Err(error);
+        }
+    }
+    fs::hard_link(from, to)?;
+    fs::remove_file(from)
 }
 
 fn format_name(format: ScreenshotOutputFormat) -> &'static str {
@@ -207,6 +244,14 @@ mod tests {
         assert!(error(jpg.to_str().unwrap(), png, false).contains("does not match format png"));
         let bare = dir.0.join("shot");
         assert!(error(bare.to_str().unwrap(), png, false).contains("does not match format png"));
+        // file_name() drops a trailing slash or "/.", but the write cannot.
+        for trailing in ["/", "/."] {
+            let path = format!("{ok}{trailing}");
+            assert!(
+                error(&path, png, false).contains("must end with the file name"),
+                "{path}"
+            );
+        }
 
         let missing = dir.0.join("missing").join("shot.png");
         assert!(error(missing.to_str().unwrap(), png, false).contains("does not exist"));
@@ -217,15 +262,24 @@ mod tests {
         let under_file = file_parent.join("shot.png");
         assert!(error(under_file.to_str().unwrap(), png, false).contains("is not a directory"));
 
+        // File output only creates: any existing entry is refused.
         let as_dir = dir.0.join("dir.png");
         fs::create_dir(&as_dir).unwrap();
-        assert!(error(as_dir.to_str().unwrap(), png, false).contains("is a directory"));
-
-        let outside = dir.0.join("outside.png");
-        fs::write(&outside, b"keep").unwrap();
+        let existing = dir.0.join("existing.png");
+        fs::write(&existing, b"keep").unwrap();
         let link = dir.0.join("link.png");
-        std::os::unix::fs::symlink(&outside, &link).unwrap();
-        assert!(error(link.to_str().unwrap(), png, false).contains("is a symlink"));
+        std::os::unix::fs::symlink(&existing, &link).unwrap();
+        let dangling = dir.0.join("dangling.png");
+        std::os::unix::fs::symlink(dir.0.join("nowhere.png"), &dangling).unwrap();
+        for path in [&as_dir, &existing, &link, &dangling] {
+            let message = error(path.to_str().unwrap(), png, false);
+            assert!(
+                message.contains("already exists") && message.contains("never replaces"),
+                "{}: {message}",
+                path.display()
+            );
+        }
+        assert_eq!(fs::read(&existing).unwrap(), b"keep");
 
         assert_eq!(
             validate_screenshot_file_path(ok, png, false).unwrap(),
@@ -242,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_atomically_and_replaces_a_regular_file() {
+    fn writes_a_new_private_file_even_with_a_long_name() {
         let dir = TempDir::new("write");
         let path = dir.0.join("shot.png");
         write_screenshot_file(&path, b"first").unwrap();
@@ -251,35 +305,56 @@ mod tests {
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        write_screenshot_file(&path, b"second").unwrap();
-        assert_eq!(fs::read(&path).unwrap(), b"second");
-        let entries: Vec<_> = fs::read_dir(&dir.0).unwrap().collect();
-        assert_eq!(entries.len(), 1, "no temp file is left behind");
-
-        // A symlink that appears after validation is still not followed.
-        let outside = dir.0.join("outside.png");
-        fs::write(&outside, b"keep").unwrap();
-        let link = dir.0.join("link.png");
-        std::os::unix::fs::symlink(&outside, &link).unwrap();
-        assert!(write_screenshot_file(&link, b"new").is_err());
-        assert_eq!(fs::read(&outside).unwrap(), b"keep");
+        // A name near the 255-byte limit still leaves room for the temp file.
+        let long = dir.0.join(format!("{}.png", "a".repeat(250)));
+        validate_screenshot_file_path(long.to_str().unwrap(), ScreenshotOutputFormat::Png, false)
+            .unwrap();
+        write_screenshot_file(&long, b"long").unwrap();
+        assert_eq!(fs::read(&long).unwrap(), b"long");
+        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 2);
     }
 
     #[test]
-    fn a_failed_write_reports_and_leaves_no_temp_file() {
-        // Root ignores directory permissions, so this needs an unprivileged user.
-        if unsafe { libc::geteuid() } == 0 {
-            return;
-        }
-        let dir = TempDir::new("fail");
-        let locked = dir.0.join("locked");
-        fs::create_dir(&locked).unwrap();
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
-        let path = locked.join("shot.png");
-        let result = write_screenshot_file(&path, b"data");
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
-        let error = format!("{:#}", result.unwrap_err());
-        assert!(error.contains("failed to write screenshot file"), "{error}");
-        assert_eq!(fs::read_dir(&locked).unwrap().count(), 0);
+    fn an_entry_created_after_validation_is_kept_and_the_temp_file_removed() {
+        let dir = TempDir::new("exists");
+        // The target appears after validation: the final step refuses it
+        // after the temp file was written, and removes that temp file.
+        let existing = dir.0.join("shot.png");
+        validate_screenshot_file_path(
+            existing.to_str().unwrap(),
+            ScreenshotOutputFormat::Png,
+            false,
+        )
+        .unwrap();
+        fs::write(&existing, b"keep").unwrap();
+        let message = format!(
+            "{:#}",
+            write_screenshot_file(&existing, b"new").unwrap_err()
+        );
+        assert!(message.contains("already exists"), "{message}");
+        assert_eq!(fs::read(&existing).unwrap(), b"keep");
+
+        // A symlink is neither followed nor replaced.
+        let outside = dir.0.join("outside.png");
+        fs::write(&outside, b"outside").unwrap();
+        let link = dir.0.join("link.png");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(write_screenshot_file(&link, b"new").is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"outside");
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        let mut names: Vec<_> = fs::read_dir(&dir.0)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["link.png", "outside.png", "shot.png"],
+            "no temp file is left"
+        );
     }
 }

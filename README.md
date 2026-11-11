@@ -95,7 +95,7 @@ All mutating tools (`click`, `drag`, `scroll`, `press_key`, `type_text`, `perfor
 
 - `screenshot_after: true | "screen" | "window" | false`: capture after the action is dispatched and the indicator overlay is hidden (`true` or `"screen"` for full desktop, `"window"` cropped to the action's target window or the focused window when untargeted)
 - `format`, `quality`, `scale`, `max_width`, `max_height`, `max_bytes`: same screenshot payload controls as `screenshot` and `get_app_state`
-- `screenshot_file_path`: save the post-action screenshot to this file instead of returning it as image content (see [Screenshot files](#screenshot-files))
+- `screenshot_file_path`: save the post-action screenshot to this new file instead of returning it as image content (see [Screenshot files](#screenshot-files))
 - `include_tree: true`: include a fresh compacted AT-SPI accessibility tree and its `snapshot_id`; it replaces the cached tree, so later `element_index` values come from it
 
 When post-action screenshot capture succeeds, the image is returned as the first MCP `image` content block alongside the JSON action summary and `screenshot` metadata. If the action succeeds (`ok: true`) and only the post-action screenshot or tree capture fails, `ok` remains `true` and the error is reported in `screenshot_error` / `accessibility_error` and appended to `message`.
@@ -110,8 +110,9 @@ Screenshot payloads are size-bounded by default before they are returned to the 
 
 - The path must be absolute, and its parent directory must exist. Directories are not created.
 - The extension must match `format`: `.png` for png (the default), `.jpg` or `.jpeg` for jpeg.
-- An existing regular file is replaced. A directory, a symlink, or any other kind of entry is refused.
-- The image is written to a temp file in the same directory, which is then renamed over the path, so a reader never sees a partial file. The file is created with mode 0600.
+- The path must end with the file name, so a trailing `/` or `/.` is refused.
+- File output creates a new file and never replaces one. Any existing entry at the path is refused: a file, a directory or a symlink.
+- The image is written to a temp file in the same directory, then moved into place with a step that fails if anything exists at the path (`renameat2` with `RENAME_NOREPLACE`, or `link` where that is unsupported). A reader never sees a partial file, and an entry created meanwhile is neither followed nor replaced. The file is created with mode 0600.
 - A bad path is refused before anything is captured or any input is sent.
 - A failed write is never answered with the image inline. `screenshot` returns an error, `get_app_state` sets `screenshot_error`, and a mutating tool sets `screenshot_error` and keeps the action's `ok`.
 - Over stdio the path is on the machine that runs the server. Over HTTP (`mcp --listen`) the parameter is refused, so a remote client gets no way to write files on the host.
@@ -167,9 +168,9 @@ Captures require the shared capture lock and, when an overlay is running, its ac
 
 | Class | Tools | Contract |
 | --- | --- | --- |
-| Read-only observation | `doctor`, `list_apps`, `list_windows`, `focused_window`, `get_app_state`, `get_tree_page` | `readOnlyHint=true`; may reveal app, window, accessibility, and screenshot contents. `get_app_state` may trigger the desktop screenshot portal prompt. |
+| Read-only observation | `doctor`, `list_apps`, `list_windows`, `focused_window`, `get_app_state`, `get_tree_page` | `readOnlyHint=true`; may reveal app, window, accessibility, and screenshot contents. `get_app_state` may trigger the desktop screenshot portal prompt. Its `screenshot_file_path` file output creates a new file and never replaces one. |
 | Local setup mutators | `setup_accessibility`, `setup_window_targeting` | `readOnlyHint=false`, `destructiveHint=false`, `idempotentHint=true`; modifies user desktop configuration by enabling accessibility or installing/enabling the GNOME window-targeting extension. |
-| UI state mutators | `activate_window`, `move_window`, `resize_window`, `scroll`, `screenshot` | `readOnlyHint=false`, `destructiveHint=false`; changes focus, geometry, or scroll position in the live desktop, or raises a window to capture it. |
+| UI state mutators | `activate_window`, `move_window`, `resize_window`, `scroll`, `screenshot` | `readOnlyHint=false`, `destructiveHint=false`; changes focus, geometry, or scroll position in the live desktop, or raises a window to capture it. `screenshot_file_path` file output creates a new file and never replaces one. |
 | Desktop action mutators | `click`, `drag`, `press_key`, `type_text`, `perform_action`, `set_value` | `readOnlyHint=false`, `destructiveHint=true`, `openWorldHint=true`; can trigger arbitrary actions in whatever local application is targeted. |
 | Conditional notification | `complete_interaction` | Absent unless `COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE=1`; when enabled, `readOnlyHint=false`, `destructiveHint=false`, `idempotentHint=false`, `openWorldHint=true`. Sends a desktop notification. |
 | Conditional host-code execution | `run_shell` | Absent unless `COMPUTER_USE_LINUX_ENABLE_SHELL=1`; when enabled, `readOnlyHint=false`, `destructiveHint=true`, `idempotentHint=false`, `openWorldHint=true`. Runs with the MCP server user's host permissions. |

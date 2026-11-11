@@ -126,8 +126,8 @@ tree in the same tool result.
 `screenshot`, `get_app_state` and `screenshot_after` also take
 `screenshot_file_path`, an absolute path where the image is saved instead of
 returned as image content. The parent directory must exist, the extension must
-match `format`, and an existing regular file is replaced. It is refused over
-HTTP (`mcp --listen`).
+match `format`, and the file must not exist: file output creates a new file
+and never replaces one. It is refused over HTTP (`mcp --listen`).
 
 For an optional MCP completion notification, set
 `COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE=1` in the server environment and have the
