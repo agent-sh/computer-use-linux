@@ -804,10 +804,18 @@ impl ComputerUseLinux {
                         .or(params.pid.filter(|_| params.window_id.is_none())),
                 );
                 let window_title = accessibility_window_title(&params, window_context.as_ref());
+                // A listed window is alive even when its pid owns no AT-SPI
+                // root (a Flatpak app behind xdg-dbus-proxy); its title finds it.
+                let window_pid = window_context.as_ref().and_then(|window| window.pid);
+                let pid_fallback_name = accessibility_filter_candidates(window_context.as_ref())
+                    .into_iter()
+                    .next()
+                    .filter(|_| window_pid.is_some() && window_pid == target_pid);
                 match snapshot_accessibility_tree(
                     app_filter.as_deref(),
                     target_pid,
                     window_title.as_deref(),
+                    pid_fallback_name.as_deref(),
                     max_nodes,
                     max_depth,
                 )
@@ -5617,10 +5625,19 @@ impl ComputerUseLinux {
         Option<ScreenshotCapture>,
         Vec<String>,
     ) {
-        self.capture_post_action_observation_with(capture, target, fallback_window, raised, scope)
-            .await
+        self.capture_post_action_observation_with(
+            capture,
+            target,
+            fallback_window,
+            raised,
+            scope,
+            false,
+        )
+        .await
     }
 
+    /// `settled` skips the post-action settle delay for a tree read right
+    /// after a screenshot of the same action, which already waited it.
     async fn capture_post_action_observation_with(
         &self,
         capture: &PostActionCaptureParams,
@@ -5628,6 +5645,7 @@ impl ComputerUseLinux {
         fallback_window: Option<&WindowInfo>,
         raised: TargetRaised,
         scope: PostActionScope,
+        settled: bool,
     ) -> (
         PostActionObservation,
         Option<ScreenshotCapture>,
@@ -5738,7 +5756,7 @@ impl ComputerUseLinux {
                     observation.screenshot_error = Some(error);
                 }
             }
-        } else if !cfg!(test) {
+        } else if !settled && !cfg!(test) {
             sleep(Duration::from_millis(120)).await;
         }
 
@@ -5787,10 +5805,18 @@ impl ComputerUseLinux {
                 .and_then(|window| window.pid)
                 .or_else(|| target.and_then(|target| target.pid))
                 .or(cached_pid.filter(|_| !window_targeted));
+            // A pid scopes the tree to every root it owns. A window the
+            // compositor listed is alive, so when its pid owns no root (a
+            // Flatpak app registers through xdg-dbus-proxy) its title finds
+            // the root instead. A bound element owner gets no such fallback.
+            let window_pid = resolved_window.as_ref().and_then(|window| window.pid);
+            let candidates = accessibility_filter_candidates(resolved_window.as_ref());
+            let fallback_name = candidates
+                .first()
+                .filter(|_| !bound && window_pid.is_some() && window_pid == target_pid)
+                .cloned();
             let app_filter = if target_pid.is_none() {
-                accessibility_filter_candidates(resolved_window.as_ref())
-                    .into_iter()
-                    .next()
+                candidates.into_iter().next()
             } else {
                 None
             };
@@ -5817,6 +5843,7 @@ impl ComputerUseLinux {
                 app_filter.as_deref(),
                 target_pid,
                 window_title.as_deref(),
+                fallback_name.as_deref(),
                 max_nodes,
                 max_depth,
             )
@@ -5954,18 +5981,27 @@ impl ComputerUseLinux {
                     include_tree: Some(true),
                     ..Default::default()
                 };
+                // A screenshot of this action already waited the settle delay.
                 self.capture_post_action_observation_with(
                     &tree_params,
                     Some(&target.owner),
                     None,
                     TargetRaised::No,
                     PostActionScope::bound_to(target),
+                    capture.screenshot_scope().is_some(),
                 )
                 .await
             }
             Err(error) => {
+                // Like every failed post-action read: empty tree fields, and
+                // the replaced snapshot is not left for index calls.
+                self.commit_cleared_snapshot().await;
                 let message = format!("Post-action element observation failed: {error}");
                 let observation = PostActionObservation {
+                    accessibility_tree: Some(TreeNodes::default()),
+                    accessibility_tree_raw_count: Some(0),
+                    tree_scoped: Some(false),
+                    accessibility_tree_truncated: Some(false),
                     accessibility_error: Some(message.clone()),
                     ..Default::default()
                 };
@@ -7861,6 +7897,8 @@ impl ComputerUseLinux {
             app_filter.as_deref(),
             accessibility_snapshot_target_pid(app_filter.as_deref(), target_pid),
             window_title.as_deref(),
+            // Recovery re-finds an element by its verified owner only.
+            None,
             max_nodes,
             max_depth,
         )
@@ -17998,6 +18036,10 @@ case "$mode" in
     exit 0
     ;;
   pidless) pid=0 ;;
+  proxied)
+    printf '0x00000009 0 999999 0 0 100 100 other.Other host Other app\n'
+    exit 0
+    ;;
   *) pid="$CUL_PID_FIXTURE_PID" ;;
 esac
 printf '0x00000007 0 %s 0 0 100 100 first.First host Target 7\n0x00000008 0 %s 0 0 100 100 second.Second host Target 8\n' "$pid" "$pid"
@@ -18187,6 +18229,76 @@ printf '0x00000007 0 %s 0 0 100 100 first.First host Target 7\n0x00000008 0 %s 0
         assert!(notes.iter().any(|note| note.contains(&u32::MAX.to_string())
             && note.contains("list_apps")
             && note.contains("app_name_or_bundle_identifier")));
+
+        // A listed window whose pid owns no AT-SPI root, as for a Flatpak app
+        // behind xdg-dbus-proxy, finds its root by the window title. The tree
+        // records no pid, so element calls take the per-node owner check.
+        let windows_path = env::var("CUL_PID_FIXTURE_WINDOWS").unwrap();
+        std::fs::write(&windows_path, "proxied").unwrap();
+        let proxied = super::tests::app_state_value(
+            &server,
+            serde_json::json!({"window_id": 9, "include_screenshot": false}),
+        )
+        .await;
+        assert!(proxied["accessibility_error"].is_null(), "{proxied}");
+        let names = proxied["accessibility_tree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| node["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["Other app"], "{proxied}");
+        assert_eq!(server.last_snapshot.lock().unwrap().pid, None);
+        assert!(!proxied["message"]
+            .as_str()
+            .unwrap()
+            .contains("No AT-SPI application root matched"));
+
+        let proxied_window = WindowTarget {
+            window_id: Some(9),
+            ..Default::default()
+        };
+        let (observation, _, notes) = server
+            .capture_post_action_observation(
+                &capture,
+                Some(&proxied_window),
+                None,
+                TargetRaised::No,
+                PostActionScope::default(),
+            )
+            .await;
+        assert_eq!(
+            observation.accessibility_tree_raw_count,
+            Some(1),
+            "{observation:?}; {notes:?}"
+        );
+        assert_eq!(server.last_snapshot.lock().unwrap().pid, None);
+
+        // A bound element owner keeps the strict pid scope: no title fallback.
+        let bound_owner = ElementObservationTarget {
+            owner: WindowTarget {
+                pid: Some(999_999),
+                window_id: Some(9),
+                ..Default::default()
+            },
+            tree_window: None,
+        };
+        let (observation, _, notes) = server
+            .capture_post_action_observation(
+                &capture,
+                Some(&bound_owner.owner),
+                None,
+                TargetRaised::No,
+                PostActionScope::bound_to(&bound_owner),
+            )
+            .await;
+        assert_eq!(
+            observation.accessibility_tree_raw_count,
+            Some(0),
+            "{observation:?}; {notes:?}"
+        );
+        assert!(notes.iter().any(|note| note.contains("999999")));
+        std::fs::write(&windows_path, "").unwrap();
 
         let missing_window = super::tests::app_state_value(
             &server,
@@ -20457,12 +20569,16 @@ mod node_target_scope_tests {
         let (observation, screenshot, notes) = backend
             .capture_element_observation(&capture, None, Err(&error))
             .await;
-        assert!(observation.accessibility_tree.is_none());
-        assert!(observation.tree_scoped.is_none());
+        // No foreground tree: the empty tree fields of any failed read, and
+        // the replaced snapshot is gone.
+        assert!(observation.accessibility_tree.unwrap().is_empty());
+        assert_eq!(observation.accessibility_tree_raw_count, Some(0));
+        assert_eq!(observation.tree_scoped, Some(false));
         assert!(observation.accessibility_error.is_some());
         assert!(observation.screenshot_error.is_none());
         assert!(screenshot.is_none());
         assert!(notes[0].contains("no verified app or window owner"));
+        assert!(backend.cached_snapshot_id().is_empty());
     }
 
     #[tokio::test]
@@ -21703,6 +21819,10 @@ echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
         .unwrap();
         let (output, verified) =
             editable_text_action_result(EditableTextSetOutcome::MismatchAfterDeadline, None);
+        // A failed owner binding drops the replaced snapshot, as every
+        // failed post-action tree read does.
+        server.commit_snapshot(&[], Some(12345)).await;
+        assert!(!server.cached_snapshot_id().is_empty());
         let result = server
             .finish_set_value_output(
                 output,
@@ -21721,6 +21841,9 @@ echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
         assert_eq!(structured["screenshot"]["width"], 64);
         assert!(structured.get("screenshot_error").is_none());
         assert!(structured["accessibility_error"].is_string());
+        assert_eq!(structured["accessibility_tree_raw_count"], 0);
+        assert_eq!(structured["tree_scoped"], false);
+        assert!(server.cached_snapshot_id().is_empty());
         assert_eq!(
             std::fs::read_to_string(&log_path).unwrap(),
             "gnome-screenshot\n"

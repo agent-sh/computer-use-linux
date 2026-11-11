@@ -349,6 +349,7 @@ pub async fn snapshot_tree(
         app_name_or_bundle_identifier,
         target_pid,
         None,
+        None,
         max_nodes,
         max_depth,
     )
@@ -360,10 +361,13 @@ pub async fn snapshot_tree(
 /// `window_title`, an app root that exposes several windows (Chromium puts
 /// every browser window under one application) is read only through the
 /// window whose name matches it; its other children stay.
+/// `pid_fallback_name` finds the roots by name when `target_pid` owns none;
+/// pass it only for a pid read from a window the compositor listed.
 pub(crate) async fn snapshot_accessibility_tree(
     app_name_or_bundle_identifier: Option<&str>,
     target_pid: Option<u32>,
     window_title: Option<&str>,
+    pid_fallback_name: Option<&str>,
     max_nodes: usize,
     max_depth: u32,
 ) -> Result<AccessibilitySnapshot> {
@@ -380,6 +384,7 @@ pub(crate) async fn snapshot_accessibility_tree(
             window_title
                 .map(str::trim)
                 .filter(|title| !title.is_empty()),
+            pid_fallback_name,
             max_nodes,
             max_depth,
             stop_reading,
@@ -393,6 +398,7 @@ async fn snapshot_tree_inner(
     app_name_or_bundle_identifier: Option<&str>,
     target_pid: Option<u32>,
     window_title: Option<&str>,
+    pid_fallback_name: Option<&str>,
     max_nodes: usize,
     max_depth: u32,
     stop_reading: Instant,
@@ -409,6 +415,7 @@ async fn snapshot_tree_inner(
         roots,
         app_name_or_bundle_identifier,
         target_pid,
+        pid_fallback_name,
         &mut remaining_filter_reads,
     )
     .await;
@@ -682,8 +689,15 @@ async fn focused_element_probe(
     let roots =
         registry_children(&conn, MAX_DISCOVERY_ROOTS, &mut remaining_registry_reads).await?;
     let mut remaining_filter_reads = MAX_DISCOVERY_CHILD_READS;
-    let selected_roots =
-        select_roots(&conn, roots, None, target_pid, &mut remaining_filter_reads).await;
+    let selected_roots = select_roots(
+        &conn,
+        roots,
+        None,
+        target_pid,
+        None,
+        &mut remaining_filter_reads,
+    )
+    .await;
     if require_scoped && selected_roots.pid != target_pid {
         return Ok(FocusProbe::NoAccessibleApp);
     }
@@ -1156,6 +1170,7 @@ async fn select_roots(
     roots: Vec<ObjectRefOwned>,
     app_name_or_bundle_identifier: Option<&str>,
     target_pid: Option<u32>,
+    pid_fallback_name: Option<&str>,
     remaining_child_reads: &mut usize,
 ) -> SelectedRoots {
     let needle = app_name_needle(app_name_or_bundle_identifier);
@@ -1201,6 +1216,25 @@ async fn select_roots(
         }
 
         if needle.is_none() {
+            // A listed window's pid can own no root: a Flatpak app registers
+            // through xdg-dbus-proxy. Its name then finds the root, and the
+            // tree records no pid, so element calls check each node's owner.
+            if let Some(fallback) = app_name_needle(pid_fallback_name) {
+                let mut selected = Vec::new();
+                for object_ref in non_pid_matches {
+                    if root_matches(conn, &object_ref, &fallback, remaining_child_reads).await {
+                        selected.push(object_ref);
+                    }
+                }
+                if !selected.is_empty() {
+                    return SelectedRoots {
+                        roots: selected,
+                        scoped: true,
+                        pid: None,
+                        app_filter_matched: true,
+                    };
+                }
+            }
             // A PID-only target that disappeared must not widen to the desktop.
             return SelectedRoots {
                 roots: Vec::new(),
@@ -2484,7 +2518,7 @@ mod tests {
             .collect::<Vec<_>>();
         let pid = std::process::id();
         let mut budget = MAX_DISCOVERY_CHILD_READS;
-        let selected = select_roots(&conn, roots.clone(), None, Some(pid), &mut budget).await;
+        let selected = select_roots(&conn, roots.clone(), None, Some(pid), None, &mut budget).await;
         assert_eq!(selected.roots, roots);
         assert_eq!(selected.pid, Some(pid));
         assert!(selected.scoped);
@@ -2496,6 +2530,7 @@ mod tests {
             roots.clone(),
             Some(&explicit),
             Some(pid),
+            None,
             &mut budget,
         )
         .await;
@@ -2503,10 +2538,59 @@ mod tests {
         assert_eq!(selected.pid, Some(pid));
         assert!(selected.app_filter_matched);
 
-        let selected = select_roots(&conn, roots, None, Some(u32::MAX), &mut budget).await;
+        let selected = select_roots(
+            &conn,
+            roots.clone(),
+            None,
+            Some(u32::MAX),
+            None,
+            &mut budget,
+        )
+        .await;
         assert!(selected.roots.is_empty());
         assert_eq!(selected.pid, None);
         assert!(selected.scoped);
+        assert!(!selected.app_filter_matched);
+
+        // A listed window whose pid owns no root (a Flatpak app behind
+        // xdg-dbus-proxy) finds the root by name. No pid is recorded.
+        let selected = select_roots(
+            &conn,
+            roots.clone(),
+            None,
+            Some(u32::MAX),
+            Some("qt-app"),
+            &mut budget,
+        )
+        .await;
+        assert_eq!(selected.roots, roots);
+        assert_eq!(selected.pid, None);
+        assert!(selected.scoped);
+        assert!(selected.app_filter_matched);
+
+        // The name is a fallback only: the pid's own roots win.
+        let selected = select_roots(
+            &conn,
+            roots.clone(),
+            None,
+            Some(pid),
+            Some("no such window"),
+            &mut budget,
+        )
+        .await;
+        assert_eq!(selected.roots, roots);
+        assert_eq!(selected.pid, Some(pid));
+
+        let selected = select_roots(
+            &conn,
+            roots,
+            None,
+            Some(u32::MAX),
+            Some("no such window"),
+            &mut budget,
+        )
+        .await;
+        assert!(selected.roots.is_empty());
         assert!(!selected.app_filter_matched);
     }
 

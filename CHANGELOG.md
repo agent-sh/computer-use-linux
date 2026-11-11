@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A pid target reads every AT-SPI root its process owns. A Qt Quick app can register an empty GTK root for native dialogs next to its populated Qt root, and `get_app_state(pid=...)` used to read only the first, so it returned no controls. A pid that owns no root now returns an empty scoped tree with a note, not the whole desktop. Thanks to [@OnlyHa1bara](https://github.com/OnlyHa1bara) ([#445](https://github.com/agent-sh/computer-use-linux/pull/445)).
+- The `include_tree` observation of `perform_action` and `set_value` reads the acted-on element's app. It used to read the focused app's tree after an action on a background element, so the readback could describe another app ([#445](https://github.com/agent-sh/computer-use-linux/pull/445)).
+- A window whose pid owns no AT-SPI root still gets its tree, found by the window title. Flatpak apps register through `xdg-dbus-proxy`, so their window's pid never owns a root. The title is used only for a window the compositor lists, and the tree records no pid, so element calls check each node's owner ([#445](https://github.com/agent-sh/computer-use-linux/pull/445)).
+
 ## [0.7.50] - 2026-11-11
 
 ### Security
