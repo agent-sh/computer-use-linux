@@ -5662,15 +5662,10 @@ impl ComputerUseLinux {
             // that app may not be the one holding it.
             let window_targeted = resolved_window.is_some()
                 && (target.is_some_and(WindowTarget::has_target) || fallback_window.is_some());
-            // Over HTTP the scope was taken under the action's input lock.
             let PostActionScope {
                 pid: cached_pid,
                 tree: cached_tree,
-            } = if self.require_snapshot_ids {
-                scope
-            } else {
-                self.cached_post_action_context()
-            };
+            } = self.post_action_scope_for_capture(scope);
             let target_pid = resolved_window
                 .as_ref()
                 .and_then(|window| window.pid)
@@ -6998,6 +6993,15 @@ impl ComputerUseLinux {
             .lock()
             .map(|snapshot| self.post_action_scope(&snapshot, None))
             .unwrap_or_default()
+    }
+
+    /// Over HTTP the scope was taken under the action's input lock; stdio reads the cache.
+    fn post_action_scope_for_capture(&self, carried: PostActionScope) -> PostActionScope {
+        if self.require_snapshot_ids {
+            carried
+        } else {
+            self.cached_post_action_context()
+        }
     }
 
     /// Drop the cached tree and its spill file. The empty snapshot has no id,
@@ -21209,24 +21213,36 @@ mod snapshot_handle_tests {
     }
 
     #[test]
-    fn http_post_action_scope_survives_a_later_snapshot() {
+    fn post_action_scope_for_capture_keeps_the_carried_scope_over_http() {
+        // Client B stores a newer tree for another app and window.
+        let cache_newer_tree = |backend: &ComputerUseLinux| {
+            backend.cache_snapshot(&[node(SECOND_REF)], Some(7));
+            backend.last_snapshot.lock().unwrap().window_scope = Some("Window 30".to_string());
+        };
         let http = ComputerUseLinux {
             require_snapshot_ids: true,
             ..Default::default()
         };
         let a_id = cache_client_b_tree(&http);
         // Client A's action takes its scope under the input lock.
-        let scope = http
+        let carried = http
             .check_element_snapshot("click", Some(&a_id), true)
             .unwrap();
-        assert_eq!(scope.pid, Some(42));
-        assert_eq!(scope.tree.as_ref().unwrap().scope, "Window 20");
-        // Client B then stores a newer tree for another app and window.
-        http.cache_snapshot(&[node(SECOND_REF)], Some(7));
-        http.last_snapshot.lock().unwrap().window_scope = Some("Window 30".to_string());
-        // The scope A carries to its post-action capture is still its own.
+        cache_newer_tree(&http);
+        let scope = http.post_action_scope_for_capture(carried);
         assert_eq!(scope.pid, Some(42));
         assert_eq!(scope.tree.unwrap().scope, "Window 20");
+
+        // Stdio reads the cache at capture time, as on main.
+        let stdio = ComputerUseLinux::default();
+        let a_id = cache_client_b_tree(&stdio);
+        let carried = stdio
+            .check_element_snapshot("click", Some(&a_id), true)
+            .unwrap();
+        cache_newer_tree(&stdio);
+        let scope = stdio.post_action_scope_for_capture(carried);
+        assert_eq!(scope.pid, Some(7));
+        assert_eq!(scope.tree.unwrap().scope, "Window 30");
     }
 
     #[tokio::test]
