@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -132,28 +132,30 @@ fn spawn_with(hermetic: &Hermetic, token: Option<&str>, args: &[&str]) -> std::p
     command.spawn().unwrap()
 }
 
+/// Waits up to eight seconds for the `listening` line. A reader thread owns
+/// the blocking pipe and keeps draining it, so the server never blocks on
+/// a full stderr; on timeout or EOF the child is killed and reaped.
 fn bound_port(child: &mut std::process::Child) -> u16 {
-    let stderr = child.stderr.as_mut().unwrap();
-    let mut buf = Vec::new();
-    let mut byte = [0u8; 1];
+    let stderr = child.stderr.take().unwrap();
+    let (lines, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).split(b'\n') {
+            let Ok(line) = line else { break };
+            let _ = lines.send(String::from_utf8_lossy(&line).into_owned());
+        }
+    });
+    let mut seen = String::new();
     let deadline = Instant::now() + Duration::from_secs(8);
-    while Instant::now() < deadline {
-        if stderr.read(&mut byte).unwrap() == 0 {
-            break;
+    while let Ok(line) = received.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        if let Some(addr) = line.trim().strip_prefix("listening ") {
+            return addr.rsplit(':').next().unwrap().parse().unwrap();
         }
-        buf.push(byte[0]);
-        if buf.ends_with(b"\n") {
-            let line = String::from_utf8_lossy(&buf);
-            if let Some(addr) = line.trim().strip_prefix("listening ") {
-                return addr.rsplit(':').next().unwrap().parse().unwrap();
-            }
-            buf.clear();
-        }
+        seen.push_str(&line);
+        seen.push('\n');
     }
-    panic!(
-        "server did not print a listen address: {}",
-        String::from_utf8_lossy(&buf)
-    );
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!("server did not print a listen address: {seen}");
 }
 
 fn post(
