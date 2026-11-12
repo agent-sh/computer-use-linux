@@ -229,8 +229,7 @@ fn read_keymap_file(fd: OwnedFd, size: u32) -> Result<Vec<u8>> {
 
 struct Keymap {
     map: kbvm::xkb::Keymap,
-    /// libxkbcommon's min and max keycode, which kbvm does not expose.
-    keycodes: (u32, u32),
+    text: KeymapText,
 }
 
 impl Keymap {
@@ -247,47 +246,57 @@ impl Keymap {
             .build()
             .keymap_from_bytes(WriteToLog, None, text)
             .context("cannot parse the Wayland keyboard keymap")?;
-        let keycodes = declared_keycode_range(text)?;
-        Ok(Self { map, keycodes })
+        let text = KeymapText::scan(text)?;
+        // kbvm only drops trailing layouts that it found empty, so its
+        // layouts must be a prefix of libxkbcommon's for the same key.
+        for key in map.keys() {
+            let code = key.keycode().raw();
+            let layouts = text.keys.get(&code).map_or(0, KeyLayouts::count);
+            if text.names.get(key.name()) != Some(&code) || key.groups().count() > layouts {
+                bail!("{KEYMAP_TEXT_ERROR}");
+            }
+        }
+        Ok(Self { map, text })
     }
 
     fn first_levels(&self, deadline: Instant) -> Result<Vec<HashMap<u32, u32>>> {
         // Mutter resolves the first matching keycode/level in the active
         // group. Preserve that ordering, including unsupported higher levels.
-        // The keymap is always compositor-serialized, so it never has an
-        // empty middle group or an undefined automatic key type, where
-        // libxkbcommon and kbvm differ on raw input.
-        let (min, max) = self.keycodes;
-        let groups = self.map.keys().map(|key| key.groups().count()).max();
+        // kbvm supplies each layout's levels and keysyms; the keymap text
+        // supplies what kbvm drops: the keycode range and every key's layout
+        // count, including empty trailing layouts kbvm does not keep.
+        let KeymapText { min, max, .. } = self.text;
+        let groups = self.text.keys.values().map(KeyLayouts::count).max();
         let groups = groups.unwrap_or(0);
         if groups == 0 || groups > 16 || max > 65535 || min > max {
             bail!("keyboard keymap exceeds supported layout/keycode limits");
         }
-        // Mutter's legacy lookup excludes the upper bound too.
-        let mut keys: Vec<_> = self
+        let kbvm_keys: HashMap<_, _> = self
             .map
             .keys()
-            .filter(|key| (min..max).contains(&key.keycode().raw()))
+            .map(|key| (key.keycode().raw(), key))
             .collect();
-        keys.sort_unstable_by_key(|key| key.keycode());
+        // Mutter's legacy lookup excludes the upper bound too.
+        let mut keys: Vec<_> = self
+            .text
+            .keys
+            .iter()
+            .filter(|(code, _)| (min..max).contains(*code))
+            .collect();
+        keys.sort_unstable_by_key(|(code, _)| **code);
         let mut result = Vec::new();
         for group in 0..groups {
             let mut first = HashMap::new();
-            for key in &keys {
+            for (code, layouts) in &keys {
                 check_deadline(deadline)?;
-                // A key with fewer groups wraps, clamps or redirects the
-                // layout, as xkb_keymap_num_levels_for_key does.
-                let count = key.groups().count();
-                if count == 0 {
+                let Some(index) = layouts.layout(group) else {
                     continue;
-                }
-                let index = match key.redirect() {
-                    _ if group < count => group,
-                    Redirect::Wrap => group % count,
-                    Redirect::Clamp => count - 1,
-                    Redirect::Fixed(fixed) => fixed,
                 };
-                let Some(key_group) = key.groups().nth(index).flatten() else {
+                // An index past kbvm's layouts is an empty layout.
+                let Some(key_group) = kbvm_keys
+                    .get(code)
+                    .and_then(|key| key.groups().nth(index).flatten())
+                else {
                     continue;
                 };
                 if key_group.levels().count() > 32
@@ -313,44 +322,140 @@ impl Keymap {
     }
 }
 
-/// libxkbcommon's min and max keycode: the extremes of the `<NAME> = code;`
-/// entries in `xkb_keycodes` (it ignores `minimum` and `maximum`). kbvm keeps
-/// only keys named in `xkb_symbols`, but the key at the declared maximum must
-/// stay excluded. Anything unexpected fails closed rather than guess a range.
-fn declared_keycode_range(keymap: &[u8]) -> Result<(u32, u32)> {
-    declared_keycodes(keymap).context("cannot read the keymap's keycode range")
+const KEYMAP_TEXT_ERROR: &str = "cannot read the keymap's keycodes or layouts";
+
+/// What libxkbcommon reads from the keymap and kbvm does not expose. kbvm
+/// keeps only keys named in `xkb_symbols` and drops a key's empty trailing
+/// layouts, but libxkbcommon's keycode range and per-key layout counts decide
+/// which layout a key uses. Anything a compositor-serialized keymap does not
+/// contain fails closed rather than guess.
+struct KeymapText {
+    /// libxkbcommon's min and max keycode: the extremes of the
+    /// `<NAME> = code;` entries in `xkb_keycodes` (it ignores `minimum` and
+    /// `maximum`).
+    min: u32,
+    max: u32,
+    /// Key name without brackets, and aliases, to keycode.
+    names: HashMap<String, u32>,
+    /// The layouts of each key in `xkb_symbols`, by keycode.
+    keys: HashMap<u32, KeyLayouts>,
 }
 
-fn declared_keycodes(keymap: &[u8]) -> Option<(u32, u32)> {
-    // Drop `//` and `#` comments (xkbcommon rejects `/* */`) and string
-    // contents, so neither can fake a keycode, brace or semicolon.
-    let mut text = Vec::with_capacity(keymap.len());
-    let mut i = 0;
-    while i < keymap.len() {
-        match keymap[i] {
-            b'"' => {
-                i += 1;
-                while i < keymap.len() && keymap[i] != b'"' {
-                    i += if keymap[i] == b'\\' { 2 } else { 1 };
-                }
-                text.extend_from_slice(b"\"\"");
-            }
-            b'#' | b'/' if keymap[i] == b'#' || keymap.get(i + 1) == Some(&b'/') => {
-                while i < keymap.len() && keymap[i] != b'\n' {
-                    i += 1;
-                }
-                text.push(b'\n');
-            }
-            byte => text.push(byte),
-        }
-        i += 1;
+/// One key's layouts as libxkbcommon counts them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeyLayouts {
+    /// Bit N: `symbols[N+1]`, `actions[N+1]` or `type[N+1]` defines layout N.
+    defined: u32,
+    out_of_range: OutOfRange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutOfRange {
+    Wrap,
+    Clamp,
+    Redirect(usize),
+}
+
+impl KeyLayouts {
+    /// xkb_keymap_num_layouts_for_key: up to the highest defined layout.
+    fn count(&self) -> usize {
+        (u32::BITS - self.defined.leading_zeros()) as usize
     }
-    let text = String::from_utf8(text).ok()?;
-    let section = &text[text.find("xkb_keycodes")?..];
+
+    /// The key's layout for keymap layout `group`, or `None` if it has no
+    /// symbols there. libxkbcommon's XkbWrapGroupIntoRange, then its fill of
+    /// a layout nothing defines from layout 1.
+    fn layout(&self, group: usize) -> Option<usize> {
+        let count = self.count();
+        if count == 0 {
+            return None;
+        }
+        let index = match self.out_of_range {
+            _ if group < count => group,
+            OutOfRange::Wrap => group % count,
+            OutOfRange::Clamp => count - 1,
+            OutOfRange::Redirect(target) if target < count => target,
+            OutOfRange::Redirect(_) => 0,
+        };
+        let defined = |index: usize| self.defined & (1 << index) != 0;
+        let index = if defined(index) { index } else { 0 };
+        defined(index).then_some(index)
+    }
+}
+
+impl KeymapText {
+    fn scan(keymap: &[u8]) -> Result<Self> {
+        Self::scan_text(keymap).context(KEYMAP_TEXT_ERROR)
+    }
+
+    fn scan_text(keymap: &[u8]) -> Option<Self> {
+        // Drop `//` and `#` comments (xkbcommon rejects `/* */`) and string
+        // contents, so neither can fake a keycode, brace or separator.
+        let mut text = Vec::with_capacity(keymap.len());
+        let mut i = 0;
+        while i < keymap.len() {
+            match keymap[i] {
+                b'"' => {
+                    i += 1;
+                    while i < keymap.len() && keymap[i] != b'"' {
+                        i += if keymap[i] == b'\\' { 2 } else { 1 };
+                    }
+                    text.extend_from_slice(b"\"\"");
+                }
+                b'#' | b'/' if keymap[i] == b'#' || keymap.get(i + 1) == Some(&b'/') => {
+                    while i < keymap.len() && keymap[i] != b'\n' {
+                        i += 1;
+                    }
+                    text.push(b'\n');
+                }
+                byte => text.push(byte),
+            }
+            i += 1;
+        }
+        let text = String::from_utf8(text).ok()?;
+        let (names, min, max) = scan_keycodes(section(&text, "xkb_keycodes")?)?;
+        let keys = scan_symbols(section(&text, "xkb_symbols")?, &names)?;
+        Some(Self {
+            min,
+            max,
+            names,
+            keys,
+        })
+    }
+}
+
+/// The body of the first `keyword "name" { ... }` section.
+fn section<'a>(text: &'a str, keyword: &str) -> Option<&'a str> {
+    let section = &text[text.find(keyword)?..];
     let body = &section[section.find('{')? + 1..];
-    let body = &body[..body.find('}')?];
-    let mut names = HashSet::new();
+    Some(&body[..closing(body, '}')?])
+}
+
+/// The byte index of the first `close` outside brackets, braces and parens.
+fn closing(text: &str, close: char) -> Option<usize> {
+    split_top_level(text, close).next().map(str::len)
+}
+
+/// Splits at `separator` outside brackets, braces and parentheses.
+fn split_top_level(text: &str, separator: char) -> impl Iterator<Item = &str> {
+    let mut depth = 0usize;
+    text.split(move |c: char| {
+        if depth == 0 && c == separator {
+            return true;
+        }
+        match c {
+            '[' | '{' | '(' => depth += 1,
+            ']' | '}' | ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        false
+    })
+}
+
+fn scan_keycodes(body: &str) -> Option<(HashMap<String, u32>, u32, u32)> {
+    let mut names = HashMap::new();
     let mut codes = BTreeSet::new();
+    let mut aliases = Vec::new();
     for statement in body.split(';').map(str::trim) {
         if statement.is_empty() {
             continue;
@@ -358,10 +463,12 @@ fn declared_keycodes(keymap: &[u8]) -> Option<(u32, u32)> {
         let (name, code) = statement.split_once('=')?;
         let name = name.trim();
         if !name.starts_with('<') {
-            match name.split_whitespace().next()? {
-                "minimum" | "maximum" | "alias" | "indicator" | "virtual" => continue,
+            match name.split_whitespace().collect::<Vec<_>>()[..] {
+                ["alias", alias] => aliases.push((key_name(alias)?, key_name(code.trim())?)),
+                ["minimum" | "maximum"] | ["indicator", _] | ["virtual", "indicator", _] => {}
                 _ => return None,
             }
+            continue;
         }
         let code = code.trim();
         let code = match code.strip_prefix("0x") {
@@ -370,11 +477,116 @@ fn declared_keycodes(keymap: &[u8]) -> Option<(u32, u32)> {
         };
         // A repeated name or code would move a key in libxkbcommon; a
         // serialized keymap has neither, so refuse rather than model it.
-        if !name.ends_with('>') || !names.insert(name) || !codes.insert(code) {
+        if names.insert(key_name(name)?.to_string(), code).is_some() || !codes.insert(code) {
             return None;
         }
     }
-    Some((*codes.first()?, *codes.last()?))
+    for (alias, target) in aliases {
+        let code = *names.get(target)?;
+        if names.insert(alias.to_string(), code).is_some() {
+            return None;
+        }
+    }
+    Some((names, *codes.first()?, *codes.last()?))
+}
+
+/// `<NAME>` to `NAME`.
+fn key_name(text: &str) -> Option<&str> {
+    let name = text.strip_prefix('<')?.strip_suffix('>')?;
+    (!name.is_empty() && !name.contains(['<', '>'])).then_some(name)
+}
+
+fn scan_symbols(body: &str, names: &HashMap<String, u32>) -> Option<HashMap<u32, KeyLayouts>> {
+    let mut keys = HashMap::new();
+    for statement in split_top_level(body, ';').map(str::trim) {
+        if statement.is_empty() {
+            continue;
+        }
+        match statement
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .next()?
+        {
+            "name" | "modifier_map" | "modmap" | "mod_map" => {}
+            "key" => {
+                let rest = statement["key".len()..].trim_start();
+                let open = rest.find('{')?;
+                let code = *names.get(key_name(rest[..open].trim())?)?;
+                let key_body = rest[open + 1..].strip_suffix('}')?;
+                if keys.insert(code, scan_key(key_body)?).is_some() {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(keys)
+}
+
+/// A key's layouts, as libxkbcommon's symbols compiler defines them.
+fn scan_key(body: &str) -> Option<KeyLayouts> {
+    let mut defined = 0u32;
+    let mut symbols = 0u32;
+    let mut actions = 0u32;
+    let mut out_of_range = OutOfRange::Wrap;
+    for item in split_top_level(body, ',').map(str::trim) {
+        if item.is_empty() {
+            continue;
+        }
+        let (field, value) = match item.split_once('=') {
+            _ if item.starts_with('[') => ("symbols", Some(item)),
+            Some((field, value)) => (field.trim(), Some(value.trim())),
+            None => (item, None),
+        };
+        let (field, index) = match field.split_once('[') {
+            Some((field, index)) => (field.trim(), Some(layout_index(index.strip_suffix(']')?)?)),
+            None => (field, None),
+        };
+        match (field.to_ascii_lowercase().as_str(), index, value) {
+            ("type", Some(index), Some(_)) => defined |= 1 << index,
+            ("type", None, Some(_)) => {}
+            (field @ ("symbols" | "actions"), index, Some(value)) => {
+                // A list without an index fills the first layout that lacks
+                // that field; a list of calls is actions.
+                let field = match (field, value.contains('(')) {
+                    ("symbols", false) => &mut symbols,
+                    ("actions", _) | (_, true) => &mut actions,
+                    _ => return None,
+                };
+                let index = index.unwrap_or(field.trailing_ones() as usize);
+                if index >= 32 {
+                    return None;
+                }
+                *field |= 1 << index;
+                defined |= 1 << index;
+            }
+            ("groupswrap" | "wrapgroups", None, None) => out_of_range = OutOfRange::Wrap,
+            ("groupsclamp" | "clampgroups", None, None) => out_of_range = OutOfRange::Clamp,
+            ("groupsredirect" | "redirectgroups", None, Some(value)) => {
+                out_of_range = OutOfRange::Redirect(layout_index(value)?);
+            }
+            (
+                "repeat" | "repeats" | "repeating" | "virtualmods" | "vmods" | "virtualmodifiers",
+                None,
+                Some(_),
+            ) => {}
+            _ => return None,
+        }
+    }
+    Some(KeyLayouts {
+        defined,
+        out_of_range,
+    })
+}
+
+/// `1` or `Group1` to layout index 0.
+fn layout_index(text: &str) -> Option<usize> {
+    let text = text.trim();
+    let number = match text.get(..5) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("group") => &text[5..],
+        _ => text,
+    };
+    let number: usize = number.parse().ok()?;
+    (1..=32).contains(&number).then(|| number - 1)
 }
 
 /// The preflight refused the text because a configured layout group cannot
@@ -463,6 +675,14 @@ pub(crate) fn validate_text_with_keymap(keymap: &[u8], text: &str) -> Result<()>
 }
 
 #[cfg(test)]
+pub(crate) fn debug_key_layout_count(keymap_text: &str, key_name: &str) -> Option<usize> {
+    let (names, _, _) = scan_keycodes(section(keymap_text, "xkb_keycodes")?)?;
+    let keys = scan_symbols(section(keymap_text, "xkb_symbols")?, &names)?;
+    let code = *names.get(key_name)?;
+    Some(keys.get(&code).map_or(0, KeyLayouts::count))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -481,6 +701,40 @@ mod tests {
     }
 
     #[test]
+    fn debug_scanner_on_epo_legacy_and_unus_topk() {
+        // epo(legacy) empty last layout group case
+        let epo = include_bytes!("../tests/fixtures/keyboard-ca-epo.xkb");
+        let etext = std::str::from_utf8(epo).unwrap();
+        println!(
+            "LSGT (empty last group 2): {:?}",
+            debug_key_layout_count(etext, "LSGT")
+        );
+        // <UNUS>/<TOPK> case from group-wrap fixture
+        let wrap = include_bytes!("../tests/fixtures/keyboard-group-wrap.xkb");
+        let wtext = std::str::from_utf8(wrap).unwrap();
+        println!(
+            "AC07 (empty last): {:?}",
+            debug_key_layout_count(wtext, "AC07")
+        );
+        println!("AC08 (gap): {:?}", debug_key_layout_count(wtext, "AC08"));
+        println!(
+            "TOPK (highest with symbols): {:?}",
+            debug_key_layout_count(wtext, "TOPK")
+        );
+        println!(
+            "UNUS (declared but unused): {:?}",
+            debug_key_layout_count(wtext, "UNUS")
+        );
+        // regression asserts for the edge cases per ruling (per-key count, fail closed)
+        assert_eq!(debug_key_layout_count(wtext, "AC07"), Some(2));
+        assert_eq!(debug_key_layout_count(wtext, "AC08"), Some(3));
+        assert_eq!(debug_key_layout_count(wtext, "TOPK"), Some(1));
+        assert_eq!(debug_key_layout_count(wtext, "UNUS"), Some(0));
+        assert_eq!(debug_key_layout_count(etext, "LSGT"), Some(2));
+    }
+
+    #[test]
+
     fn first_levels_match_libxkbcommon_golden() {
         // The goldens are libxkbcommon's output. fr and us-ru are serialized
         // the way Mutter sends them; group-wrap covers per-key group wrap,
@@ -505,13 +759,21 @@ mod tests {
             fixture!("fr"),
             fixture!("us-ru"),
             fixture!("group-wrap"),
+            fixture!("us-epo-legacy"),
         ] {
             let mut bytes = keymap.to_vec();
+
             bytes.push(0);
             let map = Keymap::parse(bytes).expect(name);
             let groups = map.first_levels(Instant::now() + READ_TIMEOUT).unwrap();
             assert_eq!(render_first_levels(&groups), golden, "{name}");
         }
+    }
+
+    fn declared_keycode_range(keymap: &[u8]) -> Option<(u32, u32)> {
+        let text = std::str::from_utf8(keymap).ok()?;
+        let body = section(text, "xkb_keycodes")?;
+        scan_keycodes(body).map(|(_, min, max)| (min, max))
     }
 
     #[test]
@@ -520,7 +782,6 @@ mod tests {
             declared_keycode_range(
                 format!("xkb_keymap {{ xkb_keycodes \"x\" {{ {keycodes} }}; }};").as_bytes(),
             )
-            .ok()
         };
         assert_eq!(
             range(
@@ -532,7 +793,7 @@ mod tests {
         );
         // Fail closed: no section, no keycodes, or input libxkbcommon would
         // read differently.
-        assert_eq!(declared_keycode_range(b"xkb_keymap { };").ok(), None);
+        assert_eq!(declared_keycode_range(b"xkb_keymap { };"), None);
         for keycodes in [
             "",
             "minimum = 8;",
@@ -621,5 +882,9 @@ mod tests {
             .unwrap_err()
             .downcast_ref::<MissingLayoutKeysym>()
             .is_none());
+        // Critical empty-final-group case (epo(legacy) <LSGT> group 2)
+        let ca_epo = include_bytes!("../tests/fixtures/keyboard-ca-epo.xkb");
+        let err = validate_text_with_keymap(ca_epo, "«").unwrap_err();
+        assert!(err.to_string().contains("group 2"));
     }
 }
