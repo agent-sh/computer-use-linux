@@ -2,8 +2,8 @@
 name = "computer-use-linux"
 version = "0.7.52"
 edition = "2021"
-# File::try_lock, used by the indicator, is stable since Rust 1.89.
-rust-version = "1.89"
+# kbvm, the pure-Rust XKB parser behind the GNOME keymap preflight, needs Rust 1.95.
+rust-version = "1.95"
 license = "MIT"
 description = "Native Linux desktop control over MCP and CLI: semantic AT-SPI accessibility trees, multi-compositor window targeting (GNOME, KDE/KWin, Hyprland, niri, COSMIC, i3, Sway, labwc and other wlroots compositors, X11), bounded screenshots, Wayland/X11 input, and an on-screen agent activity indicator."
 repository = "https://github.com/agent-sh/computer-use-linux"
@@ -61,6 +61,8 @@ cosmic-protocols = { version = "0.2.0", default-features = false, features = ["c
 futures-util = "0.3.32"
 getrandom = "0.4.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# Pure-Rust XKB keymap parser for the GNOME portal text preflight (no libxkbcommon).
+kbvm = "0.2.0"
 libc = "0.2"
 reis = { version = "0.7.1", features = ["tokio"] }
 rmcp = { version = "3.5.1", features = ["transport-io", "transport-streamable-http-server"] }
@@ -82,7 +84,6 @@ wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 # Pure-Rust X11 client (no libxcb). Native X11 sessions only: absolute window
 # origins for the EWMH backend (wmctrl -lG counts the frame offset twice, #157).
 x11rb = { version = "0.14", features = ["xkb"] }
-xkbcommon-dl = "0.4.2"
 xkeysym = "0.2.1"
 zbus = "5.14.0"
 zbus_xml = "5.1.1"

@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+### Changed
 
-- Release builds for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`: statically linked binaries for musl distributions such as Alpine, which cannot load the glibc builds. A static binary cannot load `libxkbcommon`, so these builds refuse `type_text` on GNOME Wayland, and the error says to use a `-gnu` build there. A `musl build` CI job builds x86_64 musl on every change and checks it is static, and a failed musl release build no longer holds back crates.io, npm or the gnu assets.
+- The GNOME keymap preflight for `type_text` parses the compositor's keymap with the pure-Rust `kbvm` crate instead of loading `libxkbcommon.so.0` at runtime. No XKB shared library is needed, so the preflight also works in static musl builds. The minimum Rust version is now 1.95, which `kbvm` requires.
 
 ### Fixed
 

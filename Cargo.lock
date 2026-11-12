@@ -327,6 +327,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -449,6 +459,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "image",
+ "kbvm",
  "libc",
  "mimalloc",
  "reis",
@@ -465,7 +476,6 @@ dependencies = [
  "wayland-protocols",
  "wayland-protocols-wlr",
  "x11rb",
- "xkbcommon-dl",
  "xkeysym",
  "zbus",
  "zbus_xml",
@@ -580,6 +590,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "debug-fn"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24efe21bd9a78102d1225f10f0a41d9d5b43f4df7ae8235f39a9c79e4d476c1e"
+
+[[package]]
 name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -588,15 +604,6 @@ dependencies = [
  "block-buffer",
  "const-oid",
  "crypto-common",
-]
-
-[[package]]
-name = "dlib"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
-dependencies = [
- "libloading",
 ]
 
 [[package]]
@@ -722,6 +729,12 @@ name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
+
+[[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "font-types"
@@ -869,7 +882,7 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
- "foldhash",
+ "foldhash 0.1.5",
 ]
 
 [[package]]
@@ -877,6 +890,9 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "heck"
@@ -1048,6 +1064,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "isnt"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1697e6b71679da96d5c41bb9035116141baadbf59a60625fd66cb3c9584e7b0"
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1066,6 +1088,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "kbvm"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87848566101698caf999ac33fca97f46a4127150168280a384ebf2987a46a194"
+dependencies = [
+ "arrayvec",
+ "bstr",
+ "cfg-if",
+ "debug-fn",
+ "hashbrown 0.17.1",
+ "indexmap",
+ "isnt",
+ "kbvm-proc",
+ "linearize",
+ "log",
+ "pkg-config",
+ "secure-execution",
+ "smallvec",
+ "thiserror",
+ "unicode-width",
+]
+
+[[package]]
+name = "kbvm-proc"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "634c57aa7634150e449ddee5625e759a71077e9f71d44677bea5ad7196ca91da"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
+
+[[package]]
 name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1078,22 +1134,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
-name = "libloading"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
-dependencies = [
- "cfg-if",
- "windows-link",
-]
-
-[[package]]
 name = "libmimalloc-sys"
 version = "0.1.49"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "linearize"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f8c5e7ca4987243a1ced6f0ecad7c7731650479bdc52997687eff4e912fef9f"
+dependencies = [
+ "cfg-if",
+ "linearize-derive",
+ "version_check",
+]
+
+[[package]]
+name = "linearize-derive"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "401d53eac39730352d7443646e75fda6cb933bf6dff060fe20a4f0d979f1bef3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -1504,6 +1572,15 @@ dependencies = [
  "quote",
  "serde_derive_internals",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "secure-execution"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23ceccce47e43305aa02a0d9182ad09364357d073447435d7ae2e219ce750e55"
+dependencies = [
+ "cfg-if",
 ]
 
 [[package]]
@@ -1955,6 +2032,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
+name = "unicode-width"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
+
+[[package]]
 name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1971,6 +2054,12 @@ dependencies = [
  "serde_core",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "version_check"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "wasi"
@@ -2395,19 +2484,6 @@ name = "xcursor"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
-
-[[package]]
-name = "xkbcommon-dl"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d039de8032a9a8856a6be89cea3e5d12fdd82306ab7c94d74e6deab2460651c5"
-dependencies = [
- "bitflags",
- "dlib",
- "log",
- "once_cell",
- "xkeysym",
-]
 
 [[package]]
 name = "xkeysym"
