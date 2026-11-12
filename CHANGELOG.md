@@ -7,13 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.53] - 2026-11-12
+
 ### Added
 
-- Release builds for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`: statically linked binaries for musl distributions such as Alpine, which cannot load the glibc builds. A `musl build` CI job builds x86_64 musl on every change and checks it is static, and a failed musl release build no longer holds back crates.io, npm or the gnu assets.
+- Release builds for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`: statically linked binaries for musl distributions such as Alpine, which cannot load the glibc builds. A `musl build` CI job builds x86_64 musl on every change and checks it is static, and a failed musl release build no longer holds back crates.io, npm or the gnu assets. Thanks to [@berney](https://github.com/berney) ([#459](https://github.com/agent-sh/computer-use-linux/pull/459)).
 
 ### Changed
 
-- The GNOME keymap preflight for `type_text` parses the compositor's keymap with the pure-Rust `kbvm` crate instead of loading `libxkbcommon.so.0` at runtime. No XKB shared library is needed, so the preflight also works in static musl builds. The minimum Rust version is now 1.95, which `kbvm` requires.
+- The GNOME keymap preflight for `type_text` parses the compositor's keymap with the pure-Rust `kbvm` crate instead of loading `libxkbcommon.so.0` at runtime. No XKB shared library is needed, so the preflight also works in static musl builds. The minimum Rust version is now 1.95, which `kbvm` requires. Thanks to [@berney](https://github.com/berney) ([#460](https://github.com/agent-sh/computer-use-linux/pull/460)).
 
 ### Fixed
 
@@ -1203,7 +1205,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.52...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.53...HEAD
+[0.7.53]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.52...v0.7.53
 [0.7.52]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.51...v0.7.52
 [0.7.51]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.50...v0.7.51
 [0.7.50]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.49...v0.7.50

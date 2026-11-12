@@ -1,6 +1,6 @@
 [package]
 name = "computer-use-linux"
-version = "0.7.52"
+version = "0.7.53"
 edition = "2021"
 # kbvm, the pure-Rust XKB parser behind the GNOME keymap preflight, needs Rust 1.95.
 rust-version = "1.95"

@@ -445,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "computer-use-linux"
-version = "0.7.52"
+version = "0.7.53"
 dependencies = [
  "anyhow",
  "atspi",
