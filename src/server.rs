@@ -24124,14 +24124,3 @@ mod type_text_atspi_fallback_tests {
         }
     }
 }
-// NOTE (kbvm): Over HTTP we must never fall back to reading last_snapshot here.
-// Another client may have just replaced it. The scope must come from the
-// PostActionScope that was captured under the input lock during action
-// validation (see cached_scope_belongs_to_request + post_action_scope_for_capture).
-
-// NOTE (test): The test http_post_action_scope_survives_a_later_snapshot
-// verifies that a carried PostActionScope is not overwritten by a later
-// snapshot from another client. The core safety is enforced by
-// cached_scope_belongs_to_request under the input lock. A stronger
-// integration test would require mocking the capture_post_action_observation
-// path, which is out of scope for hermetic tests.

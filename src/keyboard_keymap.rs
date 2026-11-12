@@ -3,9 +3,9 @@
 //! layout group, so every configured group must support the complete text.
 
 use anyhow::{bail, Context, Result};
-use kbvm::{builder::Redirect, xkb::diagnostic::WriteToLog};
+use kbvm::xkb::diagnostic::WriteToLog;
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap},
     env,
     ffi::CStr,
     fs::File,
@@ -389,30 +389,7 @@ impl KeymapText {
     }
 
     fn scan_text(keymap: &[u8]) -> Option<Self> {
-        // Drop `//` and `#` comments (xkbcommon rejects `/* */`) and string
-        // contents, so neither can fake a keycode, brace or separator.
-        let mut text = Vec::with_capacity(keymap.len());
-        let mut i = 0;
-        while i < keymap.len() {
-            match keymap[i] {
-                b'"' => {
-                    i += 1;
-                    while i < keymap.len() && keymap[i] != b'"' {
-                        i += if keymap[i] == b'\\' { 2 } else { 1 };
-                    }
-                    text.extend_from_slice(b"\"\"");
-                }
-                b'#' | b'/' if keymap[i] == b'#' || keymap.get(i + 1) == Some(&b'/') => {
-                    while i < keymap.len() && keymap[i] != b'\n' {
-                        i += 1;
-                    }
-                    text.push(b'\n');
-                }
-                byte => text.push(byte),
-            }
-            i += 1;
-        }
-        let text = String::from_utf8(text).ok()?;
+        let text = strip_keymap_noise(keymap)?;
         let (names, min, max) = scan_keycodes(section(&text, "xkb_keycodes")?)?;
         let keys = scan_symbols(section(&text, "xkb_symbols")?, &names)?;
         Some(Self {
@@ -422,6 +399,33 @@ impl KeymapText {
             keys,
         })
     }
+}
+
+/// Drop `//` and `#` comments (xkbcommon rejects `/* */`) and string
+/// contents, so neither can fake a keycode, brace or separator.
+fn strip_keymap_noise(keymap: &[u8]) -> Option<String> {
+    let mut text = Vec::with_capacity(keymap.len());
+    let mut i = 0;
+    while i < keymap.len() {
+        match keymap[i] {
+            b'"' => {
+                i += 1;
+                while i < keymap.len() && keymap[i] != b'"' {
+                    i += if keymap[i] == b'\\' { 2 } else { 1 };
+                }
+                text.extend_from_slice(b"\"\"");
+            }
+            b'#' | b'/' if keymap[i] == b'#' || keymap.get(i + 1) == Some(&b'/') => {
+                while i < keymap.len() && keymap[i] != b'\n' {
+                    i += 1;
+                }
+                text.push(b'\n');
+            }
+            byte => text.push(byte),
+        }
+        i += 1;
+    }
+    String::from_utf8(text).ok()
 }
 
 /// The body of the first `keyword "name" { ... }` section.
@@ -675,14 +679,6 @@ pub(crate) fn validate_text_with_keymap(keymap: &[u8], text: &str) -> Result<()>
 }
 
 #[cfg(test)]
-pub(crate) fn debug_key_layout_count(keymap_text: &str, key_name: &str) -> Option<usize> {
-    let (names, _, _) = scan_keycodes(section(keymap_text, "xkb_keycodes")?)?;
-    let keys = scan_symbols(section(keymap_text, "xkb_symbols")?, &names)?;
-    let code = *names.get(key_name)?;
-    Some(keys.get(&code).map_or(0, KeyLayouts::count))
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -701,40 +697,6 @@ mod tests {
     }
 
     #[test]
-    fn debug_scanner_on_epo_legacy_and_unus_topk() {
-        // epo(legacy) empty last layout group case
-        let epo = include_bytes!("../tests/fixtures/keyboard-ca-epo.xkb");
-        let etext = std::str::from_utf8(epo).unwrap();
-        println!(
-            "LSGT (empty last group 2): {:?}",
-            debug_key_layout_count(etext, "LSGT")
-        );
-        // <UNUS>/<TOPK> case from group-wrap fixture
-        let wrap = include_bytes!("../tests/fixtures/keyboard-group-wrap.xkb");
-        let wtext = std::str::from_utf8(wrap).unwrap();
-        println!(
-            "AC07 (empty last): {:?}",
-            debug_key_layout_count(wtext, "AC07")
-        );
-        println!("AC08 (gap): {:?}", debug_key_layout_count(wtext, "AC08"));
-        println!(
-            "TOPK (highest with symbols): {:?}",
-            debug_key_layout_count(wtext, "TOPK")
-        );
-        println!(
-            "UNUS (declared but unused): {:?}",
-            debug_key_layout_count(wtext, "UNUS")
-        );
-        // regression asserts for the edge cases per ruling (per-key count, fail closed)
-        assert_eq!(debug_key_layout_count(wtext, "AC07"), Some(2));
-        assert_eq!(debug_key_layout_count(wtext, "AC08"), Some(3));
-        assert_eq!(debug_key_layout_count(wtext, "TOPK"), Some(1));
-        assert_eq!(debug_key_layout_count(wtext, "UNUS"), Some(0));
-        assert_eq!(debug_key_layout_count(etext, "LSGT"), Some(2));
-    }
-
-    #[test]
-
     fn first_levels_match_libxkbcommon_golden() {
         // The goldens are libxkbcommon's output. fr and us-ru are serialized
         // the way Mutter sends them; group-wrap covers per-key group wrap,
@@ -771,8 +733,8 @@ mod tests {
     }
 
     fn declared_keycode_range(keymap: &[u8]) -> Option<(u32, u32)> {
-        let text = std::str::from_utf8(keymap).ok()?;
-        let body = section(text, "xkb_keycodes")?;
+        let text = strip_keymap_noise(keymap)?;
+        let body = section(&text, "xkb_keycodes")?;
         scan_keycodes(body).map(|(_, min, max)| (min, max))
     }
 
@@ -882,9 +844,25 @@ mod tests {
             .unwrap_err()
             .downcast_ref::<MissingLayoutKeysym>()
             .is_none());
-        // Critical empty-final-group case (epo(legacy) <LSGT> group 2)
-        let ca_epo = include_bytes!("../tests/fixtures/keyboard-ca-epo.xkb");
-        let err = validate_text_with_keymap(ca_epo, "«").unwrap_err();
-        assert!(err.to_string().contains("group 2"));
+    }
+
+    #[test]
+    fn empty_trailing_layout_is_not_wrapped() {
+        // us+epo(legacy) serializes <LSGT> with symbols[2] all NoSymbol.
+        // kbvm drops that trailing layout. Counting it stops group 2 from
+        // wrapping onto group 1, which would copy broken bar (U+00A6) across.
+        let bytes = include_bytes!("../tests/fixtures/keyboard-us-epo-legacy.xkb");
+        let text = KeymapText::scan(bytes).expect("us-epo-legacy");
+        let layouts = text.keys[&text.names["LSGT"]];
+        assert_eq!(layouts.count(), 2);
+        assert_eq!(layouts.layout(1), Some(1));
+        let mut owned = bytes.to_vec();
+        owned.push(0);
+        let groups = Keymap::parse(owned)
+            .expect("parse")
+            .first_levels(Instant::now() + READ_TIMEOUT)
+            .unwrap();
+        assert!(groups[0].contains_key(&0xa6));
+        assert!(!groups[1].contains_key(&0xa6));
     }
 }
