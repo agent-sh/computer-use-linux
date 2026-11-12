@@ -1,0 +1,82 @@
+xkb_keymap {
+    xkb_keycodes "group-wrap" {
+        minimum = 8;
+        maximum = 255;
+        <AE01> = 10;
+        <AC01> = 38;
+        <AC02> = 39;
+        <AC03> = 40;
+        <AC04> = 41;
+        <AC05> = 42;
+        <AC06> = 43;
+        <LFSH> = 50;
+        <RALT> = 108;
+        // <GONE> = 240; a comment, not a keycode
+        <TOPK> = 200;
+        alias <LVL3> = <RALT>;
+        indicator 1 = "Caps Lock";
+        // Declared but unused: the highest keycode, so <TOPK> is still scanned.
+        <UNUS> = 230;
+    };
+    xkb_types "group-wrap" {
+        virtual_modifiers LevelThree;
+        type "ONE_LEVEL" {
+            modifiers = None;
+            map[None] = Level1;
+        };
+        type "TWO_LEVEL" {
+            modifiers = Shift;
+            map[None] = Level1;
+            map[Shift] = Level2;
+        };
+        type "ALPHABETIC" {
+            modifiers = Shift + Lock;
+            map[None] = Level1;
+            map[Shift] = Level2;
+            map[Lock] = Level2;
+        };
+        type "FOUR_LEVEL" {
+            modifiers = Shift + LevelThree;
+            map[None] = Level1;
+            map[Shift] = Level2;
+            map[LevelThree] = Level3;
+            map[Shift + LevelThree] = Level4;
+        };
+    };
+    xkb_compatibility "group-wrap" {
+        virtual_modifiers LevelThree;
+        interpret Shift_L {
+            action = SetMods(modifiers=Shift);
+        };
+        interpret ISO_Level3_Shift {
+            action = SetMods(modifiers=LevelThree);
+        };
+    };
+    xkb_symbols "group-wrap" {
+        name[Group1] = "One";
+        name[Group2] = "Two";
+        name[Group3] = "Three";
+        // Three groups, one per layout.
+        key <AE01> { [ 1, exclam ], [ a, A ], [ b, B ] };
+        // One group: every layout wraps to it.
+        key <AC01> { [ c, C ] };
+        // Two groups, default wrap: layout 3 wraps to group 1.
+        key <AC02> { [ d, D ], [ e, E ] };
+        // Two groups, clamped: layout 3 clamps to group 2.
+        key <AC03> { groupsClamp, [ f, F ], [ g, G ] };
+        // Two groups, redirected: layout 3 goes to group 2.
+        key <AC04> { groupsRedirect = Group2, [ h, H ], [ i, I ] };
+        // Four-level type with empty levels and several keysyms at one level.
+        key <AC05> {
+            type = "FOUR_LEVEL",
+            [ l, L, { m, n }, NoSymbol ],
+            [ NoSymbol, c, ccedilla ]
+        };
+        // Repeats earlier keysyms at other levels: the first level found wins.
+        key <AC06> { type = "FOUR_LEVEL", [ C, c, eacute, Eacute ] };
+        key <LFSH> { [ Shift_L ] };
+        key <RALT> { type = "ONE_LEVEL", [ ISO_Level3_Shift ] };
+        // The highest key with symbols, below the highest declared keycode.
+        key <TOPK> { [ z, Z ] };
+    };
+};

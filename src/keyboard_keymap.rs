@@ -410,6 +410,54 @@ pub(crate) fn validate_text_with_keymap(keymap: &[u8], text: &str) -> Result<()>
 mod tests {
     use super::*;
 
+    /// Per group, the sorted `0x<keysym> <level>` pairs of `first_levels`.
+    fn render_first_levels(groups: &[HashMap<u32, u32>]) -> String {
+        let mut out = String::new();
+        for (index, group) in groups.iter().enumerate() {
+            let mut pairs: Vec<_> = group.iter().collect();
+            pairs.sort();
+            out += &format!("group {}\n", index + 1);
+            for (keysym, level) in pairs {
+                out += &format!("0x{keysym:x} {level}\n");
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn first_levels_match_libxkbcommon_golden() {
+        // The goldens are libxkbcommon's output. fr and us-ru are serialized
+        // the way Mutter sends them; group-wrap covers per-key group wrap,
+        // clamp and redirect and a declared keycode above every key.
+        macro_rules! fixture {
+            ($name:literal) => {
+                (
+                    $name,
+                    include_bytes!(concat!("../tests/fixtures/keyboard-", $name, ".xkb"))
+                        .as_slice(),
+                    include_str!(concat!(
+                        "../tests/fixtures/keyboard-",
+                        $name,
+                        ".first-levels"
+                    )),
+                )
+            };
+        }
+        for (name, keymap, golden) in [
+            fixture!("us-de"),
+            fixture!("us-il"),
+            fixture!("fr"),
+            fixture!("us-ru"),
+            fixture!("group-wrap"),
+        ] {
+            let mut bytes = keymap.to_vec();
+            bytes.push(0);
+            let map = Keymap::parse(bytes).expect(name);
+            let groups = map.first_levels(Instant::now() + READ_TIMEOUT).unwrap();
+            assert_eq!(render_first_levels(&groups), golden, "{name}");
+        }
+    }
+
     #[test]
     fn real_xkb_fixture_rejects_dead_only_symbols_in_another_group() {
         let mut bytes = include_bytes!("../tests/fixtures/keyboard-us-de.xkb").to_vec();

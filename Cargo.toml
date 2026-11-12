@@ -17,8 +17,7 @@ categories = ["accessibility", "command-line-utilities", "os::linux-apis"]
 include = [
     "/src/**",
     "/tests/*.rs",
-    "/tests/fixtures/keyboard-us-de.xkb",
-    "/tests/fixtures/keyboard-us-il.xkb",
+    "/tests/fixtures/keyboard-*",
     "/examples/*.rs",
     "/gnome-shell-extension/**",
     "/scripts/app_state_capture_order_test.py",
