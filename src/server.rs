@@ -24124,3 +24124,7 @@ mod type_text_atspi_fallback_tests {
         }
     }
 }
+// NOTE (kbvm): Over HTTP we must never fall back to reading last_snapshot here.
+// Another client may have just replaced it. The scope must come from the
+// PostActionScope that was captured under the input lock during action
+// validation (see cached_scope_belongs_to_request + post_action_scope_for_capture).
