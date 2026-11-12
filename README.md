@@ -271,6 +271,7 @@ You will still need AT-SPI enabled (`computer-use-linux setup`) and one input ba
 
 Linux x86_64 / aarch64 builds are published with each tag. Each binary ships a `.sha256` next to it.
 The `-gnu` builds need glibc 2.28 or newer; the `-musl` builds (`target=x86_64-unknown-linux-musl`) are statically linked for musl distributions such as Alpine.
+A static binary cannot load `libxkbcommon`, so the `-musl` builds refuse `type_text` on GNOME Wayland, where the keymap preflight needs it; use a `-gnu` build there. Other desktops do not use that preflight.
 
 - Latest release: <https://github.com/agent-sh/computer-use-linux/releases/latest>
 

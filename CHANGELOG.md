@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Release builds for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`: statically linked binaries for musl distributions such as Alpine, which cannot load the glibc builds. The release job checks that each one has no dynamic loader or shared-library dependency.
+- Release builds for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`: statically linked binaries for musl distributions such as Alpine, which cannot load the glibc builds. A static binary cannot load `libxkbcommon`, so these builds refuse `type_text` on GNOME Wayland, and the error says to use a `-gnu` build there. A `musl build` CI job builds x86_64 musl on every change and checks it is static, and a failed musl release build no longer holds back crates.io, npm or the gnu assets.
 
 ### Fixed
 

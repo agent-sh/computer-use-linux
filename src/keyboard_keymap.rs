@@ -23,6 +23,12 @@ use xkbcommon_dl as xkb;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_KEYMAP_BYTES: u32 = 1024 * 1024;
+// A fully static musl binary cannot dlopen, so it never finds libxkbcommon.
+const XKB_UNAVAILABLE: &str = if cfg!(all(target_env = "musl", target_feature = "crt-static")) {
+    "this static musl build cannot load libxkbcommon, so it cannot verify literal text for GNOME; use the -gnu build on GNOME Wayland"
+} else {
+    "libxkbcommon is unavailable; cannot verify literal text"
+};
 
 pub(crate) async fn validate_gnome_text(text: &str, keysyms: &[i32]) -> Result<()> {
     if text.is_empty() {
@@ -236,8 +242,7 @@ struct Keymap {
 
 impl Keymap {
     fn parse(bytes: Vec<u8>) -> Result<Self> {
-        let api = xkb::xkbcommon_option()
-            .context("libxkbcommon is unavailable; cannot verify literal text")?;
+        let api = xkb::xkbcommon_option().context(XKB_UNAVAILABLE)?;
         let text = CString::from_vec_with_nul(bytes)
             .context("keyboard keymap has invalid string framing")?;
         // SAFETY: all calls use live objects and a NUL-terminated keymap. The
