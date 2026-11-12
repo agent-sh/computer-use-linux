@@ -261,6 +261,12 @@ jobs:
             asset: computer-use-linux-x86_64-unknown-linux-gnu
           - target: aarch64-unknown-linux-gnu
             asset: computer-use-linux-aarch64-unknown-linux-gnu
+          # Static builds for musl distributions such as Alpine, which cannot
+          # load the glibc builds.
+          - target: x86_64-unknown-linux-musl
+            asset: computer-use-linux-x86_64-unknown-linux-musl
+          - target: aarch64-unknown-linux-musl
+            asset: computer-use-linux-aarch64-unknown-linux-musl
     env:
       # glibc of RHEL 8 and its rebuilds, the oldest common distribution
       # still supported. Linking against the runner's glibc would raise the
@@ -280,8 +286,13 @@ jobs:
           "$RUNNER_TEMP/zig/bin/pip" install ziglang==0.17.0 cargo-zigbuild==0.24.0
           echo "$RUNNER_TEMP/zig/bin" >> "$GITHUB_PATH"
       - name: Build release binary
-        run: cargo zigbuild --locked --release --target ${{ matrix.target }}.${GLIBC_FLOOR}
+        run: |
+          target="${{ matrix.target }}"
+          # zigbuild pins the glibc version through a target suffix; musl has none.
+          case "$target" in *-gnu) target="$target.$GLIBC_FLOOR" ;; esac
+          cargo zigbuild --locked --release --target "$target"
       - name: Check glibc floor
+        if: endsWith(matrix.target, '-gnu')
         run: |
           for bin in computer-use-linux computer-use-linux-cosmic computer-use-linux-indicator; do
             path="target/${{ matrix.target }}/release/$bin"
@@ -291,6 +302,17 @@ jobs:
               echo "::error::$bin needs glibc $max, above the $GLIBC_FLOOR floor"
               exit 1
             fi
+          done
+      - name: Check static linking
+        if: endsWith(matrix.target, '-musl')
+        run: |
+          for bin in computer-use-linux computer-use-linux-cosmic computer-use-linux-indicator; do
+            path="target/${{ matrix.target }}/release/$bin"
+            if readelf -d "$path" | grep -q NEEDED || readelf -l "$path" | grep -q INTERP; then
+              echo "::error::$bin is not statically linked"
+              exit 1
+            fi
+            echo "$bin is statically linked"
           done
       - name: Stage artifact
         run: |

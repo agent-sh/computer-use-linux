@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Release builds for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`: statically linked binaries for musl distributions such as Alpine, which cannot load the glibc builds. The release job checks that each one has no dynamic loader or shared-library dependency.
+
 ### Fixed
 
 - The `mcp --listen` integration tests kill and reap their server when a test fails. A failed assertion used to leave the test's listener running after the test run ended.
