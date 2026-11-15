@@ -110,9 +110,8 @@ pub async fn activate_window(window_id: u64) -> Result<()> {
     }
 }
 
-/// Maps Umbriel's logical layout coordinates to capture pixels: the union of
-/// the enabled outputs, scaled by their shared scale. This is the space of a
-/// capture of every output.
+/// Maps Umbriel's logical layout coordinates to capture pixels: relative to
+/// the one enabled output, scaled by its scale.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct CaptureLayout {
     origin_x: i32,
@@ -184,17 +183,18 @@ fn parse_enabled_outputs(outputs_json: &[u8]) -> Option<Vec<EnabledOutput>> {
 }
 
 impl CaptureLayout {
-    /// The layout of outputs that share one scale. Mixed scales have no
-    /// uniform capture space, so bounds are left out, as on niri and Sway.
+    /// The capture space of a session with one enabled output. With several,
+    /// xdg-desktop-portal-umbriel captures one output, not their union, so
+    /// which pixels a window covers in the capture is unknown and bounds are
+    /// left out, as other backends do when the capture space is unknown.
     fn from_outputs(outputs: &[EnabledOutput]) -> Option<Self> {
-        let scale = outputs.first()?.scale;
-        if scale <= 0.0 || outputs.iter().any(|output| output.scale != scale) {
+        let [output] = outputs else {
             return None;
-        }
+        };
         Some(Self {
-            origin_x: outputs.iter().map(|output| output.x).min()?,
-            origin_y: outputs.iter().map(|output| output.y).min()?,
-            scale,
+            origin_x: output.x,
+            origin_y: output.y,
+            scale: output.scale,
         })
     }
 }
@@ -359,15 +359,15 @@ mod tests {
     const OUTPUTS: &str = r#"[
         {"name":"eDP-1","enabled":true,"position":{"x":0,"y":0},
          "logical_size":{"height":1000,"width":1600},"scale":1.7999999523162842,"transform":"180"},
-        {"name":"eDP-2","enabled":true,"position":{"x":0,"y":1000},
+        {"name":"eDP-2","enabled":false,"position":{"x":0,"y":1000},
          "logical_size":{"height":1000,"width":1600},"scale":1.7999999523162842,"transform":"normal"}
     ]"#;
 
     const WINDOWS: &str = r#"[
         {"active":true,"app_id":"Alacritty","focused":true,"h":964,
-         "id":"3d39ba759b7589ee3c98ddd21b65aeee","minimized":false,"output":"eDP-2",
-         "pid":134616,"title":"shell","visible":true,"w":772,"workspace":"eDP-2:4",
-         "x":810,"xwayland":false,"y":1018},
+         "id":"3d39ba759b7589ee3c98ddd21b65aeee","minimized":false,"output":"eDP-1",
+         "pid":134616,"title":"shell","visible":true,"w":772,"workspace":"eDP-1:4",
+         "x":810,"xwayland":false,"y":34},
         {"active":false,"app_id":"com.anthropic.Claude","focused":true,"h":976,
          "id":"2a7e463b56373a52dc59bd3271c705be","minimized":false,"output":"eDP-1",
          "pid":2537,"title":"Claude","visible":false,"w":1600,"workspace":"eDP-1:1",
@@ -391,13 +391,19 @@ mod tests {
     }
 
     #[test]
-    fn mixed_output_scales_leave_bounds_out() {
-        let mixed = OUTPUTS.replacen("1.7999999523162842", "1.0", 1);
-        assert!(parse_capture_layout(mixed.as_bytes()).is_none());
+    fn several_enabled_outputs_leave_bounds_out() {
+        // The portal captures one output of several, so the capture space of
+        // a window is unknown; listing and ids are unaffected.
+        let stacked = OUTPUTS.replace(r#""enabled":false"#, r#""enabled":true"#);
+        let layout = parse_capture_layout(stacked.as_bytes());
+        assert!(layout.is_none());
+        let (windows, _) = parse_windows(WINDOWS.as_bytes(), layout).unwrap();
+        assert_eq!(windows.len(), 2);
+        assert!(windows.iter().all(|window| window.bounds.is_none()));
     }
 
     #[test]
-    fn layout_rounds_the_float_scale_and_starts_at_the_union_origin() {
+    fn layout_rounds_the_float_scale_and_starts_at_the_output_origin() {
         let layout = parse_capture_layout(OUTPUTS.as_bytes()).unwrap();
         assert_eq!(
             layout,
@@ -430,7 +436,7 @@ mod tests {
         assert!(!shell.hidden);
         assert_eq!(shell.client_type.as_deref(), Some("wayland"));
         let bounds = shell.bounds.as_ref().unwrap();
-        assert_eq!((bounds.x, bounds.y), (Some(1458), Some(1832)));
+        assert_eq!((bounds.x, bounds.y), (Some(1458), Some(61)));
         assert_eq!((bounds.width, bounds.height), (1390, 1736));
 
         assert_eq!(
