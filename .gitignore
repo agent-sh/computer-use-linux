@@ -36,6 +36,7 @@ __pycache__/
 /npm/bin/computer-use-linux-darwin-*
 /npm/bin/computer-use-linux-win32-*
 /npm/bin/computer-use-linux-cosmic
+/npm/bin/computer-use-linux-indicator
 /.agent-shell/
 
 
