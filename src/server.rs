@@ -1337,10 +1337,31 @@ impl ComputerUseLinux {
             return Ok(false);
         }
         let desktop_size = self.desktop_size.lock().ok().and_then(|guard| *guard);
+        // A capture of one output of several keeps its size when another
+        // output turns on or off, so the cached device is also checked
+        // against where the capture now sits in the layout. This reads the
+        // layout from the compositor, so it runs before the lock is taken;
+        // a failed read keeps the device.
+        let has_pointer = self.abs_pointer.lock().is_ok_and(|guard| guard.is_some());
+        let current_placement = match desktop_size {
+            Some((width, height))
+                if has_pointer && crate::windowing::backends::umbriel::is_umbriel_session() =>
+            {
+                tokio::task::spawn_blocking(move || {
+                    crate::abs_pointer::detect_placement(width as i32, height as i32)
+                })
+                .await
+                .ok()
+                .and_then(Result::ok)
+            }
+            _ => None,
+        };
         let stale_size = match self.abs_pointer.lock() {
             Ok(mut guard) => match (guard.as_ref(), desktop_size) {
                 (Some(pointer), Some((width, height)))
-                    if !pointer.matches_dimensions(width as i32, height as i32) =>
+                    if !pointer.matches_dimensions(width as i32, height as i32)
+                        || current_placement
+                            .is_some_and(|placement| placement != pointer.placement()) =>
                 {
                     *guard = None;
                     Some((width, height))

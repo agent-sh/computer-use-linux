@@ -42,6 +42,7 @@ const RECORDED_COMMANDS: &[&str] = &[
     "cosmic-screenshot",
     "dbus-send",
     "dconf",
+    "dms",
     "gdbus",
     "gnome-extensions",
     "gnome-screenshot",
