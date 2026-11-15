@@ -37,6 +37,8 @@ __pycache__/
 /npm/bin/computer-use-linux-win32-*
 /npm/bin/computer-use-linux-cosmic
 /npm/bin/computer-use-linux-indicator
+# Staging copies npm/install.js leaves next to them when it is killed mid-copy
+/npm/bin/*.tmp-*
 /.agent-shell/
 
 
