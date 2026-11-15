@@ -358,6 +358,39 @@ test_enabled_gnome_extension_is_upgraded() (
     assert_contains "${output}" 'log out and back in' || return 1
 )
 
+test_extension_unpacks_beside_the_extensions_directory() (
+    # gnome-extensions install unpacks into XDG_CACHE_HOME and renames the
+    # result into place; a cache on another filesystem fails with EXDEV after
+    # the installed copy is gone. The installer must point it next to the
+    # extensions directory.
+    set --
+    export XDG_CURRENT_DESKTOP=GNOME XDG_SESSION_TYPE=wayland
+    local cache="${XDG_CACHE_HOME:-$HOME/.cache}"
+    mkdir -p "${cache}" || return 1
+    local data_home
+    data_home="$(mktemp -d "${cache}/cul-gnome-stage.XXXXXX")" || return 1
+    export XDG_DATA_HOME="${data_home}"
+    source "${INSTALLER}"
+    trap 'rm -rf -- "${XDG_DATA_HOME}"' EXIT
+    local extensions="${XDG_DATA_HOME}/gnome-shell/extensions"
+    local seen="${XDG_DATA_HOME}/seen-cache"
+    gnome-extensions() {
+        case "$1" in
+            list) return 0 ;;
+            pack) : >"bridge.shell-extension.zip" ;;
+            install) printf '%s\n' "${XDG_CACHE_HOME}" >"${seen}" ;;
+            enable) return 1 ;;
+        esac
+    }
+    install_gnome_extension >/dev/null || true
+    [[ -f "${seen}" ]] || return 1
+    local used
+    used="$(cat "${seen}")"
+    assert_eq "${used%/*}" "${extensions}" || return 1
+    # The staging directory is removed afterwards.
+    [[ ! -e "${used}" ]] || return 1
+)
+
 # Upgrades an enabled extension whose installed metadata.json is the source
 # file edited by the sed script $1, with extension.js unchanged, and prints
 # the installer's output.
@@ -441,6 +474,7 @@ run_test "doctor raw fallback accepts platform capability blockers" test_doctor_
 run_test "doctor raw fallback rejects missing install prerequisites" test_doctor_raw_fallback_rejects_missing_install_prerequisite
 
 run_test "enabled GNOME extension assets are upgraded" test_enabled_gnome_extension_is_upgraded
+run_test "GNOME extension unpacks beside the extensions directory" test_extension_unpacks_beside_the_extensions_directory
 run_test "a display metadata upgrade needs no new login" test_display_metadata_upgrade_needs_no_login
 run_test "a shell-version upgrade needs a new login" test_load_metadata_upgrade_needs_login
 run_test "a field beside a display field needs a new login" test_field_beside_display_field_needs_login

@@ -638,9 +638,18 @@ install_gnome_extension() {
     zipfile="$(find "${pack_dir}" -maxdepth 1 -name '*.shell-extension.zip' | head -n1)"
     [[ -f "${zipfile}" ]] || { log_fail "packed zip not produced"; rm -rf "${pack_dir}"; return 1; }
 
-    gnome-extensions install --force "${zipfile}" || { log_fail "gnome-extensions install failed"; rm -rf "${pack_dir}"; return 1; }
+    # gnome-extensions install unpacks into XDG_CACHE_HOME and renames the
+    # result into place after removing the installed copy. A cache on another
+    # filesystem fails that rename (EXDEV) and leaves no extension at all, so
+    # it unpacks next to the extensions directory instead.
+    local extensions_root="${extension_dir%/*}" stage_dir
+    mkdir -p "${extensions_root}" &&
+        stage_dir="$(mktemp -d "${extensions_root}/.${EXT_UUID}.stage.XXXXXX")" ||
+        { log_fail "could not create a staging directory in ${extensions_root}"; rm -rf "${pack_dir}"; return 1; }
+    XDG_CACHE_HOME="${stage_dir}" gnome-extensions install --force "${zipfile}" ||
+        { log_fail "gnome-extensions install failed"; rm -rf "${pack_dir}" "${stage_dir}"; return 1; }
     log_ok "extension installed (${zipfile##*/})"
-    rm -rf "${pack_dir}"
+    rm -rf "${pack_dir}" "${stage_dir}"
 
     if [[ ${was_enabled} -eq 1 ]]; then
         log_ok "enabled extension assets updated"

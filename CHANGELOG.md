@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `install.sh` no longer removes the GNOME Shell extension when `XDG_CACHE_HOME` is on a different filesystem from `~/.local/share`. `gnome-extensions install` unpacks into the cache directory and renames the result into place after deleting the installed copy, so the rename failed with a cross-device error and left no extension. The installer now unpacks next to the extensions directory.
+
 ## [0.7.54] - 2026-11-15
 
 ### Added
