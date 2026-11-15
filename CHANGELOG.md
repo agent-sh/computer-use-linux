@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Umbriel window backend: `list_windows`, `focused_window` and exact `activate_window` through the `umbriel` CLI (`umbriel windows --json`, `umbriel msg window-focus`), with pids, workspaces and bounds in capture pixels. It answers ahead of the generic wlr-foreign-toplevel backend, which reports neither pids nor bounds. The server takes `UMBRIEL_SOCKET` from the session's environment when the MCP host did not pass it, and Pi and Codex pass it.
+
 ## [0.7.53] - 2026-11-12
 
 ### Added

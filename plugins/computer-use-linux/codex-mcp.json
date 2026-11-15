@@ -21,6 +21,7 @@
         "NIX_LD_LIBRARY_PATH",
         "RUST_LOG",
         "SWAYSOCK",
+        "UMBRIEL_SOCKET",
         "WAYLAND_DISPLAY",
         "XAUTHORITY",
         "XDG_CACHE_HOME",

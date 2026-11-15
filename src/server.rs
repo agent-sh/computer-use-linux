@@ -12442,6 +12442,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             for key in [
                 "DESKTOP_SESSION",
                 "HYPRLAND_INSTANCE_SIGNATURE",
+                "UMBRIEL_SOCKET",
                 "XAUTHORITY",
                 "XDG_SESSION_DESKTOP",
                 "XDG_CURRENT_DESKTOP",
@@ -14089,6 +14090,7 @@ esac
         for key in [
             "DESKTOP_SESSION",
             "HYPRLAND_INSTANCE_SIGNATURE",
+            "UMBRIEL_SOCKET",
             "XAUTHORITY",
             "XDG_SESSION_DESKTOP",
             "XDG_CURRENT_DESKTOP",
@@ -18527,6 +18529,7 @@ printf '0x00000007 0 %s 0 0 100 100 first.First host Target 7\n0x00000008 0 %s 0
             "DESKTOP_SESSION",
             "HYPRLAND_INSTANCE_SIGNATURE",
             "NIRI_SOCKET",
+            "UMBRIEL_SOCKET",
             "XAUTHORITY",
             "YDOTOOL_SOCKET",
             "XDG_SESSION_DESKTOP",
@@ -21797,6 +21800,7 @@ echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
         for key in [
             "DESKTOP_SESSION",
             "HYPRLAND_INSTANCE_SIGNATURE",
+            "UMBRIEL_SOCKET",
             "XAUTHORITY",
             "XDG_SESSION_DESKTOP",
             "XDG_CURRENT_DESKTOP",
@@ -22670,6 +22674,7 @@ exit 1
         for key in [
             "DESKTOP_SESSION",
             "HYPRLAND_INSTANCE_SIGNATURE",
+            "UMBRIEL_SOCKET",
             "XAUTHORITY",
             "XDG_SESSION_DESKTOP",
             "XDG_CURRENT_DESKTOP",
