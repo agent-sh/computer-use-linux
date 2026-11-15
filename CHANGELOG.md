@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.54] - 2026-11-15
+
 ### Added
 
-- Umbriel window backend: `list_windows`, `focused_window` and exact `activate_window` through the `umbriel` CLI (`umbriel windows --json`, `umbriel msg window-focus`), with pids, workspaces and, with one enabled output, bounds in capture pixels. It answers ahead of the generic wlr-foreign-toplevel backend, which reports neither pids nor bounds. The server takes `UMBRIEL_SOCKET` from the session's environment when the MCP host did not pass it, and Pi and Codex pass it.
+- Umbriel window backend: `list_windows`, `focused_window` and exact `activate_window` through the `umbriel` CLI (`umbriel windows --json`, `umbriel msg window-focus`), with pids, workspaces and, with one enabled output, bounds in capture pixels. It answers ahead of the generic wlr-foreign-toplevel backend, which reports neither pids nor bounds. The server takes `UMBRIEL_SOCKET` from the session's environment when the MCP host did not pass it, and Pi and Codex pass it. Thanks to [@christiantwu](https://github.com/christiantwu) ([#467](https://github.com/agent-sh/computer-use-linux/pull/467)).
 
 ## [0.7.53] - 2026-11-12
 
@@ -1209,7 +1211,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.53...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.54...HEAD
+[0.7.54]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.53...v0.7.54
 [0.7.53]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.52...v0.7.53
 [0.7.52]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.51...v0.7.52
 [0.7.51]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.50...v0.7.51
