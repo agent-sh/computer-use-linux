@@ -10121,11 +10121,14 @@ type MonitorEdges = (i64, i64, i64, i64);
 fn monitors_in_reading_order(monitors: &[MonitorEdges]) -> Vec<MonitorEdges> {
     let mut by_top = monitors.to_vec();
     by_top.sort_by_key(|&(left, top, _, _)| (top, left));
-    // Each row with the lowest bottom edge of its monitors.
+    // Each row with the lowest bottom edge of its monitors. A monitor joins
+    // the row when it overlaps it by more than 1 px: `monitor_rects_in_capture`
+    // rounds edges outward, so stacked monitors on a scaled capture can share
+    // 1 px at their common edge.
     let mut rows: Vec<(i64, Vec<MonitorEdges>)> = Vec::new();
     for monitor in by_top {
         match rows.last_mut() {
-            Some((row_bottom, row)) if monitor.1 < *row_bottom => {
+            Some((row_bottom, row)) if monitor.1 + 1 < *row_bottom => {
                 *row_bottom = (*row_bottom).max(monitor.3);
                 row.push(monitor);
             }
@@ -16643,6 +16646,33 @@ esac
         assert_eq!(
             monitor_crop_rect(&mixed, 0, (4480, 1440)),
             Ok((0, 360, 1920, 1080))
+        );
+
+        // A 2x2 grid of 2560x1440 monitors at 105%: outward rounding gives
+        // the top row a bottom edge 1 px below the bottom row's top, and the
+        // rows must stay apart.
+        let grid = monitor_rects_in_capture(
+            &[
+                (0, 0, 2438, 1371),
+                (2438, 0, 2438, 1371),
+                (0, 1371, 2438, 1371),
+                (2438, 1371, 2438, 1371),
+            ],
+            (5120, 2880),
+        )
+        .unwrap();
+        assert!(
+            grid.iter().any(|&(_, top, _, _)| top == 1439)
+                && grid.iter().any(|&(_, _, _, bottom)| bottom == 1440),
+            "{grid:?}"
+        );
+        assert_eq!(
+            monitor_crop_rect(&grid, 1, (5120, 2880)),
+            Ok((2560, 0, 2560, 1440))
+        );
+        assert_eq!(
+            monitor_crop_rect(&grid, 2, (5120, 2880)).map(|rect| (rect.0, rect.1)),
+            Ok((0, 1439))
         );
 
         // Stacked monitors go top to bottom; an edge rounded past the
