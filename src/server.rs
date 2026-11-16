@@ -1341,9 +1341,10 @@ impl ComputerUseLinux {
         // output turns on or off, so the cached device is also checked
         // against where the capture now sits in the layout. This reads the
         // layout from the compositor, so it runs before the lock is taken;
-        // a failed read keeps the device.
+        // a failed read keeps the device. A capture that can no longer be
+        // placed drops the device, and the other pointer routes are tried.
         let has_pointer = self.abs_pointer.lock().is_ok_and(|guard| guard.is_some());
-        let current_placement = match desktop_size {
+        let current_fit = match desktop_size {
             Some((width, height))
                 if has_pointer && crate::windowing::backends::umbriel::is_umbriel_session() =>
             {
@@ -1355,6 +1356,17 @@ impl ComputerUseLinux {
                 .and_then(Result::ok)
             }
             _ => None,
+        };
+        let current_placement = match current_fit {
+            Some(crate::abs_pointer::CaptureFit::Unsupported(_)) => {
+                if let Ok(mut guard) = self.abs_pointer.lock() {
+                    *guard = None;
+                }
+                return Ok(false);
+            }
+            Some(crate::abs_pointer::CaptureFit::Placed(placement)) => Some(Some(placement)),
+            Some(crate::abs_pointer::CaptureFit::WholeLayout) => Some(None),
+            None => None,
         };
         let stale_size = match self.abs_pointer.lock() {
             Ok(mut guard) => match (guard.as_ref(), desktop_size) {
@@ -6702,6 +6714,23 @@ impl ComputerUseLinux {
         capture_width: u32,
         capture_height: u32,
     ) -> Result<WindowCoordinateMap> {
+        // The target was resolved before this capture was taken. Umbriel's
+        // bounds depend on what the capture covers, so they are read again
+        // for the frame in hand: bounds for another capture space are never
+        // applied to it.
+        let relisted;
+        let window = if window.backend == crate::windowing::backends::umbriel::UMBRIEL_BACKEND {
+            relisted = crate::windowing::backends::umbriel::window_for_capture(
+                window,
+                capture_width,
+                capture_height,
+            )
+            .await
+            .context("could not read the target window's bounds for this capture")?;
+            &relisted
+        } else {
+            window
+        };
         let bounds = window.bounds.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "targeted screenshot requires window bounds; refusing to return the full desktop"
@@ -6778,6 +6807,25 @@ impl ComputerUseLinux {
             .focused_window
             .as_ref()
             .unwrap_or(&focus.requested_window);
+        // Umbriel's bounds depend on what the capture covers: read them for
+        // the capture the caller's coordinates come from.
+        let relisted;
+        let window = match self.desktop_size.lock().ok().and_then(|guard| *guard) {
+            Some((width, height))
+                if window.backend == crate::windowing::backends::umbriel::UMBRIEL_BACKEND =>
+            {
+                relisted =
+                    crate::windowing::backends::umbriel::window_for_capture(window, width, height)
+                        .await
+                        .map_err(|error| {
+                            format!(
+                        "Could not read target-window bounds for the current capture: {error:#}"
+                    )
+                        })?;
+                &relisted
+            }
+            _ => window,
+        };
         if !matches!(
             window.backend.as_str(),
             GNOME_SHELL_EXTENSION_BACKEND

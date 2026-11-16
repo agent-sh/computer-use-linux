@@ -51,14 +51,28 @@ pub(crate) struct CapturePlacement {
     pub(crate) offset_y: i32,
 }
 
-/// The placement of a `width`×`height` capture: `Ok(None)` when the capture
-/// covers the whole layout (the usual case), an error when the layout could
-/// not be read. May run a compositor CLI, so call it off the async runtime.
-pub(crate) fn detect_placement(width: i32, height: i32) -> Result<Option<CapturePlacement>> {
+/// How a capture relates to the layout the compositor maps an absolute
+/// device across.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CaptureFit {
+    /// The capture covers the whole layout (the usual case): the device is
+    /// sized to the capture.
+    WholeLayout,
+    /// The capture is one output of several, at a known place.
+    Placed(CapturePlacement),
+    /// The capture matches neither the layout nor a known output. A device
+    /// sized to it would scale every point, so none may be created.
+    Unsupported(String),
+}
+
+/// How a `width`×`height` capture fits the output layout; an error when the
+/// layout could not be read. May run a compositor CLI, so call it off the
+/// async runtime.
+pub(crate) fn detect_placement(width: i32, height: i32) -> Result<CaptureFit> {
     if cfg!(test) {
-        return Ok(None);
+        return Ok(CaptureFit::WholeLayout);
     }
-    crate::windowing::backends::umbriel::capture_placement(width, height)
+    crate::windowing::backends::umbriel::capture_fit(width, height)
 }
 
 /// The buttons, wheel axes and properties the device declares next to its
@@ -156,10 +170,17 @@ impl AbsPointer {
             anyhow::bail!("unit tests do not create real uinput devices");
         }
         let geometry = AbsPointerGeometry::from_dimensions(width, height);
-        // An unknown layout fails the device: sized to one output of
-        // several, it would scale every point.
-        let placement = detect_placement(width, height)
-            .context("failed to read the output layout for the absolute pointer")?;
+        // An unreadable layout or an unplaceable capture fails the device:
+        // sized to one output of several, it would scale every point.
+        let placement = match detect_placement(width, height)
+            .context("failed to read the output layout for the absolute pointer")?
+        {
+            CaptureFit::WholeLayout => None,
+            CaptureFit::Placed(placement) => Some(placement),
+            CaptureFit::Unsupported(reason) => {
+                anyhow::bail!("the capture cannot be placed in the output layout: {reason}")
+            }
+        };
         // The axis range covers what the compositor maps the device across:
         // the capture, or the whole layout when the capture is one output.
         let (max_x, max_y) = match placement {

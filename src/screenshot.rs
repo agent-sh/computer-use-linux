@@ -344,20 +344,41 @@ pub(crate) fn last_capture_size() -> Option<(u32, u32)> {
 }
 
 /// Whether the next capture on an Umbriel session is expected to cover every
-/// output: no other backend is forced or configured ahead of it, and `dms` is
-/// on `PATH`. A guess for before the first capture; `last_capture_size` is
-/// the fact afterwards.
+/// output, in the order `capture_screenshot_raw` picks a route: a forced
+/// backend decides alone, then Pixelflux when configured, then `dms` when it
+/// is on `PATH`. A guess for before the first capture; `last_capture_size`
+/// is the fact afterwards.
 pub(crate) fn all_outputs_capture_expected() -> bool {
-    if cfg!(test) || crate::pixelflux::PixelfluxConfig::from_env().is_some() {
+    if cfg!(test) {
         return false;
     }
-    matches!(forced_backend(), Ok(None | Some(ScreenshotBackend::Dms)))
-        && std::env::var_os("PATH").is_some_and(|path| {
-            std::env::split_paths(&path).any(|dir| {
-                fs::metadata(dir.join("dms"))
-                    .is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o111 != 0)
-            })
+    all_outputs_route_expected(
+        forced_backend(),
+        crate::pixelflux::PixelfluxConfig::from_env().is_some(),
+        dms_on_path(),
+    )
+}
+
+fn all_outputs_route_expected(
+    forced: Result<Option<ScreenshotBackend>>,
+    pixelflux_configured: bool,
+    dms_on_path: bool,
+) -> bool {
+    match forced {
+        Ok(Some(ScreenshotBackend::Dms)) => dms_on_path,
+        Ok(Some(_)) | Err(_) => false,
+        Ok(None) => !pixelflux_configured && dms_on_path,
+    }
+}
+
+/// Whether an executable `dms` is on `PATH`.
+pub(crate) fn dms_on_path() -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| {
+            fs::metadata(dir.join("dms"))
+                .is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o111 != 0)
         })
+    })
 }
 
 pub async fn capture_screenshot_raw() -> Result<RawScreenshotCapture> {
@@ -746,6 +767,8 @@ async fn capture_with_dms() -> Result<RawScreenshotCapture> {
             "--filename",
             filename,
         ])
+        // A cancelled request drops the wait below before its kill runs.
+        .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -1281,6 +1304,35 @@ mod tests {
             Some(ScreenshotBackend::X11)
         );
         assert_eq!(ScreenshotBackend::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn a_forced_backend_decides_the_all_outputs_route_ahead_of_pixelflux() {
+        let forced = |backend| Ok(Some(backend));
+        // Forced dms wins over a configured Pixelflux, as in the capture chain.
+        assert!(all_outputs_route_expected(
+            forced(ScreenshotBackend::Dms),
+            true,
+            true
+        ));
+        assert!(!all_outputs_route_expected(
+            forced(ScreenshotBackend::Dms),
+            false,
+            false
+        ));
+        assert!(!all_outputs_route_expected(
+            forced(ScreenshotBackend::Portal),
+            false,
+            true
+        ));
+        // Unforced: Pixelflux is tried first.
+        assert!(!all_outputs_route_expected(Ok(None), true, true));
+        assert!(all_outputs_route_expected(Ok(None), false, true));
+        assert!(!all_outputs_route_expected(
+            Err(anyhow!("bad")),
+            false,
+            true
+        ));
     }
 
     #[test]
