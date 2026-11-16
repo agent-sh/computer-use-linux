@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.54";
-export const GENERATED_TOOL_CATALOG_HASH = "9fe9b45f890c274c8c0c3a08632bd01939ab29f382a0f69421c49b1ecf11a830";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "6919a3efe7d0dc8b318662b7420b13f8fdfcd0871fa53f36de8d14a0ff52efeb";
+export const GENERATED_TOOL_CATALOG_HASH = "f47dae31bbbba7640dc082d46a17bbf971947229891e7095a56a68fad91d81ba";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "5800fe7922c4dec6d5f77c7641d328a8065254c8890240adbcec8ae41b281db7";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -1708,7 +1708,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize; outside Hyprland background mode, a target without known bounds is refused, so pass full_screen=true there. Pass monitor (a 0-based index, top to bottom then left to right) instead to capture one monitor at its own resolution, so a wide multi-monitor span is not shrunk to fit max_width; the caption then adds monitor, monitor_count, monitor_x and monitor_y, the monitor's origin in full-desktop click coordinates. Returns the image plus a JSON caption with returned and coordinate dimensions, scale, format, quality, source, cropped_to_window, and window_title. The crop origin is not reported; use relative=true on click or scroll for window-relative input. Callers can request jpeg/quality for compression before resizing. Pass screenshot_file_path (an absolute path to a new file, stdio only; an existing path is refused) to save the image there instead: the result is then only the caption, with file_path.",
+    "description": "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize; outside Hyprland background mode, a target without known bounds is refused, so pass full_screen=true there. Pass monitor (a 0-based index in reading order: rows of monitors top to bottom, each row left to right) instead to capture one monitor at its own resolution, so a wide multi-monitor span is not shrunk to fit max_width; the caption then adds monitor, monitor_count, monitor_x and monitor_y, the monitor's origin in full-desktop click coordinates. Returns the image plus a JSON caption with returned and coordinate dimensions, scale, format, quality, source, cropped_to_window, and window_title. The crop origin is not reported; use relative=true on click or scroll for window-relative input. Callers can request jpeg/quality for compression before resizing. Pass screenshot_file_path (an absolute path to a new file, stdio only; an existing path is refused) to save the image there instead: the result is then only the caption, with file_path.",
     "inputSchema": {
       "$defs": {
         "ScreenshotOutputFormat": {
@@ -1778,7 +1778,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "monitor": {
           "default": null,
-          "description": "Capture one monitor: its 0-based index, with monitors ordered top to\nbottom, then left to right. The desktop is captured and cropped to\nthat monitor before any resize, so a multi-monitor span is not shrunk\nto fit max_width. The caption reports monitor, monitor_count,\nmonitor_x and monitor_y, the monitor's origin in full-desktop\ncoordinates: image pixel (px, py) is click x = monitor_x + px / scale,\ny = monitor_y + py / scale. Not combined with a window target. Refused\nwhen the monitor layout cannot be read.",
+          "description": "Capture one monitor: its 0-based index in reading order. Monitors\nwhose vertical ranges overlap form a row; rows go top to bottom and\neach row left to right, so side-by-side monitors are numbered left to\nright even when they are not top-aligned. The desktop is captured and cropped to\nthat monitor before any resize, so a multi-monitor span is not shrunk\nto fit max_width. The caption reports monitor, monitor_count,\nmonitor_x and monitor_y, the monitor's origin in full-desktop\ncoordinates: image pixel (px, py) is click x = monitor_x + px / scale,\ny = monitor_y + py / scale. Not combined with a window target. Refused\nwhen the monitor layout cannot be read.",
           "minimum": 0,
           "type": [
             "integer",

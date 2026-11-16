@@ -1081,7 +1081,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "screenshot",
-        description = "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize; outside Hyprland background mode, a target without known bounds is refused, so pass full_screen=true there. Pass monitor (a 0-based index, top to bottom then left to right) instead to capture one monitor at its own resolution, so a wide multi-monitor span is not shrunk to fit max_width; the caption then adds monitor, monitor_count, monitor_x and monitor_y, the monitor's origin in full-desktop click coordinates. Returns the image plus a JSON caption with returned and coordinate dimensions, scale, format, quality, source, cropped_to_window, and window_title. The crop origin is not reported; use relative=true on click or scroll for window-relative input. Callers can request jpeg/quality for compression before resizing. Pass screenshot_file_path (an absolute path to a new file, stdio only; an existing path is refused) to save the image there instead: the result is then only the caption, with file_path.",
+        description = "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize; outside Hyprland background mode, a target without known bounds is refused, so pass full_screen=true there. Pass monitor (a 0-based index in reading order: rows of monitors top to bottom, each row left to right) instead to capture one monitor at its own resolution, so a wide multi-monitor span is not shrunk to fit max_width; the caption then adds monitor, monitor_count, monitor_x and monitor_y, the monitor's origin in full-desktop click coordinates. Returns the image plus a JSON caption with returned and coordinate dimensions, scale, format, quality, source, cropped_to_window, and window_title. The crop origin is not reported; use relative=true on click or scroll for window-relative input. Callers can request jpeg/quality for compression before resizing. Pass screenshot_file_path (an absolute path to a new file, stdio only; an existing path is refused) to save the image there instead: the result is then only the caption, with file_path.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -4586,8 +4586,10 @@ struct ScreenshotParams {
     /// Capture the whole desktop even when a window is targeted (default false).
     #[serde(default)]
     full_screen: Option<bool>,
-    /// Capture one monitor: its 0-based index, with monitors ordered top to
-    /// bottom, then left to right. The desktop is captured and cropped to
+    /// Capture one monitor: its 0-based index in reading order. Monitors
+    /// whose vertical ranges overlap form a row; rows go top to bottom and
+    /// each row left to right, so side-by-side monitors are numbered left to
+    /// right even when they are not top-aligned. The desktop is captured and cropped to
     /// that monitor before any resize, so a multi-monitor span is not shrunk
     /// to fit max_width. The caption reports monitor, monitor_count,
     /// monitor_x and monitor_y, the monitor's origin in full-desktop
@@ -10108,17 +10110,46 @@ fn root_monitor_rects(monitors: &[(i32, i32, i32, i32)]) -> Option<Vec<(i64, i64
     )
 }
 
+/// A monitor's (left, top, right, bottom) edges in capture pixels.
+type MonitorEdges = (i64, i64, i64, i64);
+
+/// Monitor rectangles in reading order: monitors
+/// whose vertical ranges overlap form a row, rows go top to bottom and each
+/// row left to right. A row of monitors that are not top-aligned, such as a
+/// laptop panel bottom-aligned beside a taller external display, is still
+/// numbered left to right.
+fn monitors_in_reading_order(monitors: &[MonitorEdges]) -> Vec<MonitorEdges> {
+    let mut by_top = monitors.to_vec();
+    by_top.sort_by_key(|&(left, top, _, _)| (top, left));
+    // Each row with the lowest bottom edge of its monitors.
+    let mut rows: Vec<(i64, Vec<MonitorEdges>)> = Vec::new();
+    for monitor in by_top {
+        match rows.last_mut() {
+            Some((row_bottom, row)) if monitor.1 < *row_bottom => {
+                *row_bottom = (*row_bottom).max(monitor.3);
+                row.push(monitor);
+            }
+            _ => rows.push((monitor.3, vec![monitor])),
+        }
+    }
+    rows.into_iter()
+        .flat_map(|(_, mut row)| {
+            row.sort_by_key(|&(left, top, _, _)| (left, top));
+            row
+        })
+        .collect()
+}
+
 /// Monitor `index` of a capture, as a crop rectangle (x, y, width, height)
 /// clipped to the capture. `monitors` are (left, top, right, bottom) capture
-/// pixels; they are numbered top to bottom, then left to right, so the order
-/// does not depend on how the compositor lists them.
+/// pixels; they are numbered in reading order (`monitors_in_reading_order`),
+/// so the order does not depend on how the compositor lists them.
 fn monitor_crop_rect(
     monitors: &[(i64, i64, i64, i64)],
     index: u32,
     (capture_width, capture_height): (u32, u32),
 ) -> std::result::Result<(i32, i32, u32, u32), String> {
-    let mut ordered = monitors.to_vec();
-    ordered.sort_by_key(|&(left, top, _, _)| (top, left));
+    let ordered = monitors_in_reading_order(monitors);
     let count = ordered.len();
     let &(left, top, right, bottom) = usize::try_from(index)
         .ok()
@@ -16595,6 +16626,24 @@ esac
         );
         let error = monitor_crop_rect(&span, 3, (5760, 1080)).unwrap_err();
         assert!(error.contains("has 3 (0 to 2)"), "{error}");
+
+        // A row that is not top-aligned is still numbered left to right: a
+        // middle monitor 1 px lower, and a 1080p panel bottom-aligned left of
+        // a 1440p display.
+        let offset = [
+            (0, 0, 1920, 1080),
+            (1920, 1, 3840, 1081),
+            (3840, 0, 5760, 1080),
+        ];
+        assert_eq!(
+            monitor_crop_rect(&offset, 1, (5760, 1081)),
+            Ok((1920, 1, 1920, 1080))
+        );
+        let mixed = [(0, 360, 1920, 1440), (1920, 0, 4480, 1440)];
+        assert_eq!(
+            monitor_crop_rect(&mixed, 0, (4480, 1440)),
+            Ok((0, 360, 1920, 1080))
+        );
 
         // Stacked monitors go top to bottom; an edge rounded past the
         // capture is clipped to it.
