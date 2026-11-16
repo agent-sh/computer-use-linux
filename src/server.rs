@@ -6808,23 +6808,28 @@ impl ComputerUseLinux {
             .as_ref()
             .unwrap_or(&focus.requested_window);
         // Umbriel's bounds depend on what the capture covers: read them for
-        // the capture the caller's coordinates come from.
+        // the capture the caller's coordinates come from. Before the first
+        // capture of a session there is none yet, and the pointer's own
+        // capture comes after this mapping, so one is taken here instead of
+        // trusting bounds that only assume what the capture will cover.
         let relisted;
-        let window = match self.desktop_size.lock().ok().and_then(|guard| *guard) {
-            Some((width, height))
-                if window.backend == crate::windowing::backends::umbriel::UMBRIEL_BACKEND =>
-            {
-                relisted =
-                    crate::windowing::backends::umbriel::window_for_capture(window, width, height)
-                        .await
-                        .map_err(|error| {
-                            format!(
-                        "Could not read target-window bounds for the current capture: {error:#}"
-                    )
-                        })?;
-                &relisted
-            }
-            _ => window,
+        let window = if window.backend == crate::windowing::backends::umbriel::UMBRIEL_BACKEND {
+            let (_, _, width, height) = self.capture_space_rect().await.ok_or_else(|| {
+                "Could not determine screenshot dimensions for window-relative coordinates."
+                    .to_string()
+            })?;
+            let listed = crate::windowing::backends::umbriel::window_for_capture(
+                window,
+                width as u32,
+                height as u32,
+            )
+            .await;
+            relisted = listed.map_err(|error| {
+                format!("Could not read target-window bounds for this capture: {error:#}")
+            })?;
+            &relisted
+        } else {
+            window
         };
         if !matches!(
             window.backend.as_str(),
