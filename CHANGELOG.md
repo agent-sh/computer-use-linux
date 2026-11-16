@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.55] - 2026-11-16
+
 ### Added
 
 - `screenshot` takes `monitor`, a 0-based index in reading order (monitors whose vertical ranges overlap form a row; rows go top to bottom and each row left to right, so side-by-side monitors that are not top-aligned are still numbered left to right), and captures that one monitor at its own resolution instead of shrinking the whole multi-monitor span to fit `max_width`. The caption adds `monitor`, `monitor_count`, `monitor_x` and `monitor_y`, the monitor's origin in full-desktop coordinates, so a pixel in the image maps to a click at `monitor_x + px / scale`. It is refused with a window target, and when the monitor layout of the capture cannot be read. Reported by [@imrightguy](https://github.com/imrightguy) ([#473](https://github.com/agent-sh/computer-use-linux/issues/473)).
@@ -1219,7 +1221,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.54...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.55...HEAD
+[0.7.55]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.54...v0.7.55
 [0.7.54]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.53...v0.7.54
 [0.7.53]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.52...v0.7.53
 [0.7.52]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.51...v0.7.52
