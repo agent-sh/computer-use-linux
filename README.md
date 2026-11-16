@@ -69,7 +69,7 @@ The crate was extracted from [`codex-desktop-linux`](https://github.com/avifenes
 | | `setup_window_targeting` | Installs and enables the bundled GNOME Shell extension. GNOME Wayland needs it for exact window activation and move/resize; every GNOME session needs it for the on-screen indicator. |
 | **Discovery & observation** | `get_app_state` | Combined screenshot + compacted AT-SPI accessibility tree with stable `element_index` handles. Scope with `app_name_or_bundle_identifier` or a window target (`window_id`, `pid`, `app_id`, `wm_class`, `title`). |
 | | `get_tree_page` | Page through the latest cached tree by node offset, for trees too large to return inline when the host cannot read the spill file. Pass `snapshot_id` to refuse a page from a tree a later snapshot replaced. |
-| | `screenshot` | Bounded PNG or JPEG capture of the full desktop (`full_screen: true` or no target) or a raised and cropped target window (`window_id`, `pid`, `app_id`, `wm_class`, `title`, `raise_window`). |
+| | `screenshot` | Bounded PNG or JPEG capture of the full desktop (`full_screen: true` or no target), a raised and cropped target window (`window_id`, `pid`, `app_id`, `wm_class`, `title`, `raise_window`), or one monitor (`monitor`, a 0-based index in reading order: rows of monitors top to bottom, each row left to right) at its own resolution, with its origin in the caption for click coordinates. |
 | | `list_windows` | Compositor windows with `window_id`, title, `app_id`, `wm_class`, PID, focus state, client type (`wayland`/`x11`), bounds, and terminal TTY/process metadata. |
 | | `focused_window` | The window currently holding keyboard focus. |
 | | `list_apps` | Running desktop applications visible to the AT-SPI registry. |

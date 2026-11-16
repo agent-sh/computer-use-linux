@@ -1081,7 +1081,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "screenshot",
-        description = "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize; outside Hyprland background mode, a target without known bounds is refused, so pass full_screen=true there. Returns the image plus a JSON caption with returned and coordinate dimensions, scale, format, quality, source, cropped_to_window, and window_title. The crop origin is not reported; use relative=true on click or scroll for window-relative input. Callers can request jpeg/quality for compression before resizing. Pass screenshot_file_path (an absolute path to a new file, stdio only; an existing path is refused) to save the image there instead: the result is then only the caption, with file_path.",
+        description = "Capture the screen and return it as a viewable, size-bounded image. Optionally target a window (window_id/pid/wm_class/title/app_id): the window is raised to the front and the image is cropped before any resize; outside Hyprland background mode, a target without known bounds is refused, so pass full_screen=true there. Pass monitor (a 0-based index in reading order: rows of monitors top to bottom, each row left to right) instead to capture one monitor at its own resolution, so a wide multi-monitor span is not shrunk to fit max_width; the caption then adds monitor, monitor_count, monitor_x and monitor_y, the monitor's origin in full-desktop click coordinates. Returns the image plus a JSON caption with returned and coordinate dimensions, scale, format, quality, source, cropped_to_window, and window_title. The crop origin is not reported; use relative=true on click or scroll for window-relative input. Callers can request jpeg/quality for compression before resizing. Pass screenshot_file_path (an absolute path to a new file, stdio only; an existing path is refused) to save the image there instead: the result is then only the caption, with file_path.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1182,8 +1182,13 @@ impl ComputerUseLinux {
                 self.http_transport,
             )?;
         }
-        let _pipeline = crate::screenshot_impl::screenshot_pipeline_permit().await?;
         let target = params.window_target();
+        if params.monitor.is_some() && target.is_some() {
+            anyhow::bail!(
+                "screenshot takes a monitor or a window target, not both; pass monitor alone to capture one monitor"
+            );
+        }
+        let _pipeline = crate::screenshot_impl::screenshot_pipeline_permit().await?;
         if let (Some(target), false) = (target.as_ref(), params.full_screen.unwrap_or(false)) {
             if let Some(result) = self.hyprland_background_screenshot(target, &params).await {
                 return result;
@@ -1220,17 +1225,41 @@ impl ComputerUseLinux {
             None => None,
         };
 
-        let (capture, cropped) = match crop_window {
-            Some(window) => {
-                let (x, y, width, height) = self
-                    .window_crop_rect_for_capture(window, &raw_capture)
+        let monitor_crop = match params.monitor {
+            Some(index) => {
+                let rects = self
+                    .capture_monitor_rects((raw_capture.width, raw_capture.height))
                     .await
-                    .context("targeted screenshot crop failed")?;
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "monitor screenshot failed: the monitor layout of this capture is unknown; capture the full desktop instead"
+                        )
+                    })?;
+                let count = rects.len();
+                let rect =
+                    monitor_crop_rect(&rects, index, (raw_capture.width, raw_capture.height))
+                        .map_err(|error| anyhow::anyhow!("monitor screenshot failed: {error}"))?;
+                Some((index, count, rect))
+            }
+            None => None,
+        };
+
+        let crop_rect = match (crop_window, monitor_crop) {
+            (Some(window), _) => Some(
+                self.window_crop_rect_for_capture(window, &raw_capture)
+                    .await
+                    .context("targeted screenshot crop failed")?,
+            ),
+            (None, Some((_, _, rect))) => Some(rect),
+            (None, None) => None,
+        };
+        let (capture, cropped) = match crop_rect {
+            Some((x, y, width, height)) => {
                 let (raw_capture, bytes, width, height) =
                     crate::screenshot_impl::run_image_task(move || {
                         let (bytes, width, height) =
                             crop_png(&raw_capture.bytes, x, y, width, height).map_err(|error| {
-                                anyhow::anyhow!("targeted screenshot crop failed: {error}")
+                                anyhow::anyhow!("screenshot crop failed: {error}")
                             })?;
                         Ok((raw_capture, bytes, width, height))
                     })
@@ -1243,7 +1272,7 @@ impl ComputerUseLinux {
                         width,
                         height,
                     },
-                    true,
+                    crop_window.is_some(),
                 )
             }
             None => (raw_capture, false),
@@ -1271,6 +1300,12 @@ impl ComputerUseLinux {
             "cropped_to_window": cropped,
             "window_title": window_label,
         });
+        if let Some((index, count, (x, y, _, _))) = monitor_crop {
+            caption["monitor"] = serde_json::json!(index);
+            caption["monitor_count"] = serde_json::json!(count);
+            caption["monitor_x"] = serde_json::json!(x);
+            caption["monitor_y"] = serde_json::json!(y);
+        }
         if let Some(note) = off_screen_note {
             caption["window_off_screen"] = serde_json::json!(true);
             caption["off_screen_note"] = serde_json::json!(note);
@@ -4551,6 +4586,18 @@ struct ScreenshotParams {
     /// Capture the whole desktop even when a window is targeted (default false).
     #[serde(default)]
     full_screen: Option<bool>,
+    /// Capture one monitor: its 0-based index in reading order. Monitors
+    /// whose vertical ranges overlap form a row; rows go top to bottom and
+    /// each row left to right, so side-by-side monitors are numbered left to
+    /// right even when they are not top-aligned. The desktop is captured and cropped to
+    /// that monitor before any resize, so a multi-monitor span is not shrunk
+    /// to fit max_width. The caption reports monitor, monitor_count,
+    /// monitor_x and monitor_y, the monitor's origin in full-desktop
+    /// coordinates: image pixel (px, py) is click x = monitor_x + px / scale,
+    /// y = monitor_y + py / scale. Not combined with a window target. Refused
+    /// when the monitor layout cannot be read.
+    #[serde(default)]
+    monitor: Option<u32>,
     /// Maximum returned screenshot width in pixels (default 1920, hard-capped).
     #[serde(default)]
     max_width: Option<u32>,
@@ -10061,6 +10108,74 @@ fn root_monitor_rects(monitors: &[(i32, i32, i32, i32)]) -> Option<Vec<(i64, i64
             })
             .collect(),
     )
+}
+
+/// A monitor's (left, top, right, bottom) edges in capture pixels.
+type MonitorEdges = (i64, i64, i64, i64);
+
+/// Monitor rectangles in reading order: monitors
+/// whose vertical ranges overlap form a row, rows go top to bottom and each
+/// row left to right. A row of monitors that are not top-aligned, such as a
+/// laptop panel bottom-aligned beside a taller external display, is still
+/// numbered left to right.
+fn monitors_in_reading_order(monitors: &[MonitorEdges]) -> Vec<MonitorEdges> {
+    let mut by_top = monitors.to_vec();
+    by_top.sort_by_key(|&(left, top, _, _)| (top, left));
+    // Each row with the lowest bottom edge of its monitors. A monitor joins
+    // the row when it overlaps it by more than 1 px: `monitor_rects_in_capture`
+    // rounds edges outward, so stacked monitors on a scaled capture can share
+    // 1 px at their common edge.
+    let mut rows: Vec<(i64, Vec<MonitorEdges>)> = Vec::new();
+    for monitor in by_top {
+        match rows.last_mut() {
+            Some((row_bottom, row)) if monitor.1 + 1 < *row_bottom => {
+                *row_bottom = (*row_bottom).max(monitor.3);
+                row.push(monitor);
+            }
+            _ => rows.push((monitor.3, vec![monitor])),
+        }
+    }
+    rows.into_iter()
+        .flat_map(|(_, mut row)| {
+            row.sort_by_key(|&(left, top, _, _)| (left, top));
+            row
+        })
+        .collect()
+}
+
+/// Monitor `index` of a capture, as a crop rectangle (x, y, width, height)
+/// clipped to the capture. `monitors` are (left, top, right, bottom) capture
+/// pixels; they are numbered in reading order (`monitors_in_reading_order`),
+/// so the order does not depend on how the compositor lists them.
+fn monitor_crop_rect(
+    monitors: &[(i64, i64, i64, i64)],
+    index: u32,
+    (capture_width, capture_height): (u32, u32),
+) -> std::result::Result<(i32, i32, u32, u32), String> {
+    let ordered = monitors_in_reading_order(monitors);
+    let count = ordered.len();
+    let &(left, top, right, bottom) = usize::try_from(index)
+        .ok()
+        .and_then(|index| ordered.get(index))
+        .ok_or_else(|| {
+            format!(
+                "monitor {index} does not exist; this desktop has {count} (0 to {})",
+                count.saturating_sub(1)
+            )
+        })?;
+    let left = left.clamp(0, i64::from(capture_width));
+    let top = top.clamp(0, i64::from(capture_height));
+    let right = right.clamp(left, i64::from(capture_width));
+    let bottom = bottom.clamp(top, i64::from(capture_height));
+    if right <= left || bottom <= top {
+        return Err(format!("monitor {index} is outside the capture"));
+    }
+    Ok((
+        left as i32,
+        top as i32,
+        (right - left) as u32,
+        (bottom - top) as u32,
+    ))
 }
 
 fn point_on_capture_monitor(monitors: &[(i64, i64, i64, i64)], x: i32, y: i32) -> bool {
@@ -16490,6 +16605,104 @@ esac
         let rects = monitor_rects_in_capture(&[(0, 0, 1920, 1080)], (1920, 1080)).unwrap();
         assert!(point_on_capture_monitor(&rects, 1919, 1079));
         assert!(!point_on_capture_monitor(&rects, 1920, 1079));
+    }
+
+    #[test]
+    fn monitor_crop_rect_numbers_monitors_by_position() {
+        // Three 1920x1080 monitors listed out of order (issue #473).
+        let span = [
+            (3840, 0, 5760, 1080),
+            (0, 0, 1920, 1080),
+            (1920, 0, 3840, 1080),
+        ];
+        assert_eq!(
+            monitor_crop_rect(&span, 0, (5760, 1080)),
+            Ok((0, 0, 1920, 1080))
+        );
+        assert_eq!(
+            monitor_crop_rect(&span, 1, (5760, 1080)),
+            Ok((1920, 0, 1920, 1080))
+        );
+        assert_eq!(
+            monitor_crop_rect(&span, 2, (5760, 1080)),
+            Ok((3840, 0, 1920, 1080))
+        );
+        let error = monitor_crop_rect(&span, 3, (5760, 1080)).unwrap_err();
+        assert!(error.contains("has 3 (0 to 2)"), "{error}");
+
+        // A row that is not top-aligned is still numbered left to right: a
+        // middle monitor 1 px lower, and a 1080p panel bottom-aligned left of
+        // a 1440p display.
+        let offset = [
+            (0, 0, 1920, 1080),
+            (1920, 1, 3840, 1081),
+            (3840, 0, 5760, 1080),
+        ];
+        assert_eq!(
+            monitor_crop_rect(&offset, 1, (5760, 1081)),
+            Ok((1920, 1, 1920, 1080))
+        );
+        let mixed = [(0, 360, 1920, 1440), (1920, 0, 4480, 1440)];
+        assert_eq!(
+            monitor_crop_rect(&mixed, 0, (4480, 1440)),
+            Ok((0, 360, 1920, 1080))
+        );
+
+        // A 2x2 grid of 2560x1440 monitors at 105%: outward rounding gives
+        // the top row a bottom edge 1 px below the bottom row's top, and the
+        // rows must stay apart.
+        let grid = monitor_rects_in_capture(
+            &[
+                (0, 0, 2438, 1371),
+                (2438, 0, 2438, 1371),
+                (0, 1371, 2438, 1371),
+                (2438, 1371, 2438, 1371),
+            ],
+            (5120, 2880),
+        )
+        .unwrap();
+        assert!(
+            grid.iter().any(|&(_, top, _, _)| top == 1439)
+                && grid.iter().any(|&(_, _, _, bottom)| bottom == 1440),
+            "{grid:?}"
+        );
+        assert_eq!(
+            monitor_crop_rect(&grid, 1, (5120, 2880)),
+            Ok((2560, 0, 2560, 1440))
+        );
+        assert_eq!(
+            monitor_crop_rect(&grid, 2, (5120, 2880)).map(|rect| (rect.0, rect.1)),
+            Ok((0, 1439))
+        );
+
+        // Stacked monitors go top to bottom; an edge rounded past the
+        // capture is clipped to it.
+        let stacked = [(0, 1080, 1920, 2161), (0, 0, 1920, 1080)];
+        assert_eq!(
+            monitor_crop_rect(&stacked, 1, (1920, 2160)),
+            Ok((0, 1080, 1920, 1080))
+        );
+        // A monitor wholly outside the capture is refused.
+        assert!(monitor_crop_rect(
+            &[(0, 0, 1920, 1080), (4000, 0, 5000, 1080)],
+            1,
+            (1920, 1080)
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn monitor_screenshot_refuses_a_window_target_before_capture() {
+        let backend = ComputerUseLinux::default();
+        let error = backend
+            .capture_screenshot(ScreenshotParams {
+                monitor: Some(0),
+                title: Some("Firefox".to_string()),
+                ..ScreenshotParams::default()
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("not both"), "{error:#}");
     }
 
     #[tokio::test]
