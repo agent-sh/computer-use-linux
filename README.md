@@ -348,6 +348,38 @@ claude mcp list
 
 If `computer-use-linux` is not on `PATH`, pass the absolute path (e.g. `~/.local/bin/computer-use-linux`). Inside a Claude Code session, run `/mcp` to confirm the tools are loaded.
 
+### GitHub Copilot CLI
+
+Install the binary first using one of the methods above, then register it with
+Copilot CLI from your logged-in Linux desktop session:
+
+```bash
+copilot mcp add computer-use-linux \
+  --env COMPUTER_USE_LINUX_ENABLE_SHELL=0 \
+  -- computer-use-linux mcp
+copilot mcp get computer-use-linux
+```
+
+This adds a user-scoped MCP entry; it does not install the backend or configure
+desktop permissions. If the binary is not on `PATH`, use its absolute path
+after `--`. Avoid registering a second controller if a plugin already supplies
+this server.
+
+Start a new Copilot session and use `/mcp` to confirm that the server's tools
+are loaded. Ask for the `doctor` tool first, then test one non-sensitive app
+with a specific target and visible-result check. Complete portal permission
+dialogs yourself. A ready doctor report is not capture/control permission;
+screenshots and app text can enter the model's context.
+
+To remove only this registration:
+
+```bash
+copilot mcp remove computer-use-linux
+```
+
+These commands were checked with Copilot CLI 1.0.112. For other clients, use the
+generic stdio configuration below.
+
 ### Claude Desktop
 
 Edit `~/.config/Claude/claude_desktop_config.json`:

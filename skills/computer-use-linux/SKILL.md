@@ -134,6 +134,7 @@ Pi native tools skip this MCP `command` config; see [Pi setup](references/pi-set
 
 ### Host-specific guides
 
+- [GitHub Copilot CLI setup](https://github.com/agent-sh/computer-use-linux#github-copilot-cli)
 - [Hermes setup](references/hermes-setup.md)
 - [Pi coding agent setup](references/pi-setup.md)
 - [Selkies container setup](references/selkies-setup.md)

@@ -98,6 +98,28 @@ mcp_servers:
     enabled: true
 ```
 
+### 5. GitHub Copilot CLI
+
+After installing the CLI binary in step 1, register it from your logged-in
+Linux desktop session:
+
+```bash
+copilot mcp add computer-use-linux \
+  --env COMPUTER_USE_LINUX_ENABLE_SHELL=0 \
+  -- computer-use-linux mcp
+copilot mcp get computer-use-linux
+```
+
+This creates a user-scoped MCP entry, not a backend installation or permission
+grant. Use an absolute binary path if it is not on `PATH`, and avoid a duplicate
+registration if another plugin already supplies the server. Restart Copilot,
+check `/mcp`, then ask for `doctor`. Complete portal dialogs yourself and verify
+the requested action in a non-sensitive target app. Local stdio does not keep
+screenshots or app text out of model context.
+
+Remove this registration with `copilot mcp remove computer-use-linux`.
+The commands were checked with Copilot CLI 1.0.112.
+
 ## What the package installs
 
 The package downloads the matching Linux `x86_64` or `aarch64` binary from the
