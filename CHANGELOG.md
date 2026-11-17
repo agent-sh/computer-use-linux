@@ -7,13 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.56] - 2026-11-17
+
 ### Added
 
-- On Umbriel, screenshots capture every output with `dms screenshot all` when the DMS shell is installed, falling back to the portal. `COMPUTER_USE_LINUX_SCREENSHOT_BACKEND=dms` selects the route explicitly. While captures cover every output, the Umbriel backend also reports window bounds on multi-output layouts; in the portal fallback they stay left out, and the server reads them again for each capture before cropping, so a `dms`-to-portal fallback cannot crop with bounds from the other capture space. `doctor` reports the route as `platform.dms_screenshot` and lists `dms` in `capabilities.screenshot`. `screenshot` with `monitor` crops each output from a `dms` capture and is refused on the portal fallback, where the capture is one output of several.
+- On Umbriel, screenshots capture every output with `dms screenshot all` when the DMS shell is installed, falling back to the portal. `COMPUTER_USE_LINUX_SCREENSHOT_BACKEND=dms` selects the route explicitly. While captures cover every output, the Umbriel backend also reports window bounds on multi-output layouts; in the portal fallback they stay left out, and the server reads them again for each capture before cropping, so a `dms`-to-portal fallback cannot crop with bounds from the other capture space. `doctor` reports the route as `platform.dms_screenshot` and lists `dms` in `capabilities.screenshot`. `screenshot` with `monitor` crops each output from a `dms` capture and is refused on the portal fallback, where the capture is one output of several. Thanks to [@christiantwu](https://github.com/christiantwu) ([#468](https://github.com/agent-sh/computer-use-linux/pull/468)).
 
 ### Fixed
 
-- uinput pointer actions on Umbriel with more than one output no longer land off target. xdg-desktop-portal-umbriel captures one output for a non-interactive screenshot while the compositor maps an absolute device across the whole layout, so with two stacked outputs every click landed at twice the intended height. When a capture is one output of several, the device now covers the whole layout and coordinates are offset by the captured output's position; the device is replaced when the layout changes. A capture that matches neither the layout nor the first output, within a pixel per output, creates no device. On Umbriel the first device of a session is sized from the capture the point was mapped in instead of a second capture, which could come from the other route.
+- uinput pointer actions on Umbriel with more than one output no longer land off target. xdg-desktop-portal-umbriel captures one output for a non-interactive screenshot while the compositor maps an absolute device across the whole layout, so with two stacked outputs every click landed at twice the intended height. When a capture is one output of several, the device now covers the whole layout and coordinates are offset by the captured output's position; the device is replaced when the layout changes. A capture that matches neither the layout nor the first output, within a pixel per output, creates no device. On Umbriel the first device of a session is sized from the capture the point was mapped in instead of a second capture, which could come from the other route. Thanks to [@christiantwu](https://github.com/christiantwu) ([#468](https://github.com/agent-sh/computer-use-linux/pull/468)).
 
 ## [0.7.55] - 2026-11-16
 
@@ -1229,7 +1231,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.55...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.56...HEAD
+[0.7.56]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.55...v0.7.56
 [0.7.55]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.54...v0.7.55
 [0.7.54]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.53...v0.7.54
 [0.7.53]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.52...v0.7.53
