@@ -69,7 +69,6 @@ NOT_ENVIRONMENT = {
     "TMUX": "read from the environment of a process on the target tty, not the server's",
     "TMUX_TMPDIR": "read from the environment of a tmux client on the target tty, not the server's",
     "WEZTERM_UNIX_SOCKET": "read from the environment of a process on the target tty and passed to wezterm cli",
-    "WINDOW": "read from the environment of a process on the target tty, not the server's",
 }
 
 # Variables the server reads that hosts are not expected to pass.
