@@ -1286,6 +1286,19 @@ pub(crate) async fn terminal_send_text(
 
 /// Send a chord to the program on `tty` through `channel`. Returns the name
 /// the channel took it as.
+/// Whether `channel` has a name or byte sequence for `chord`. Checked before
+/// sending: a key the channel cannot express has no background route.
+pub(crate) fn terminal_key_supported(
+    channel: &TerminalChannel,
+    chord: &Chord,
+) -> std::result::Result<(), String> {
+    match channel {
+        TerminalChannel::Kitty { .. } => kitty_key(chord).map(drop),
+        TerminalChannel::Tmux(_) => tmux_key(chord).map(drop),
+        _ => tty_key_bytes(chord).map(drop),
+    }
+}
+
 pub(crate) async fn terminal_send_key(
     channel: &TerminalChannel,
     tty: &Path,

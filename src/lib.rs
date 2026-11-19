@@ -38,12 +38,12 @@ mod ydotool;
 
 pub mod atspi_tree {
     pub(crate) use crate::atspi_tree_impl::{
-        accessibility_chrome_context, element_role_states_actions, focused_element_summary_in_app,
-        insert_text_at_focus, insert_text_into_element, is_window_role, list_accessible_apps,
-        object_ref_application_pid, object_ref_owner_pid, perform_action, perform_named_action,
-        probe_focused_element, set_element_value, snapshot_accessibility_tree, snapshot_limits,
-        AccessibleAppSummary, EditableTextSetOutcome, FocusProbe, FocusedElementSummary,
-        FocusedTextInsert, ValueSetInvocation, UNKNOWN_ROLE,
+        accessibility_chrome_context, element_role_states_actions, focus_element,
+        focused_element_summary_in_app, insert_text_at_focus, insert_text_into_element,
+        is_window_role, list_accessible_apps, object_ref_application_pid, object_ref_owner_pid,
+        perform_action, perform_named_action, probe_focused_element, set_element_value,
+        snapshot_accessibility_tree, snapshot_limits, AccessibleAppSummary, EditableTextSetOutcome,
+        FocusProbe, FocusedElementSummary, FocusedTextInsert, ValueSetInvocation, UNKNOWN_ROLE,
     };
     pub use crate::atspi_tree_impl::{
         snapshot_tree, AccessibilityAction, AccessibilityNode, AccessibilityText,

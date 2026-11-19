@@ -49,9 +49,9 @@ pub(crate) const X11_MASTER_PREFIX: &str = "computer-use-linux agent ";
 /// XSetInputFocus, which moves the user's keyboard; with openbox an agent
 /// click moved the user's focus. Keys reach the window manager only through
 /// its grabs, and grabbed chords are refused, so keyboard input stays.
-pub(crate) const X11_WM_NOTE: &str = "A window manager is running, and window managers act on the agent pointer's clicks with the user's keyboard focus (they focus the clicked window for the user), so a background click or scroll is refused on X11 while one runs. Background keys still work, except chords the window manager grabs.";
+pub(crate) const X11_WM_NOTE: &str = "A window manager is running, and window managers act on the agent pointer's clicks with the user's keyboard focus (they focus the clicked window for the user), so X11 has no background click or scroll while one runs. Background keys still work, except chords the window manager grabs.";
 
-pub(crate) const OTHER_ROUTES: &str = "An element target (element_index or a selector), a browser_tab, or a terminal running in tmux still works in the background. For full isolation run the app in agent-workspace-linux.";
+pub(crate) const OTHER_ROUTES: &str = "An element target (element_index or a selector), a browser_tab, or a terminal running in tmux still works in the background.";
 
 /// The seat route available in this session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -386,6 +386,29 @@ pub(crate) fn input_started(error: &anyhow::Error) -> bool {
     error.downcast_ref::<PartialInput>().is_some()
 }
 
+/// The seat cannot serve this target or key in this session, and nothing
+/// was sent: the session, window manager or client lacks the route. The
+/// caller may deliver the same input through the user's focus instead.
+#[derive(Debug)]
+pub(crate) struct NoRoute(pub String);
+
+impl std::fmt::Display for NoRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NoRoute {}
+
+fn no_route(message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(NoRoute(message.into()))
+}
+
+/// True when the seat has no route for the call and sent nothing.
+pub(crate) fn lacks_route(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<NoRoute>().is_some()
+}
+
 enum Seat {
     X11(Box<x11::X11Seat>),
     Sway(Box<sway::SwaySeat>),
@@ -431,8 +454,13 @@ fn with_seat<T>(kind: SeatKind, run: impl FnOnce(&mut Seat) -> Result<T>) -> Res
     }
     if guard.is_none() {
         let seat = match kind {
-            SeatKind::X11Master => Seat::X11(Box::new(x11::X11Seat::create()?)),
-            SeatKind::SwayTransientSeat => Seat::Sway(Box::new(sway::SwaySeat::create()?)),
+            // A seat that cannot be made is a missing route: nothing was sent.
+            SeatKind::X11Master => Seat::X11(Box::new(
+                x11::X11Seat::create().map_err(|error| no_route(format!("{error:#}")))?,
+            )),
+            SeatKind::SwayTransientSeat => Seat::Sway(Box::new(
+                sway::SwaySeat::create().map_err(|error| no_route(format!("{error:#}")))?,
+            )),
             SeatKind::HyprlandSendKeyState => {
                 bail!("Hyprland background keys go through sendkeystate, not an agent seat")
             }
@@ -592,8 +620,8 @@ pub(crate) fn doctor_summary() -> serde_json::Value {
             },
             "active": active(),
             "note": match kind {
-                SeatKind::X11Master => "Chords the window manager or another program grabs on the root window are refused.",
-                SeatKind::SwayTransientSeat => "Needs sway 1.10 or later (ext-transient-seat-v1). Xwayland, GTK and Chromium windows are refused: Xwayland follows the X focus, and GTK and Chromium never bind a seat added after they start. Alt and Super chords, and chords the sway config binds, are refused. Clients that mishandle a second wl_seat, such as Zed (zed-industries/zed#66735), may misbehave while the agent seat exists.",
+                SeatKind::X11Master => "Chords the window manager or another program grabs on the root window have no agent-seat route; they go through normal focused input after a one-time notice.",
+                SeatKind::SwayTransientSeat => "Needs sway 1.10 or later (ext-transient-seat-v1). Xwayland, GTK and Chromium windows have no agent-seat route: Xwayland follows the X focus, and GTK and Chromium never bind a seat added after they start. Neither do Alt and Super chords, chords the sway config binds, or keys outside the default binding mode. Those go through normal focused input after a one-time notice. Clients that mishandle a second wl_seat, such as Zed (zed-industries/zed#66735), may misbehave while the agent seat exists.",
                 SeatKind::HyprlandSendKeyState => "Keys only, US layout; no agent pointer.",
             },
         }),
@@ -754,7 +782,7 @@ mod x11 {
                 .reply()?
                 .focus;
             if focus != window {
-                bail!("the agent keyboard focus is 0x{focus:x}, not the target 0x{window:x}; no keys were sent");
+                return Err(no_route(format!("the agent keyboard focus is 0x{focus:x}, not the target 0x{window:x}; no keys were sent")));
             }
             let conn = self.agent.conn();
             let root = self.agent.root();
@@ -799,7 +827,7 @@ mod x11 {
         ) -> Result<SeatReport> {
             self.refresh();
             if window_manager_running(&self.user)? {
-                bail!("{X11_WM_NOTE}");
+                return Err(no_route(X11_WM_NOTE));
             }
             let window = u32::try_from(target.window_id)
                 .context("an X11 window id fits 32 bits; list windows again")?;
@@ -928,7 +956,7 @@ mod x11 {
             match grabbed {
                 Ok(()) => {}
                 Err(ReplyError::X11Error(error)) if error.error_kind == ErrorKind::Access => {
-                    bail!("keycode {key} with modifier mask 0x{mask:x} is grabbed on the root window (a window manager or global shortcut), so it would act on the user's session; no keys were sent");
+                    return Err(no_route(format!("keycode {key} with modifier mask 0x{mask:x} is grabbed on the root window (a window manager or global shortcut), so through the agent seat it would act on the user's session; no keys were sent")));
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -1092,10 +1120,10 @@ mod x11 {
             bail!("Ctrl+Alt with a function key or BackSpace is the X server's own VT switch or exit chord; no keys were sent");
         }
         let (keycode, column) = user.find(stroke.keysym).ok_or_else(|| {
-            anyhow!(
+            no_route(format!(
                 "keysym 0x{:x} is not on the first two levels of the user's keyboard layout; no keys were sent. Use an element target to set the text through accessibility instead.",
                 stroke.keysym
-            )
+            ))
         })?;
         let mut codes = Vec::new();
         let modifier = |index: usize, keysym: u32| -> Result<u8> {
@@ -1109,7 +1137,9 @@ mod x11 {
                         .and_then(|codes| codes.first().copied())
                 })
                 .ok_or_else(|| {
-                    anyhow!("the agent keyboard has no key for modifier keysym 0x{keysym:x}")
+                    no_route(format!(
+                        "the agent keyboard has no key for modifier keysym 0x{keysym:x}"
+                    ))
                 })
         };
         if stroke.ctrl && stroke.keysym != KEYSYM_CONTROL_L {
@@ -1212,13 +1242,16 @@ mod sway {
     /// user's input.
     pub(super) fn check_target(target: &SeatTarget) -> Result<()> {
         if target.window_id < SWAY_CONTAINER_ID_BASE {
-            bail!("window_id {} is an Xwayland window, and Xwayland feeds every seat into one X keyboard that follows the X focus, so the agent seat could type into the user's X11 window. {OTHER_ROUTES}", target.window_id);
+            return Err(no_route(format!("window_id {} is an Xwayland window, and Xwayland feeds every seat into one X keyboard that follows the X focus, so the agent seat could type into the user's X11 window. {OTHER_ROUTES}", target.window_id)));
         }
         if target.hidden {
-            bail!("window_id {} is in the sway scratchpad, and activating it shows it on the user's workspace. {OTHER_ROUTES}", target.window_id);
+            return Err(no_route(format!("window_id {} is in the sway scratchpad, and activating it shows it on the user's workspace. {OTHER_ROUTES}", target.window_id)));
         }
         if let Some(reason) = seatless_client(target.pid) {
-            bail!("window_id {} is {reason} {OTHER_ROUTES}", target.window_id);
+            return Err(no_route(format!(
+                "window_id {} is {reason} {OTHER_ROUTES}",
+                target.window_id
+            )));
         }
         Ok(())
     }
@@ -1233,7 +1266,7 @@ mod sway {
         // plain keys are that mode's bindings (resize keys, Escape).
         let mode = sway_ipc::binding_mode()?;
         if mode != "default" {
-            bail!("sway is in binding mode {mode:?}, whose bindings would take the agent's keys; no keys were sent");
+            return Err(no_route(format!("sway is in binding mode {mode:?}, whose bindings would take the agent's keys; no keys were sent")));
         }
         // The modifier keys around a chord are key events too, and sway
         // runs bindings on them (bindsym --release Shift_L).
@@ -1247,12 +1280,13 @@ mod sway {
             }
         }
         if chords.iter().any(|stroke| stroke.alt || stroke.meta) {
-            bail!("sway binds Alt and Super chords for the whole session, and its bindings fire for the agent seat too, so an Alt or Super chord is refused; no keys were sent");
+            return Err(no_route("sway binds Alt and Super chords for the whole session, and its bindings fire for the agent seat too, so an Alt or Super chord has no agent seat route; no keys were sent"));
         }
-        let config = sway_ipc::config_with_includes()?;
+        let config =
+            sway_ipc::config_with_includes().map_err(|error| no_route(format!("{error:#}")))?;
         for stroke in &chords {
             if let Some(binding) = bound_chord(&config, stroke) {
-                bail!("the sway config binds {binding}, and sway bindings fire for the agent seat too; no keys were sent");
+                return Err(no_route(format!("the sway config binds {binding}, and sway bindings fire for the agent seat too; no keys were sent")));
             }
         }
         Ok(())
@@ -1403,7 +1437,7 @@ mod sway {
             }
             let seat_global = match state.ready {
                 Some(Ok(global)) => global,
-                _ => bail!("sway denied the transient seat"),
+                _ => return Err(no_route("sway denied the transient seat")),
             };
             while !state
                 .globals
@@ -1528,10 +1562,10 @@ mod sway {
                     Ok(())
                 }
                 [] => bail!("the target window is not among sway's toplevels; list windows again"),
-                _ => bail!(
+                _ => Err(no_route(format!(
                     "{} windows share the target's app id and title, so the agent seat cannot tell them apart; no input was sent",
                     matches.len()
-                ),
+                ))),
             }
         }
 
@@ -1560,7 +1594,7 @@ mod sway {
             let before = sway_ipc::seat_focus().ok();
             self.focus(target, deadline)?;
             if before.is_some() && sway_ipc::seat_focus().ok() != before {
-                bail!("sway moved the user's focus when the agent seat focused the target; no keys were sent");
+                return Err(no_route("sway moved the user's focus when the agent seat focused the target; no keys were sent"));
             }
             let con_id = sway_ipc::container_id(target.window_id)?;
             let seats = sway_ipc::seats()?;
@@ -1569,10 +1603,10 @@ mod sway {
                 .find(|(name, _)| *name == self.name)
                 .map(|(_, focus)| *focus);
             if agent_focus != Some(con_id) {
-                bail!(
+                return Err(no_route(format!(
                     "sway did not focus the target on the agent seat {}; no keys were sent",
                     self.name
-                );
+                )));
             }
             let mut keysyms = Vec::new();
             for stroke in strokes {
@@ -1625,8 +1659,8 @@ mod sway {
             let pointer = self
                 .pointer
                 .clone()
-                .context("sway does not offer zwlr_virtual_pointer_manager_v1, so the agent seat has no pointer")?;
-            let layout = sway_ipc::layout()?;
+                .ok_or_else(|| no_route("sway does not offer zwlr_virtual_pointer_manager_v1, so the agent seat has no pointer"))?;
+            let layout = sway_ipc::layout().map_err(|error| no_route(format!("{error:#}")))?;
             let (x, y) = input.point();
             if !(0.0..f64::from(layout.width)).contains(&x)
                 || !(0.0..f64::from(layout.height)).contains(&y)
@@ -2337,7 +2371,7 @@ mod tests {
         ] {
             let refusal = classify(&facts(desktop)).unwrap_err();
             assert!(refusal.contains(word), "{desktop}: {refusal}");
-            assert!(refusal.contains("agent-workspace-linux"), "{refusal}");
+            assert!(refusal.contains(OTHER_ROUTES), "{refusal}");
         }
         let gnome_x11 = SessionFacts {
             native_x11: true,

@@ -291,6 +291,9 @@ pub struct ComputerUseLinux {
     abs_pointer: Arc<Mutex<Option<crate::abs_pointer::AbsPointer>>>,
     portal_session_init_lock: Arc<tokio::sync::Mutex<()>>,
     input_operation_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Set once this server has told a caller that background delivery has
+    /// no route here; later such calls use focused input without asking.
+    background_notice_shown: Arc<std::sync::atomic::AtomicBool>,
     kde_clipboard_lock: Arc<tokio::sync::Mutex<()>>,
     /// Cached physical desktop size from the most recent full-frame capture;
     /// used for off-screen warnings and portal logical-coordinate mapping.
@@ -1567,16 +1570,25 @@ impl ComputerUseLinux {
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
         let target = params.window_target();
-        let raised = background_raised(params.delivery);
-        let (Json(output), scope) = self.dispatch_click(params).await;
-        self.finish_action_output(output, &capture, target.as_ref(), raised, scope)
+        let background = params.delivery == Some(KeyboardDelivery::Background);
+        let (Json(output), scope, report) = self.dispatch_click(params).await;
+        let raised = background_target_raised(background, report.as_ref());
+        self.finish_background_output(output, &capture, target.as_ref(), raised, scope, report)
             .await
     }
 
-    async fn dispatch_click(&self, params: ClickParams) -> (Json<ActionOutput>, PostActionScope) {
+    async fn dispatch_click(
+        &self,
+        mut params: ClickParams,
+    ) -> (
+        Json<ActionOutput>,
+        PostActionScope,
+        Option<BackgroundReport>,
+    ) {
         let received = Some(serde_json::json!(params.clone()));
-        let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        let mut report = None;
         if params.delivery == Some(KeyboardDelivery::Background) {
+            let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
             let button = match params
                 .button
                 .as_deref()
@@ -1589,7 +1601,7 @@ impl ComputerUseLinux {
                 Some(_) => None,
             };
             let count = params.click_count.unwrap_or(1).clamp(1, 10);
-            let output = match button {
+            let outcome = match button {
                 Some(button) => {
                     self.background_pointer(
                         "click",
@@ -1598,20 +1610,42 @@ impl ComputerUseLinux {
                         params.relative == Some(true)
                             || params.coordinate_space != ClickCoordinateSpace::default()
                             || click_resolves_cached_element(&params),
-                        move |x, y| crate::agent_seat::PointerInput::Click { x, y, button, count },
-                        received,
+                        move |x, y| crate::agent_seat::PointerInput::Click {
+                            x,
+                            y,
+                            button,
+                            count,
+                        },
+                        received.clone(),
                         input_guard,
                     )
                     .await
                 }
-                None => action_result(
-                    "click",
-                    Err("Nothing was sent: a background click uses the left, right or middle button.".to_string()),
-                    received,
-                ),
+                None => BackgroundOutcome::Unavailable {
+                    reason: "a background click uses the left, right or middle button".to_string(),
+                    fallback: FocusFallback::default(),
+                },
             };
-            return (Json(output), PostActionScope::default());
+            match outcome {
+                BackgroundOutcome::Done(output, route) => {
+                    return (
+                        Json(output),
+                        PostActionScope::default(),
+                        route.map(BackgroundReport::routed),
+                    )
+                }
+                BackgroundOutcome::Unavailable { reason, .. } => {
+                    if let Some((output, notice)) =
+                        self.background_notice("click", &reason, received.clone())
+                    {
+                        return (Json(output), PostActionScope::default(), Some(notice));
+                    }
+                    params.delivery = None;
+                    report = Some(BackgroundReport::focused());
+                }
+            }
         }
+        let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         // Before the window is raised: a refused call changes nothing.
         match self.check_element_snapshot(
             "click",
@@ -1622,6 +1656,7 @@ impl ComputerUseLinux {
                 self.dispatch_checked_click(params, received, input_guard)
                     .await,
                 scope,
+                report,
             ),
             Err(message) => (
                 Json(ActionOutput {
@@ -1632,6 +1667,7 @@ impl ComputerUseLinux {
                     received,
                 }),
                 PostActionScope::default(),
+                None,
             ),
         }
     }
@@ -2153,6 +2189,7 @@ impl ComputerUseLinux {
         self.action_tool_result(
             ActionToolOutput {
                 action: with_notes(output, notes),
+                background: None,
                 observation,
             },
             screenshot,
@@ -2330,13 +2367,21 @@ impl ComputerUseLinux {
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
         let target = params.window_target();
-        let raised = background_raised(params.delivery);
-        let (Json(output), scope) = self.dispatch_scroll(params).await;
-        self.finish_action_output(output, &capture, target.as_ref(), raised, scope)
+        let background = params.delivery == Some(KeyboardDelivery::Background);
+        let (Json(output), scope, report) = self.dispatch_scroll(params).await;
+        let raised = background_target_raised(background, report.as_ref());
+        self.finish_background_output(output, &capture, target.as_ref(), raised, scope, report)
             .await
     }
 
-    async fn dispatch_scroll(&self, params: ScrollParams) -> (Json<ActionOutput>, PostActionScope) {
+    async fn dispatch_scroll(
+        &self,
+        mut params: ScrollParams,
+    ) -> (
+        Json<ActionOutput>,
+        PostActionScope,
+        Option<BackgroundReport>,
+    ) {
         let received = Some(serde_json::json!(params.clone()));
         let refused = |message| {
             (
@@ -2348,13 +2393,14 @@ impl ComputerUseLinux {
                     received: received.clone(),
                 }),
                 PostActionScope::default(),
+                None,
             )
         };
         let units = match scroll_units(params.pages) {
             Ok(units) => units,
             Err(message) => return refused(message),
         };
-        let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        let mut report = None;
         if params.delivery == Some(KeyboardDelivery::Background) {
             let (dx, dy) = match params.direction.to_ascii_lowercase().as_str() {
                 "up" => (0, -units),
@@ -2363,19 +2409,38 @@ impl ComputerUseLinux {
                 "right" => (units, 0),
                 _ => return refused("direction must be up, down, left or right".to_string()),
             };
-            let output = self
+            let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+            let outcome = self
                 .background_pointer(
                     "scroll",
                     (params.x, params.y),
                     params.window_target(),
                     params.relative == Some(true) || params.element_index.is_some(),
                     move |x, y| crate::agent_seat::PointerInput::Scroll { x, y, dx, dy },
-                    received,
+                    received.clone(),
                     input_guard,
                 )
                 .await;
-            return (Json(output), PostActionScope::default());
+            match outcome {
+                BackgroundOutcome::Done(output, route) => {
+                    return (
+                        Json(output),
+                        PostActionScope::default(),
+                        route.map(BackgroundReport::routed),
+                    )
+                }
+                BackgroundOutcome::Unavailable { reason, .. } => {
+                    if let Some((output, notice)) =
+                        self.background_notice("scroll", &reason, received.clone())
+                    {
+                        return (Json(output), PostActionScope::default(), Some(notice));
+                    }
+                    params.delivery = None;
+                    report = Some(BackgroundReport::focused());
+                }
+            }
         }
+        let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         match self.check_element_snapshot(
             "scroll",
             params.snapshot_id.as_deref(),
@@ -2385,6 +2450,7 @@ impl ComputerUseLinux {
                 self.dispatch_checked_scroll(params, units, received.clone(), input_guard)
                     .await,
                 scope,
+                report,
             ),
             Err(message) => refused(message),
         }
@@ -3080,7 +3146,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "press_key",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
-        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, kp_enter (keypad Enter), escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). With PIXELFLUX_CU and PIXELFLUX_CU_TOKEN set, chords go to pixelflux. An unreachable pixelflux falls through to the routes below; a pixelflux error does not. On X11, chords go through xdotool (XTEST), or ydotool when xdotool is missing or cannot start. On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. When ydotool is absent and the session has no RemoteDesktop portal (for example wlroots compositors), chords go through wtype instead. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. On KDE Plasma every key in a portal chord is a physical keycode. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass delivery=\"background\" (the default when an element or browser_tab is named) to leave the user's keyboard focus alone: input goes to a named element through AT-SPI, to a browser tab over a DevTools port the user opened (COMPUTER_USE_LINUX_DEVTOOLS), or to a terminal's program through tmux; when no route serves the target the call is refused with nothing sent, never typed through focus. On an element, only keys that mean an action map (Enter or space on a button or menu item, space on a check box, radio button or toggle, Enter on a link or a single-line field with an activate action); others are refused. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, kp_enter (keypad Enter), escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). With PIXELFLUX_CU and PIXELFLUX_CU_TOKEN set, chords go to pixelflux. An unreachable pixelflux falls through to the routes below; a pixelflux error does not. On X11, chords go through xdotool (XTEST), or ydotool when xdotool is missing or cannot start. On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. When ydotool is absent and the session has no RemoteDesktop portal (for example wlroots compositors), chords go through wtype instead. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. On KDE Plasma every key in a portal chord is a physical keycode. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass delivery=\"background\" (the default when an element or browser_tab is named) to leave the user's keyboard focus alone: input goes to a named element through AT-SPI, to a browser tab over a DevTools port the user opened (COMPUTER_USE_LINUX_DEVTOOLS), or to a terminal's program through tmux; when no route serves the target (the reason says which setting or desktop would open one), the first such call in a server session sends nothing and returns a notice (background.retry_to_continue=true); repeating it, and every later such call, goes through normal focused input and reports background.used=false. The result's background field names the route used. On an element, only keys that mean an action map (Enter or space on a button or menu item, space on a check box, radio button or toggle, Enter on a link or a single-line field with an activate action); others are refused. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -3094,34 +3160,81 @@ impl ComputerUseLinux {
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
         let target = params.window_target();
-        let (output, raised) = match params.background.background() {
+        let (output, raised, report, shown) = match params.background.background() {
             Ok(false) => {
                 let raised = keyboard_target_raised(&target);
-                (self.dispatch_press_key(params).await.0, raised)
+                (
+                    self.dispatch_press_key(params).await.0,
+                    raised,
+                    None,
+                    target,
+                )
             }
-            background => {
+            Err(message) => {
                 let received = Some(serde_json::json!(params.clone()));
-                let output = match background {
-                    Ok(_) => {
-                        self.dispatch_background_keyboard(
-                            BackgroundInput::Key(&params.key),
-                            &target,
-                            &params.background,
-                            received,
-                        )
-                        .await
+                (
+                    action_result("press_key", Err(message), received),
+                    TargetRaised::No,
+                    None,
+                    target,
+                )
+            }
+            Ok(true) => {
+                let received = Some(serde_json::json!(params.clone()));
+                match self
+                    .dispatch_background_keyboard(
+                        BackgroundInput::Key(&params.key),
+                        &target,
+                        &params.background,
+                        received.clone(),
+                    )
+                    .await
+                {
+                    BackgroundOutcome::Done(output, route) => (
+                        output,
+                        TargetRaised::No,
+                        route.map(BackgroundReport::routed),
+                        target,
+                    ),
+                    BackgroundOutcome::Unavailable { reason, fallback } => {
+                        if let Some((output, notice)) =
+                            self.background_notice("press_key", &reason, received.clone())
+                        {
+                            (output, TargetRaised::No, Some(notice), target)
+                        } else if let Err(message) = self.focus_fallback_element(&fallback).await {
+                            (
+                                action_result("press_key", Err(message), received),
+                                TargetRaised::No,
+                                Some(BackgroundReport::focused()),
+                                target,
+                            )
+                        } else {
+                            let mut focused = PressKeyParams {
+                                background: BackgroundKeyboardParams::default(),
+                                ..params.clone()
+                            };
+                            focused.set_window_target(&fallback.target);
+                            let raised = keyboard_target_raised(&fallback.target);
+                            let Json(mut output) = self.dispatch_press_key(focused).await;
+                            output.received = received;
+                            (
+                                output,
+                                raised,
+                                Some(BackgroundReport::focused()),
+                                fallback.target,
+                            )
+                        }
                     }
-                    Err(message) => action_result("press_key", Err(message), received),
-                };
-                (output, TargetRaised::No)
+                }
             }
         };
-        self.finish_action_output(
+        self.finish_background_output(
             output,
             &capture,
-            Some(&target),
+            Some(&shown),
             raised,
             PostActionScope::default(),
+            report,
         )
         .await
     }
@@ -3364,7 +3477,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "type_text",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
-        description = "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Keyboard success confirms dispatch, not field-content verification; re-observe the target before retrying. On GNOME, when a configured keyboard layout group cannot type a character of the text, the text goes into the focused editable field of the verified target window through AT-SPI EditableText instead: inserted at the caret, replacing a selection, and reported as ok only when the field reads it back with the rest unchanged. Password fields, text with a newline, tab or other control character, and focus outside an editable field of that active window keep the refusal. Pass delivery=\"background\" (the default when an element or browser_tab is named) to leave the user's keyboard focus alone: input goes to a named element through AT-SPI, to a browser tab over a DevTools port the user opened (COMPUTER_USE_LINUX_DEVTOOLS), or to a terminal's program through tmux; when no route serves the target the call is refused with nothing sent, never typed through focus. Into a named element the text goes in at its caret (or end) and must read back; a password field is filled unverified. X11 xdotool can silently substitute symbols under non-US or changing XKB layouts; inspect the text before pressing Enter or submitting it. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators. On Hyprland, confirmed password fields are rejected, and ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+        description = "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Keyboard success confirms dispatch, not field-content verification; re-observe the target before retrying. On GNOME, when a configured keyboard layout group cannot type a character of the text, the text goes into the focused editable field of the verified target window through AT-SPI EditableText instead: inserted at the caret, replacing a selection, and reported as ok only when the field reads it back with the rest unchanged. Password fields, text with a newline, tab or other control character, and focus outside an editable field of that active window keep the refusal. Pass delivery=\"background\" (the default when an element or browser_tab is named) to leave the user's keyboard focus alone: input goes to a named element through AT-SPI, to a browser tab over a DevTools port the user opened (COMPUTER_USE_LINUX_DEVTOOLS), or to a terminal's program through tmux; when no route serves the target (the reason says which setting or desktop would open one), the first such call in a server session sends nothing and returns a notice (background.retry_to_continue=true); repeating it, and every later such call, goes through normal focused input and reports background.used=false. The result's background field names the route used. Into a named element the text goes in at its caret (or end) and must read back; a password field is filled unverified. X11 xdotool can silently substitute symbols under non-US or changing XKB layouts; inspect the text before pressing Enter or submitting it. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators. On Hyprland, confirmed password fields are rejected, and ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -3378,41 +3491,89 @@ impl ComputerUseLinux {
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
         let target = params.window_target();
-        let (output, raised) = match params.background.background() {
+        let (output, raised, report, shown) = match params.background.background() {
             Ok(false) => {
-                let Json(mut output) = self.dispatch_type_text(params).await;
-                if output.ok && !output.message.starts_with(TYPE_TEXT_ATSPI_ROUTE) {
-                    output.message.push_str(
-                        " Field contents were not verified; re-observe the target before retrying.",
-                    );
-                }
-                (output, keyboard_target_raised(&target))
+                let raised = keyboard_target_raised(&target);
+                (self.focused_type_text(params).await, raised, None, target)
             }
-            background => {
+            Err(message) => {
                 let received = Some(serde_json::json!(params.clone()));
-                let output = match background {
-                    Ok(_) => {
-                        self.dispatch_background_keyboard(
-                            BackgroundInput::Text(&params.text),
-                            &target,
-                            &params.background,
-                            received,
-                        )
-                        .await
+                (
+                    action_result("type_text", Err(message), received),
+                    TargetRaised::No,
+                    None,
+                    target,
+                )
+            }
+            Ok(true) => {
+                let received = Some(serde_json::json!(params.clone()));
+                match self
+                    .dispatch_background_keyboard(
+                        BackgroundInput::Text(&params.text),
+                        &target,
+                        &params.background,
+                        received.clone(),
+                    )
+                    .await
+                {
+                    BackgroundOutcome::Done(output, route) => (
+                        output,
+                        TargetRaised::No,
+                        route.map(BackgroundReport::routed),
+                        target,
+                    ),
+                    BackgroundOutcome::Unavailable { reason, fallback } => {
+                        if let Some((output, notice)) =
+                            self.background_notice("type_text", &reason, received.clone())
+                        {
+                            (output, TargetRaised::No, Some(notice), target)
+                        } else if let Err(message) = self.focus_fallback_element(&fallback).await {
+                            (
+                                action_result("type_text", Err(message), received),
+                                TargetRaised::No,
+                                Some(BackgroundReport::focused()),
+                                target,
+                            )
+                        } else {
+                            let mut focused = TypeTextParams {
+                                background: BackgroundKeyboardParams::default(),
+                                ..params.clone()
+                            };
+                            focused.set_window_target(&fallback.target);
+                            let raised = keyboard_target_raised(&fallback.target);
+                            let mut output = self.focused_type_text(focused).await;
+                            output.received = received;
+                            (
+                                output,
+                                raised,
+                                Some(BackgroundReport::focused()),
+                                fallback.target,
+                            )
+                        }
                     }
-                    Err(message) => action_result("type_text", Err(message), received),
-                };
-                (output, TargetRaised::No)
+                }
             }
         };
-        self.finish_action_output(
+        self.finish_background_output(
             output,
             &capture,
-            Some(&target),
+            Some(&shown),
             raised,
             PostActionScope::default(),
+            report,
         )
         .await
+    }
+
+    /// type_text through the user's keyboard focus.
+    async fn focused_type_text(&self, params: TypeTextParams) -> ActionOutput {
+        let Json(mut output) = self.dispatch_type_text(params).await;
+        if output.ok && !output.message.starts_with(TYPE_TEXT_ATSPI_ROUTE) {
+            output.message.push_str(
+                " Field contents were not verified; re-observe the target before retrying.",
+            );
+        }
+        output
     }
 
     /// GNOME's portal route refused the text because a layout group lacks a
@@ -4950,7 +5111,13 @@ fn structured_tool_result<T: Serialize>(
     let value = serde_json::to_value(&output).map_err(|error| {
         ErrorData::internal_error(format!("failed to serialize tool output: {error}"), None)
     })?;
-    let is_error = value.get("ok").and_then(serde_json::Value::as_bool) == Some(false);
+    // The one-time background notice is not a failure: repeating the call
+    // delivers it.
+    let is_error = value.get("ok").and_then(serde_json::Value::as_bool) == Some(false)
+        && value
+            .pointer("/background/retry_to_continue")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true);
     let mut result = CallToolResult::structured(value);
     result.is_error = Some(is_error);
     if let Some(capture) = screenshot {
@@ -5247,7 +5414,9 @@ struct ClickParams {
     /// a window manager (an XInput 2 master pointer) and on sway 1.10 or later
     /// (a transient seat). Needs x and y in screenshot capture pixels over the
     /// window the call targets, without relative or an element. Elsewhere the
-    /// call is refused and nothing is sent. Default: "focus".
+    /// first such call in a server session sends nothing and returns a
+    /// notice; repeated, and for every later such call, it goes through the
+    /// user's pointer as with "focus". Default: "focus".
     #[serde(default)]
     delivery: Option<KeyboardDelivery>,
     #[serde(flatten)]
@@ -5524,7 +5693,9 @@ struct ScrollParams {
     /// a window manager (an XInput 2 master pointer) and on sway 1.10 or later
     /// (a transient seat). Needs x and y in screenshot capture pixels over the
     /// window the call targets, without relative or an element. Elsewhere the
-    /// call is refused and nothing is sent. Default: "focus".
+    /// first such call in a server session sends nothing and returns a
+    /// notice; repeated, and for every later such call, it goes through the
+    /// user's pointer as with "focus". Default: "focus".
     #[serde(default)]
     delivery: Option<KeyboardDelivery>,
     #[serde(flatten)]
@@ -5602,9 +5773,13 @@ struct BackgroundKeyboardParams {
     /// route the call names: an element (element_index, element_identifier
     /// or role/name/states), a browser_tab, or a terminal (tty, terminal_pid,
     /// terminal_command, terminal_cwd, or a terminal window) whose program
-    /// runs in tmux. When no route serves the target, nothing is sent and
-    /// the call is refused; it never falls back to focusing. Default:
-    /// "background" when an element or browser_tab is named, else "focus".
+    /// runs in tmux. When no route serves the target, the first such call in
+    /// a server session sends nothing and returns a notice; repeated, and
+    /// for every later such call, the input goes through normal focused
+    /// input (an element gets keyboard focus first, a browser_tab targets
+    /// the window titled like it). A wrong or ambiguous target is still an
+    /// error. Default: "background" when an element or browser_tab is named,
+    /// else "focus".
     #[serde(default)]
     delivery: Option<KeyboardDelivery>,
     /// Background delivery to an element: its element_index from the latest
@@ -5783,6 +5958,19 @@ struct TypeTextParams {
 }
 
 impl PressKeyParams {
+    /// Point the window selectors at `target`, for focused input.
+    fn set_window_target(&mut self, target: &WindowTarget) {
+        self.window_id = target.window_id;
+        self.pid = target.pid;
+        self.tty = target.tty.clone();
+        self.terminal_pid = target.terminal_pid;
+        self.terminal_command = target.terminal_command.clone();
+        self.terminal_cwd = target.terminal_cwd.clone();
+        self.app_id = target.app_id.clone();
+        self.wm_class = target.wm_class.clone();
+        self.title = target.title.clone();
+    }
+
     fn window_target(&self) -> WindowTarget {
         WindowTarget {
             window_id: self.window_id,
@@ -5799,6 +5987,19 @@ impl PressKeyParams {
 }
 
 impl TypeTextParams {
+    /// Point the window selectors at `target`, for focused input.
+    fn set_window_target(&mut self, target: &WindowTarget) {
+        self.window_id = target.window_id;
+        self.pid = target.pid;
+        self.tty = target.tty.clone();
+        self.terminal_pid = target.terminal_pid;
+        self.terminal_command = target.terminal_command.clone();
+        self.terminal_cwd = target.terminal_cwd.clone();
+        self.app_id = target.app_id.clone();
+        self.wm_class = target.wm_class.clone();
+        self.title = target.title.clone();
+    }
+
     fn window_target(&self) -> WindowTarget {
         WindowTarget {
             window_id: self.window_id,
@@ -5831,6 +6032,10 @@ struct ActionOutput {
 struct ActionToolOutput {
     #[serde(flatten)]
     action: ActionOutput,
+    /// For a call that asked for background delivery: whether a background
+    /// route delivered it, or why not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    background: Option<BackgroundReport>,
     #[serde(flatten)]
     observation: PostActionObservation,
 }
@@ -6852,16 +7057,32 @@ impl ComputerUseLinux {
 
     async fn finish_action_output(
         &self,
-        mut output: ActionOutput,
+        output: ActionOutput,
         capture: &PostActionCaptureParams,
         target: Option<&WindowTarget>,
         raised: TargetRaised,
         scope: PostActionScope,
     ) -> Result<CallToolResult, ErrorData> {
+        self.finish_background_output(output, capture, target, raised, scope, None)
+            .await
+    }
+
+    /// finish_action_output with the background delivery report of a call
+    /// that asked for it.
+    async fn finish_background_output(
+        &self,
+        mut output: ActionOutput,
+        capture: &PostActionCaptureParams,
+        target: Option<&WindowTarget>,
+        raised: TargetRaised,
+        scope: PostActionScope,
+        background: Option<BackgroundReport>,
+    ) -> Result<CallToolResult, ErrorData> {
         if !output.ok {
             return self.action_tool_result(
                 ActionToolOutput {
                     action: output,
+                    background,
                     observation: PostActionObservation::default(),
                 },
                 None,
@@ -6874,6 +7095,7 @@ impl ComputerUseLinux {
         self.action_tool_result(
             ActionToolOutput {
                 action: output,
+                background,
                 observation,
             },
             screenshot,
@@ -10256,8 +10478,7 @@ impl BackgroundInput<'_> {
 }
 
 /// The route a background type_text or press_key takes. Each one reaches its
-/// target without moving the compositor's keyboard focus. Routes for other
-/// desktops plug in here, after the terminal route.
+/// target without moving the compositor's keyboard focus.
 #[derive(Debug, Clone)]
 enum BackgroundRoute {
     /// The element the call names, through AT-SPI.
@@ -10274,14 +10495,119 @@ enum BackgroundRoute {
     Seat(Box<WindowInfo>, crate::agent_seat::SeatKind),
 }
 
-/// A background click or scroll does not raise its target.
-fn background_raised(delivery: Option<KeyboardDelivery>) -> TargetRaised {
-    if delivery == Some(KeyboardDelivery::Background) {
-        TargetRaised::No
-    } else {
-        TargetRaised::Yes
+impl BackgroundRoute {
+    /// The route name results report.
+    fn name(&self) -> String {
+        match self {
+            BackgroundRoute::Element => "atspi-element".to_string(),
+            BackgroundRoute::BrowserTab(_) => "devtools-tab".to_string(),
+            BackgroundRoute::Terminal(..) => "terminal".to_string(),
+            BackgroundRoute::Seat(_, kind) => kind.name().to_string(),
+        }
     }
 }
+
+/// Why a background route did not deliver.
+#[derive(Debug)]
+enum BackgroundRefusal {
+    /// No background route serves this target or input in this session (the
+    /// desktop, window manager or app lacks one), and nothing was sent.
+    /// Focused input can deliver it instead.
+    NoRoute(String),
+    /// A wrong, ambiguous or unsafe target, or a failure after input
+    /// started. The call fails.
+    Failed(String),
+}
+
+impl From<String> for BackgroundRefusal {
+    fn from(message: String) -> Self {
+        BackgroundRefusal::Failed(message)
+    }
+}
+
+type BackgroundResult<T> = std::result::Result<T, BackgroundRefusal>;
+
+/// Where focused input goes when background delivery has no route.
+#[derive(Debug, Clone, Default)]
+struct FocusFallback {
+    target: WindowTarget,
+    /// The AT-SPI element to give its window's keyboard focus first.
+    element: Option<String>,
+}
+
+/// What a background type_text, press_key, click or scroll came to.
+enum BackgroundOutcome {
+    /// A background route ran, or the call failed. The route is named when
+    /// the input was delivered.
+    Done(ActionOutput, Option<String>),
+    /// No background route serves the call; focused input to the fallback
+    /// target would deliver it.
+    Unavailable {
+        reason: String,
+        fallback: FocusFallback,
+    },
+}
+
+/// How a call that asked for background delivery was delivered.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct BackgroundReport {
+    /// The call asked for background delivery.
+    requested: bool,
+    /// A background route delivered the input. False: the input went, or
+    /// would go, through the user's keyboard focus and pointer.
+    used: bool,
+    /// The background route used: atspi-element, devtools-tab, terminal,
+    /// x11-master, sway-transient-seat or hyprland-send-key-state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route: Option<String>,
+    /// False on the one-time notice: nothing was sent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delivered: Option<bool>,
+    /// Why no background route serves the call (on the notice).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    /// Repeat the same call to send it through normal focused input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_to_continue: Option<bool>,
+}
+
+impl BackgroundReport {
+    fn routed(route: String) -> Self {
+        Self {
+            requested: true,
+            used: true,
+            route: Some(route),
+            delivered: None,
+            reason: None,
+            retry_to_continue: None,
+        }
+    }
+
+    fn focused() -> Self {
+        Self {
+            requested: true,
+            used: false,
+            route: None,
+            delivered: None,
+            reason: None,
+            retry_to_continue: None,
+        }
+    }
+
+    fn notice(reason: &str) -> Self {
+        Self {
+            requested: true,
+            used: false,
+            route: None,
+            delivered: Some(false),
+            reason: Some(reason.to_string()),
+            retry_to_continue: Some(true),
+        }
+    }
+}
+
+/// The one-time notice when background delivery has no route.
+const BACKGROUND_NOTICE: &str = "Normal input would move the user's keyboard focus and pointer to the target. agent-workspace-linux (https://github.com/agent-sh/agent-workspace-linux) gives the agent its own session that never shares input with the user. To continue with normal input, repeat the call; this notice is not shown again in this session.";
 
 /// The window backend each seat route addresses windows through.
 fn seat_backend_matches(kind: crate::agent_seat::SeatKind, window: &WindowInfo) -> bool {
@@ -10299,12 +10625,17 @@ fn seat_backend_matches(kind: crate::agent_seat::SeatKind, window: &WindowInfo) 
     }
 }
 
-/// A seat failure, saying whether input may already have gone out.
-fn seat_error_message(error: &anyhow::Error) -> String {
-    if crate::agent_seat::input_started(error) {
-        format!("Input through the agent seat stopped partway and may have been partly delivered; re-observe the target before retrying: {error:#}")
+/// A seat failure: no route (nothing sent, focused input can deliver), or a
+/// failure that says whether input may already have gone out.
+fn seat_refusal(error: &anyhow::Error) -> BackgroundRefusal {
+    if crate::agent_seat::lacks_route(error) {
+        BackgroundRefusal::NoRoute(format!("{error:#}"))
+    } else if crate::agent_seat::input_started(error) {
+        BackgroundRefusal::Failed(format!("Input through the agent seat stopped partway and may have been partly delivered; re-observe the target before retrying: {error:#}"))
     } else {
-        format!("Nothing was sent through the agent seat: {error:#}")
+        BackgroundRefusal::Failed(format!(
+            "Nothing was sent through the agent seat: {error:#}"
+        ))
     }
 }
 
@@ -10318,36 +10649,156 @@ fn seat_focus_sentence(unchanged: Option<bool>) -> &'static str {
     }
 }
 
-/// Appended to a background refusal on GNOME, which has no second input
-/// focus: the way to give an agent its own keyboard and pointer there.
-fn background_isolation_hint() -> &'static str {
-    if env_contains("XDG_CURRENT_DESKTOP", "gnome") {
-        " For full isolation with its own keyboard and pointer, run the app in an agent-workspace-linux workspace."
+/// What a pointer or keyboard call that may have asked for background
+/// delivery did to its window, for the post-action crop: focused input
+/// (including the fallback) raises it, a background route does not.
+fn background_target_raised(background: bool, report: Option<&BackgroundReport>) -> TargetRaised {
+    if report.map_or(background, |report| report.used) {
+        TargetRaised::No
     } else {
-        ""
+        TargetRaised::Yes
+    }
+}
+
+/// A reason as one sentence.
+fn as_sentence(reason: &str) -> String {
+    let reason = reason.trim();
+    if reason.ends_with(['.', '!', '?']) {
+        reason.to_string()
+    } else {
+        format!("{reason}.")
     }
 }
 
 impl ComputerUseLinux {
+    /// The first call in a server session that asked for background
+    /// delivery and has no route gets a notice and sends nothing. Every later
+    /// one goes through focused input (None here).
+    fn background_notice(
+        &self,
+        action: &str,
+        reason: &str,
+        received: Option<serde_json::Value>,
+    ) -> Option<(ActionOutput, BackgroundReport)> {
+        if self
+            .background_notice_shown
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return None;
+        }
+        Some((
+            ActionOutput {
+                ok: false,
+                implemented: true,
+                action: action.to_string(),
+                message: format!(
+                    "Not sent: background delivery is not available here: {} {BACKGROUND_NOTICE}",
+                    as_sentence(reason)
+                ),
+                received,
+            },
+            BackgroundReport::notice(reason),
+        ))
+    }
+
+    /// Before focused input that stands in for an element route, give the
+    /// element its window's keyboard focus.
+    async fn focus_fallback_element(
+        &self,
+        fallback: &FocusFallback,
+    ) -> std::result::Result<(), String> {
+        let Some(object_ref) = fallback.element.as_deref() else {
+            return Ok(());
+        };
+        crate::atspi_tree::focus_element(object_ref)
+            .await
+            .map_err(|error| format!("Nothing was sent: no background route reaches the element, and giving it keyboard focus for normal input failed: {error:#}."))
+    }
+
+    /// Where focused input goes when a route cannot deliver: the same window
+    /// target; for a browser tab, the window whose title matches the tab;
+    /// for an element, its window, with the element focused first.
+    fn focus_fallback(
+        &self,
+        route: &BackgroundRoute,
+        target: &WindowTarget,
+        background: &BackgroundKeyboardParams,
+    ) -> std::result::Result<FocusFallback, String> {
+        match route {
+            BackgroundRoute::BrowserTab(tab) => {
+                let mut target = target.clone();
+                if trimmed_nonempty(target.title.as_deref()).is_none() {
+                    target.title = Some(tab.clone());
+                }
+                Ok(FocusFallback {
+                    target,
+                    element: None,
+                })
+            }
+            BackgroundRoute::Element => {
+                let identifier = trimmed_nonempty(background.element_identifier.as_deref());
+                let object_ref = self.resolve_object_ref(
+                    background.element_index,
+                    identifier,
+                    &background.selector(),
+                    ElementResolvePurpose::Action,
+                )?;
+                const NO_WINDOW: &str = "Nothing was sent: no background route reaches the element, and normal input needs the element's window; pass its window_id or pid.";
+                let window = if target.has_target() {
+                    target.clone()
+                } else if identifier.is_some() {
+                    return Err(NO_WINDOW.to_string());
+                } else {
+                    let snapshot = self
+                        .last_snapshot
+                        .lock()
+                        .map_err(|_| NO_WINDOW.to_string())?;
+                    match (snapshot.window_id, snapshot.pid) {
+                        (Some(window_id), _) => WindowTarget {
+                            window_id: Some(window_id),
+                            ..WindowTarget::default()
+                        },
+                        (None, Some(pid)) => WindowTarget {
+                            pid: Some(pid),
+                            ..WindowTarget::default()
+                        },
+                        (None, None) => return Err(NO_WINDOW.to_string()),
+                    }
+                };
+                Ok(FocusFallback {
+                    target: window,
+                    element: Some(object_ref),
+                })
+            }
+            _ => Ok(FocusFallback {
+                target: target.clone(),
+                element: None,
+            }),
+        }
+    }
+
     /// Which background route serves the call, or why none does. Order:
-    /// element, browser tab, terminal.
+    /// element, browser tab, terminal, agent seat.
     async fn background_route(
         &self,
         background: &BackgroundKeyboardParams,
         target: &WindowTarget,
-    ) -> std::result::Result<BackgroundRoute, String> {
+    ) -> BackgroundResult<BackgroundRoute> {
         let element = background.names_element();
         let tab = background.browser_tab();
         if element && tab.is_some() {
             return Err(
-                "Nothing was sent: name an element or a browser_tab, not both.".to_string(),
+                "Nothing was sent: name an element or a browser_tab, not both."
+                    .to_string()
+                    .into(),
             );
         }
         if element {
             if target.has_terminal_target() {
                 return Err(
                     "Nothing was sent: terminal selectors do not combine with an element target."
-                        .to_string(),
+                        .to_string()
+                        .into(),
                 );
             }
             return Ok(BackgroundRoute::Element);
@@ -10358,7 +10809,7 @@ impl ComputerUseLinux {
         if let Some(tty) = target.tty.as_deref().filter(|tty| !tty.trim().is_empty()) {
             return crate::background_input::tty_path(tty)
                 .map(|tty| BackgroundRoute::Terminal(tty, None))
-                .map_err(|error| format!("Nothing was sent: {error}."));
+                .map_err(|error| format!("Nothing was sent: {error}.").into());
         }
         // A pid inside a tmux pane has no terminal window of its own; its
         // stdin names the pane's tty.
@@ -10371,11 +10822,10 @@ impl ComputerUseLinux {
             }
         }
         if !target.has_target() {
-            return Err(format!(
-                "Nothing was sent and keyboard focus did not move: background delivery needs a target it can reach without focus: an element from get_app_state (element_index, element_identifier or role/name/states), a browser_tab with {} set, or a terminal (tty, terminal_pid, terminal_command, terminal_cwd) running tmux.{}",
-                crate::devtools::DEVTOOLS_ENV,
-                background_isolation_hint()
-            ));
+            return Err(BackgroundRefusal::NoRoute(format!(
+                "the call names no element, browser_tab ({} set), terminal or window that background input can reach",
+                crate::devtools::DEVTOOLS_ENV
+            )));
         }
         let windows = list_windows()
             .await
@@ -10404,14 +10854,14 @@ impl ComputerUseLinux {
                 Ok(kind) if seat_backend_matches(kind, window) => {
                     Ok(BackgroundRoute::Seat(Box::new(window.clone()), kind))
                 }
-                Ok(_) => Err(format!(
-                    "Nothing was sent and keyboard focus did not move: window_id {} comes from the {} window backend, which the agent seat cannot address. Name an element from get_app_state, a browser_tab, or a terminal running tmux.",
+                Ok(_) => Err(BackgroundRefusal::NoRoute(format!(
+                    "window_id {} comes from the {} window backend, which the agent seat cannot address",
                     window.window_id, window.backend
-                )),
-                Err(reason) => Err(format!(
-                    "Nothing was sent and keyboard focus did not move: window_id {} is not a terminal with a known tty. {reason}",
+                ))),
+                Err(reason) => Err(BackgroundRefusal::NoRoute(format!(
+                    "window_id {} is not a terminal with a known tty. {reason}",
                     window.window_id
-                )),
+                ))),
             },
         }
     }
@@ -10423,11 +10873,14 @@ impl ComputerUseLinux {
         kind: crate::agent_seat::SeatKind,
         input: BackgroundInput<'_>,
         input_guard: InputOperationGuard,
-    ) -> std::result::Result<String, String> {
+    ) -> BackgroundResult<String> {
         use crate::agent_seat::{self as seat, SeatKind};
         let action = input.action();
         let (shown, strokes) = match input {
-            BackgroundInput::Text(text) => (text, seat::text_strokes(text)?),
+            BackgroundInput::Text(text) => (
+                text,
+                seat::text_strokes(text).map_err(BackgroundRefusal::NoRoute)?,
+            ),
             BackgroundInput::Key(key) => {
                 let press = crate::hyprland_input::chord_to_key_press(key)
                     .ok_or_else(|| "Unsupported key.".to_string())?;
@@ -10443,14 +10896,15 @@ impl ComputerUseLinux {
         }
         if kind == SeatKind::HyprlandSendKeyState {
             let presses = match input {
-                BackgroundInput::Text(text) => crate::hyprland_input::text_to_key_presses(text)?,
+                BackgroundInput::Text(text) => crate::hyprland_input::text_to_key_presses(text)
+                    .map_err(BackgroundRefusal::NoRoute)?,
                 BackgroundInput::Key(key) => vec![crate::hyprland_input::chord_to_key_press(key)
                     .ok_or_else(|| "Unsupported key.".to_string())?],
             };
             match crate::windowing::backends::hyprland::devices_json().await {
                 Ok(json) if crate::hyprland_input::keymap_is_us(&json) => {}
-                Ok(_) => return Err("Nothing was sent: Hyprland background input maps keys for a US layout, and the active keymap is not US.".to_string()),
-                Err(error) => return Err(format!("Nothing was sent: {error:#}")),
+                Ok(_) => return Err(BackgroundRefusal::NoRoute("Hyprland background input maps keys for a US layout, and the active keymap is not US".to_string())),
+                Err(error) => return Err(format!("Nothing was sent: {error:#}").into()),
             }
             crate::windowing::backends::hyprland::send_key_events(window.window_id, &presses)
                 .await
@@ -10464,7 +10918,7 @@ impl ComputerUseLinux {
         let count = strokes.len();
         let report = seat::send_keys(kind, seat::SeatTarget::from(window), strokes, input_guard)
             .await
-            .map_err(|error| seat_error_message(&error))?;
+            .map_err(|error| seat_refusal(&error))?;
         Ok(format!(
             "Sent {count} keys to window_id {} through the agent seat {} ({}); {}",
             window.window_id,
@@ -10486,32 +10940,34 @@ impl ComputerUseLinux {
         input: impl FnOnce(f64, f64) -> crate::agent_seat::PointerInput,
         received: Option<serde_json::Value>,
         input_guard: impl Send + 'static,
-    ) -> ActionOutput {
+    ) -> BackgroundOutcome {
         use crate::agent_seat::{self as seat, SeatKind};
-        let fail = |message: String| action_result(action, Err(message), received.clone());
+        let fail = |message: String| {
+            BackgroundOutcome::Done(action_result(action, Err(message), received.clone()), None)
+        };
+        let unavailable = |reason: String| BackgroundOutcome::Unavailable {
+            reason,
+            fallback: FocusFallback::default(),
+        };
         if unsupported_target {
-            return fail(format!("Nothing was sent: a background {action} takes x and y in screenshot capture pixels, without relative, coordinate_space or an element. An element click whose element has an AT-SPI action already leaves the pointer alone."));
+            return unavailable(format!("a background {action} takes x and y in screenshot capture pixels, without relative, coordinate_space or an element"));
         }
         let (Some(x), Some(y)) = point else {
-            return fail(format!(
-                "Nothing was sent: a background {action} needs x and y in screenshot capture pixels."
+            return unavailable(format!(
+                "a background {action} needs x and y in screenshot capture pixels"
             ));
         };
         let kind = match seat::availability() {
             Ok(SeatKind::HyprlandSendKeyState) => {
-                return fail(format!("Nothing was sent and the pointer did not move: Hyprland has one seat and no second pointer; its background route (sendkeystate) sends keys only. {}", seat::OTHER_ROUTES));
+                return unavailable("Hyprland has one seat and no second pointer; its background route (sendkeystate) sends keys only".to_string());
             }
             Ok(kind) => kind,
-            Err(reason) => {
-                return fail(format!(
-                    "Nothing was sent and the pointer did not move: {reason}"
-                ))
-            }
+            Err(reason) => return unavailable(reason),
         };
         // The point must land on a named window: the seat checks that the
         // window is the one under the agent pointer before pressing.
         let Some(target) = target.filter(|target| target.has_target()) else {
-            return fail(format!("Nothing was sent: a background {action} needs a window target (window_id, pid, app_id, wm_class or window_title) for the window under x and y."));
+            return unavailable(format!("a background {action} needs a window target (window_id, pid, app_id, wm_class or window_title) for the window under x and y"));
         };
         let window = match list_windows().await {
             Ok(windows) => match resolve_window_target(&windows, &target) {
@@ -10538,35 +10994,44 @@ impl ComputerUseLinux {
             Err(error) => return fail(format!("Nothing was sent: {error:#}")),
         };
         if !seat_backend_matches(kind, &window) {
-            return fail(format!("Nothing was sent: window_id {} comes from the {} window backend, which the agent seat cannot address.", window.window_id, window.backend));
+            return unavailable(format!("window_id {} comes from the {} window backend, which the agent seat cannot address", window.window_id, window.backend));
         }
         self.indicator.action(action).await;
         match seat::send_pointer(kind, seat::SeatTarget::from(&window), input(f64::from(x), f64::from(y)), input_guard).await {
-            Ok(report) => successful_action_with_focus(
-                action,
-                &format!(
-                    "Sent the {action} at ({x}, {y}) through the agent seat {}'s pointer; the user's pointer did not move, and {}",
-                    report.seat,
-                    seat_focus_sentence(report.user_focus_unchanged)
+            Ok(report) => BackgroundOutcome::Done(
+                successful_action_with_focus(
+                    action,
+                    &format!(
+                        "Sent the {action} at ({x}, {y}) through the agent seat {}'s pointer; the user's pointer did not move, and {}",
+                        report.seat,
+                        seat_focus_sentence(report.user_focus_unchanged)
+                    ),
+                    received,
+                    None,
                 ),
-                received,
-                None,
+                Some(kind.name().to_string()),
             ),
-            Err(error) => fail(seat_error_message(&error)),
+            Err(error) => match seat_refusal(&error) {
+                BackgroundRefusal::NoRoute(reason) => unavailable(reason),
+                BackgroundRefusal::Failed(message) => fail(message),
+            },
         }
     }
 
     /// type_text or press_key with delivery "background": never focuses a
-    /// window, and refuses rather than falling back to focused input.
+    /// window. When no route serves the target, it says why and where
+    /// focused input would go instead.
     async fn dispatch_background_keyboard(
         &self,
         input: BackgroundInput<'_>,
         target: &WindowTarget,
         background: &BackgroundKeyboardParams,
         received: Option<serde_json::Value>,
-    ) -> ActionOutput {
+    ) -> BackgroundOutcome {
         let action = input.action();
-        let fail = |message: String| action_result(action, Err(message), received.clone());
+        let fail = |message: String| {
+            BackgroundOutcome::Done(action_result(action, Err(message), received.clone()), None)
+        };
         let chord = match input {
             BackgroundInput::Key(key) => match key_chord(key)
                 .and_then(|_| crate::hyprland_input::chord_to_key_press(key))
@@ -10578,39 +11043,64 @@ impl ComputerUseLinux {
         };
         let route = match self.background_route(background, target).await {
             Ok(route) => route,
-            Err(message) => return fail(message),
+            Err(BackgroundRefusal::Failed(message)) => return fail(message),
+            Err(BackgroundRefusal::NoRoute(reason)) => {
+                return BackgroundOutcome::Unavailable {
+                    reason,
+                    fallback: FocusFallback {
+                        target: target.clone(),
+                        element: None,
+                    },
+                }
+            }
         };
-        let result = match (route, input, chord) {
+        let result = match (&route, input, chord) {
             (BackgroundRoute::Element, BackgroundInput::Text(text), _) => {
                 self.background_element_text(text, target, background).await
             }
             (BackgroundRoute::Element, BackgroundInput::Key(key), Some(chord)) => {
-                return self
-                    .background_element_key(key, &chord, target, background, received)
+                match self
+                    .background_element_key(key, &chord, target, background, received.clone())
                     .await
+                {
+                    Ok(output) => {
+                        let route = output.ok.then(|| route.name());
+                        return BackgroundOutcome::Done(output, route);
+                    }
+                    Err(reason) => Err(BackgroundRefusal::NoRoute(reason)),
+                }
             }
             (BackgroundRoute::BrowserTab(tab), input, chord) => {
-                self.background_browser_tab(&tab, input, chord.as_ref())
+                self.background_browser_tab(tab, input, chord.as_ref())
                     .await
             }
             (BackgroundRoute::Terminal(tty, owner), input, chord) => {
-                self.background_terminal(&tty, owner, input, chord.as_ref())
+                self.background_terminal(tty, *owner, input, chord.as_ref())
                     .await
             }
             (BackgroundRoute::Seat(window, kind), input, _) => {
                 let input_guard = InputOperationGuard::new(
                     Arc::clone(&self.input_operation_lock).lock_owned().await,
                 );
-                self.background_seat(&window, kind, input, input_guard)
+                self.background_seat(window, *kind, input, input_guard)
                     .await
             }
             (BackgroundRoute::Element, BackgroundInput::Key(_), None) => {
-                Err("Unsupported key.".to_string())
+                Err("Unsupported key.".to_string().into())
             }
         };
         match result {
-            Ok(message) => successful_action_with_focus(action, &message, received, None),
-            Err(message) => fail(message),
+            Ok(message) => BackgroundOutcome::Done(
+                successful_action_with_focus(action, &message, received, None),
+                Some(route.name()),
+            ),
+            Err(BackgroundRefusal::Failed(message)) => fail(message),
+            Err(BackgroundRefusal::NoRoute(reason)) => {
+                match self.focus_fallback(&route, target, background) {
+                    Ok(fallback) => BackgroundOutcome::Unavailable { reason, fallback },
+                    Err(message) => fail(message),
+                }
+            }
         }
     }
 
@@ -10645,7 +11135,7 @@ impl ComputerUseLinux {
         text: &str,
         target: &WindowTarget,
         background: &BackgroundKeyboardParams,
-    ) -> std::result::Result<String, String> {
+    ) -> BackgroundResult<String> {
         let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let identifier = trimmed_nonempty(background.element_identifier.as_deref());
         self.check_element_snapshot(
@@ -10676,6 +11166,8 @@ impl ComputerUseLinux {
         background_element_text_result(text, insert)
     }
 
+    /// A key to a named element as the AT-SPI action it means. Err holds why
+    /// the key has no action there (no route; nothing was sent).
     async fn background_element_key(
         &self,
         key: &str,
@@ -10683,7 +11175,7 @@ impl ComputerUseLinux {
         target: &WindowTarget,
         background: &BackgroundKeyboardParams,
         received: Option<serde_json::Value>,
-    ) -> ActionOutput {
+    ) -> std::result::Result<ActionOutput, String> {
         let fail = |message: String| action_result("press_key", Err(message), received.clone());
         let identifier = trimmed_nonempty(background.element_identifier.as_deref());
         if let Err(message) = self.check_element_snapshot(
@@ -10691,13 +11183,13 @@ impl ComputerUseLinux {
             background.snapshot_id.as_deref(),
             identifier.is_none(),
         ) {
-            return fail(message);
+            return Ok(fail(message));
         }
         let (role, states, actions) = match identifier {
             Some(identifier) => {
                 match crate::atspi_tree::element_role_states_actions(identifier).await {
                     Ok(described) => described,
-                    Err(error) => return fail(format!("Nothing was sent: {error:#}")),
+                    Err(error) => return Ok(fail(format!("Nothing was sent: {error:#}"))),
                 }
             }
             None => match self.resolve_cached_node(
@@ -10710,18 +11202,11 @@ impl ComputerUseLinux {
                     node.states,
                     node.actions.into_iter().map(|action| action.name).collect(),
                 ),
-                Err(message) => return fail(message),
+                Err(message) => return Ok(fail(message)),
             },
         };
         let action_name =
-            match crate::background_input::element_key_action(chord, &role, &states, &actions) {
-                Ok(action) => action,
-                Err(reason) => {
-                    return fail(format!(
-                        "Nothing was sent and keyboard focus did not move: {reason}."
-                    ))
-                }
-            };
+            crate::background_input::element_key_action(chord, &role, &states, &actions)?;
         self.indicator.keys(key, false).await;
         let params = ActionParams {
             element_index: background.element_index,
@@ -10746,7 +11231,7 @@ impl ComputerUseLinux {
                 output.message
             );
         }
-        output
+        Ok(output)
     }
 
     async fn background_browser_tab(
@@ -10754,19 +11239,20 @@ impl ComputerUseLinux {
         selector: &str,
         input: BackgroundInput<'_>,
         chord: Option<&crate::background_input::Chord>,
-    ) -> std::result::Result<String, String> {
-        let port = crate::devtools::configured_port().map_err(|error| {
-            format!("Nothing was sent: {error}.{}", background_isolation_hint())
-        })?;
+    ) -> BackgroundResult<String> {
+        if let Some(chord) = chord {
+            crate::devtools::key_supported(chord).map_err(BackgroundRefusal::NoRoute)?;
+        }
+        let port = crate::devtools::configured_port().map_err(BackgroundRefusal::NoRoute)?;
         let tabs = crate::devtools::list_tabs(port)
             .await
-            .map_err(|error| format!("Nothing was sent: {error:#}"))?;
+            .map_err(|error| BackgroundRefusal::NoRoute(format!("{error:#}")))?;
         let tab = crate::devtools::select_tab(&tabs, selector)
             .map_err(|error| format!("Nothing was sent: {error}."))?
             .clone();
         let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let place = format!("tab {} ({:?})", tab.id, tab.title);
-        match (input, chord) {
+        let result = match (input, chord) {
             (BackgroundInput::Text(text), _) => {
                 // The tab's field is unknown until DevTools reads it.
                 self.indicator.text("type_text", text, true).await;
@@ -10793,7 +11279,8 @@ impl ComputerUseLinux {
                     .map_err(|error| format!("{place}: {error}."))
             }
             (BackgroundInput::Key(_), None) => Err("Unsupported key.".to_string()),
-        }
+        };
+        result.map_err(BackgroundRefusal::Failed)
     }
 
     async fn background_terminal(
@@ -10802,7 +11289,7 @@ impl ComputerUseLinux {
         owner: Option<u32>,
         input: BackgroundInput<'_>,
         chord: Option<&crate::background_input::Chord>,
-    ) -> std::result::Result<String, String> {
+    ) -> BackgroundResult<String> {
         use crate::background_input as bg;
         let probe = bg::probe_terminal(tty)
             .await
@@ -10814,53 +11301,57 @@ impl ComputerUseLinux {
                 .is_some_and(|(_, holder)| bg::is_same_or_descendant(*holder, owner));
             if !held {
                 return Err(format!(
-                    "Nothing was sent: the window's terminal (pid {owner}) does not hold the pty master of {} as this server sees it, so the tty may belong to another devpts instance, such as a container's. Pass the tty of a terminal on this host.{}",
+                    "Nothing was sent: the window's terminal (pid {owner}) does not hold the pty master of {} as this server sees it, so the tty may belong to another devpts instance, such as a container's. Pass the tty of a terminal on this host.",
                     tty.display(),
-                    background_isolation_hint()
-                ));
+                )
+                .into());
             }
         }
         let Some(channel) = probe.channel.as_ref() else {
-            return Err(format!(
-                "Nothing was sent and keyboard focus did not move: {}.{}",
-                probe.refusal(tty),
-                background_isolation_hint()
-            ));
+            return Err(BackgroundRefusal::NoRoute(probe.refusal(tty)));
         };
         let route = channel.describe();
+        if let Some(chord) = chord {
+            bg::terminal_key_supported(channel, chord).map_err(|reason| {
+                BackgroundRefusal::NoRoute(format!("{route} on {}: {reason}", tty.display()))
+            })?;
+        }
         let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
-        match (input, chord) {
+        let result = match (input, chord) {
             (BackgroundInput::Text(text), _) => {
                 self.indicator.text("type_text", text, false).await;
                 bg::terminal_send_text(channel, tty, text)
                     .await
-                    .map_err(|error| format!("{route} on {}: {error:#}", tty.display()))?;
-                Ok(format!(
-                    "Sent to the program on {} through {route}. The terminal window was not focused. Terminal contents were not verified; re-observe before retrying.",
-                    tty.display()
-                ))
+                    .map_err(|error| format!("{route} on {}: {error:#}", tty.display()))
+                    .map(|()| format!(
+                        "Sent to the program on {} through {route}. The terminal window was not focused. Terminal contents were not verified; re-observe before retrying.",
+                        tty.display()
+                    ))
             }
             (BackgroundInput::Key(key), Some(chord)) => {
                 self.indicator.keys(key, false).await;
-                let sent = bg::terminal_send_key(channel, tty, chord)
+                bg::terminal_send_key(channel, tty, chord)
                     .await
-                    .map_err(|error| format!("{route} on {}: {error}", tty.display()))?;
-                Ok(format!(
-                    "Sent {key} (as {sent}) to the program on {} through {route}. The terminal window was not focused.",
-                    tty.display()
-                ))
+                    .map_err(|error| format!("{route} on {}: {error}", tty.display()))
+                    .map(|sent| format!(
+                        "Sent {key} (as {sent}) to the program on {} through {route}. The terminal window was not focused.",
+                        tty.display()
+                    ))
             }
             (BackgroundInput::Key(_), None) => Err("Unsupported key.".to_string()),
-        }
+        };
+        result.map_err(BackgroundRefusal::Failed)
     }
 }
 
 /// The background type_text result for an AT-SPI insert into a named element.
+/// An element AT-SPI cannot insert into has no route (nothing was sent).
 fn background_element_text_result(
     text: &str,
     insert: Result<FocusedTextInsert>,
-) -> std::result::Result<String, String> {
+) -> BackgroundResult<String> {
     const MAY_HAVE_CHANGED: &str = "The field may have changed; re-observe it before retrying.";
+    let failed = |message: String| Err(BackgroundRefusal::Failed(message));
     match insert {
         Ok(FocusedTextInsert::Verified { role, .. }) => Ok(format!(
             "Inserted through AT-SPI EditableText into the named {role} without focusing it; it reads back the text at the insertion point with the rest unchanged. Keyboard focus did not move."
@@ -10868,29 +11359,29 @@ fn background_element_text_result(
         Ok(FocusedTextInsert::PasswordUnverifiable) => Ok(
             "Inserted through AT-SPI EditableText into the named password field without focusing it; its contents cannot be read back to verify. Keyboard focus did not move.".to_string(),
         ),
-        Ok(FocusedTextInsert::NotEditable(reason)) => Err(format!("Nothing was sent: {reason}.")),
-        Ok(FocusedTextInsert::PasswordField) => {
-            Err("Nothing was sent: the element is a password field.".to_string())
-        }
+        Ok(FocusedTextInsert::NotEditable(reason)) => Err(BackgroundRefusal::NoRoute(reason)),
+        Ok(FocusedTextInsert::PasswordField) => Err(BackgroundRefusal::NoRoute(
+            "the element is a password field AT-SPI cannot insert into".to_string(),
+        )),
         Ok(FocusedTextInsert::Mismatch {
             expected_count,
             read_count,
             read_text,
             read_truncated,
-        }) => Err(format!(
+        }) => failed(format!(
             "AT-SPI took the insert, but the field does not read it back: expected {text:?} at the insertion point, the rest unchanged, and {expected_count} characters in all; read {read_text:?}{} at the insertion point and {read_count} characters. {MAY_HAVE_CHANGED}",
             if read_truncated { " (first part)" } else { "" }
         )),
-        Ok(FocusedTextInsert::ReadbackFailed) => Err(format!(
+        Ok(FocusedTextInsert::ReadbackFailed) => failed(format!(
             "AT-SPI took the insert, but reading the field back failed. {MAY_HAVE_CHANGED}"
         )),
-        Ok(FocusedTextInsert::ReadbackTimedOut) => Err(format!(
+        Ok(FocusedTextInsert::ReadbackTimedOut) => failed(format!(
             "AT-SPI took the insert, but reading the field back timed out. {MAY_HAVE_CHANGED}"
         )),
         Ok(FocusedTextInsert::EditFailed {
             reason,
             may_have_changed,
-        }) => Err(format!(
+        }) => failed(format!(
             "AT-SPI insert failed: {reason}. {}",
             if may_have_changed {
                 MAY_HAVE_CHANGED
@@ -10898,7 +11389,7 @@ fn background_element_text_result(
                 "No text was changed."
             }
         )),
-        Err(error) => Err(format!("Nothing was sent: {error:#}.")),
+        Err(error) => failed(format!("Nothing was sent: {error:#}.")),
     }
 }
 
@@ -23057,6 +23548,7 @@ mod post_action_capture_tests {
     fn action_tool_output_omits_observation_fields_when_not_requested() {
         let output = ActionToolOutput {
             action: action_result("click", Ok(Vec::new()), None),
+            background: None,
             observation: PostActionObservation::default(),
         };
         let value = serde_json::to_value(output).unwrap();

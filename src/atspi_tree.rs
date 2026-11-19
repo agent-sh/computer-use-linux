@@ -1393,6 +1393,36 @@ pub(crate) async fn element_role_states_actions(
     .context("reading the element exceeded its 5-second deadline")?
 }
 
+/// Gives `object_ref_id` the keyboard focus of its window through AT-SPI
+/// Component.GrabFocus, so focused input to that window reaches it.
+pub(crate) async fn focus_element(object_ref_id: &str) -> Result<()> {
+    timeout(ACTION_QUERY_TIMEOUT, async {
+        let conn = connect().await?;
+        let object_ref = object_ref_from_id(object_ref_id)?;
+        let proxy = open_accessible(&conn, &object_ref)
+            .await
+            .with_context(|| format!("failed to open AT-SPI object {object_ref_id}"))?;
+        let component = proxy
+            .proxies()
+            .await?
+            .component()
+            .await
+            .context("the element has no AT-SPI Component, so it cannot take keyboard focus")?;
+        if !component
+            .grab_focus()
+            .await
+            .context("AT-SPI GrabFocus failed")?
+        {
+            return Err(anyhow!(
+                "the element did not take keyboard focus (AT-SPI GrabFocus returned false)"
+            ));
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("focusing the element exceeded its 5-second deadline")?
+}
+
 /// The AT-SPI window of the app owning `target_pid` that matches the verified
 /// compositor window, or why none can be proven to. One app root can hold
 /// several windows (Chromium holds them all), and its AT-SPI focus can lag

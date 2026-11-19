@@ -8,14 +8,21 @@ Three fixtures, chosen by the first argument after the binary:
 atspi     A GTK 3 app on a private Xvfb display and D-Bus session. Text goes
           into a named entry through AT-SPI EditableText and reads back,
           keys that mean an action run it, and the target window never gets
-          a focus-in event. Ambiguous keys and control characters are refused.
+          a focus-in event. A control character in a single-line entry has
+          no route: the first such call gets the one-time notice and sends
+          nothing. Later keys with no mapped action (Enter on a check box,
+          a letter on a button, Ctrl+Enter) go to normal focused input,
+          which on this private display has no input tool to send with.
 terminal  A private tmux server: text and keys reach a pane by its tty and
           through the client attached on another tty, and a GNU screen window
-          by its tty. A plain pty with no tmux or screen gets a refusal, or,
-          where the kernel allows taking its pty master, the text.
+          by its tty. A screen window's own tty and a plain pty with no
+          multiplexer have no route: the first gets the notice, later ones
+          go to focused input (no terminal window here, so nothing is
+          sent), unless the kernel allows taking the pty master.
 devtools  A headless Chrome on a loopback DevTools port named by its
           DevToolsActivePort file: text goes into the tab's focused input and
-          Enter submits its form. A server without the setting refuses.
+          Enter submits its form. A server without the setting gives the
+          notice first, then tries focused input.
 
 Missing tools skip the fixture outside CI and fail it in CI.
 """
@@ -119,6 +126,24 @@ def refused(result, *needles):
     for needle in needles:
         assert needle in action['message'], (needle, action['message'])
     return action
+
+
+def notice(result, *needles):
+    """The one-time notice: nothing sent, the reason, how to continue."""
+    background = result.get('background') or {}
+    assert not result['ok'] and background.get('delivered') is False, result
+    assert background.get('retry_to_continue') is True and background.get('used') is False, result
+    assert 'agent-workspace-linux' in result['message'] and 'repeat the call' in result['message'], result
+    for needle in needles:
+        assert needle in background.get('reason', ''), (needle, background)
+    return result
+
+
+def focused(result):
+    """A call with no background route that went to normal focused input."""
+    assert result.get('background') == {'requested': True, 'used': False}, result
+    assert 'agent-workspace-linux' not in result['message'], result
+    return result
 
 
 def server_env(tmp, **extra):
@@ -242,8 +267,8 @@ def atspi():
         ok(mcp.tool('type_text', text='s3cret', element_index=index('SECRET_ENTRY'), snapshot_id=snap),
            'password field')
         wait_for(lambda: 'SECRET_LEN 6' in lines(), 'password text')
-        refused(mcp.tool('type_text', text='a\nb', element_index=index('TARGET_ENTRY'), snapshot_id=snap),
-                'U+000A')
+        notice(mcp.tool('type_text', text='a\nb', element_index=index('TARGET_ENTRY'), snapshot_id=snap),
+               'U+000A')
         refused(mcp.tool('type_text', text='x', element_index=index('TARGET_ENTRY'), snapshot_id=snap,
                          delivery='focus'), 'background only')
 
@@ -251,20 +276,22 @@ def atspi():
         wait_for(lambda: 'ACTIVATED' in lines(), 'button press')
         ok(mcp.tool('press_key', key='space', element_index=index('CHECKME'), snapshot_id=snap))
         wait_for(lambda: 'TOGGLED True' in lines(), 'check box toggle')
-        refused(mcp.tool('press_key', key='Enter', element_index=index('CHECKME'), snapshot_id=snap),
-                'Nothing was sent')
-        refused(mcp.tool('press_key', key='a', element_index=index('PRESSME'), snapshot_id=snap),
-                'Nothing was sent')
-        refused(mcp.tool('press_key', key='Ctrl+Enter', element_index=index('PRESSME'), snapshot_id=snap),
-                'modifiers')
         submit = mcp.tool('press_key', key='Enter', element_index=index('SUBMIT_ENTRY'), snapshot_id=snap)
         ok(submit, 'activate')
         wait_for(lambda: 'SUBMITTED' in lines(), 'entry activate')
-        refused(mcp.tool('press_key', key='Enter', delivery='background'), 'needs a target')
-
         time.sleep(.3)
         focus = [line for line in lines() if 'FOCUS_IN' in line]
         assert not focus, focus
+        assert lines().count('TOGGLED True') == 1 and lines().count('ACTIVATED') == 1, lines()
+        assert not any('\\n' in line for line in lines() if line.startswith('CHANGED')), lines()
+
+        # After the notice, keys with no AT-SPI action go to focused input:
+        # the element gets keyboard focus, then the key goes to its window.
+        # This display has no input tool (xdotool is a stub), so the key
+        # itself is not sent; what counts is that nothing refuses it.
+        for key, name in (('Enter', 'CHECKME'), ('a', 'PRESSME'), ('Ctrl+Enter', 'PRESSME')):
+            focused(mcp.tool('press_key', key=key, element_index=index(name), snapshot_id=snap))
+        focused(mcp.tool('press_key', key='Enter', delivery='background'))
         assert lines().count('TOGGLED True') == 1 and lines().count('ACTIVATED') == 1, lines()
         print('atspi ok')
     finally:
@@ -330,7 +357,7 @@ def terminal():
                 if window['ok']:
                     assert 'pty master' in window['message'], window
                 else:
-                    assert 'GNU screen' in window['message'], window
+                    notice(window, 'GNU screen')
                 prefix = 'w:' if window['ok'] else ''
                 ok(mcp.tool('type_text', text='in screen', tty=screen_tty, delivery='background'), 'GNU screen')
                 ok(mcp.tool('press_key', key='Enter', tty=screen_tty, delivery='background'), 'GNU screen')
@@ -383,8 +410,12 @@ def terminal():
                 assert 'pty master' in result['message'] or 'TIOCSTI' in result['message'], result
                 wait_for(lambda: Path(tmp, 'plain.out').read_text() == 'plain\n', 'plain text')
             else:
-                assert 'nothing reaches the program' in result['message'], result
-                assert 'tmux' in result['message'], result
+                if (result.get('background') or {}).get('retry_to_continue'):
+                    notice(result, 'nothing reaches the program', 'tmux')
+                else:
+                    # The notice came earlier in this session; focused input
+                    # finds no terminal window for this pty, so nothing goes.
+                    focused(result)
                 time.sleep(.3)
                 assert Path(tmp, 'plain.out').read_text() == '', 'refused text arrived'
             print('terminal ok')
@@ -444,8 +475,12 @@ def devtools():
             wait_for(lambda: title() == 'CUL tab test', 'page load', 20)
 
             bare = Mcp(server_env(tmp))
-            refused(bare.tool('type_text', text='x', browser_tab='CUL tab'), 'COMPUTER_USE_LINUX_DEVTOOLS')
+            notice(bare.tool('type_text', text='x', browser_tab='CUL tab'), 'COMPUTER_USE_LINUX_DEVTOOLS')
+            # Repeated: focused input to the window titled like the tab. A
+            # headless browser has no window here, so nothing is sent.
+            focused(bare.tool('type_text', text='x', browser_tab='CUL tab'))
             bare.close()
+            assert title() == 'CUL tab test', title()
 
             mcp = Mcp(server_env(tmp, COMPUTER_USE_LINUX_DEVTOOLS=str(port_file)))
             ok(mcp.tool('type_text', text='XYZ', browser_tab='CUL tab'), 'reads it back', 'DevTools')

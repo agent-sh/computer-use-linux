@@ -4,15 +4,21 @@
 
 x11: a private Xvfb with openbox, two xterms and a GTK 3 window. The agent
 types into one xterm and the GTK entry while the user's focused xterm keeps
-its focus and its own typing. A background click is refused while openbox
-runs; after openbox exits, it presses a GTK button with the agent pointer.
+its focus and its own typing. Alt+F4, which openbox grabs, has no agent-seat
+route: the first such call sends nothing and returns the one-time notice,
+the repeated call closes the window through normal focused input, and a
+later background click under openbox goes through the user's pointer
+without the notice. After openbox exits, the agent pointer presses a GTK
+button.
 A server killed with SIGKILL leaves its XInput master behind, and the next
 server removes it; a server that exits normally removes its own.
 
 sway: a headless sway (WLR_BACKENDS=headless) with two foot terminals and a
 GTK 3 window. The agent types into one foot through a transient seat while
-seat0 keeps its focus and the user's typing, a GTK client is refused (GTK
-never binds a seat added after it starts), and the transient seat is gone
+seat0 keeps its focus and the user's typing. A GTK client has no agent-seat
+route (GTK never binds a seat added after it starts): the first call gets the
+notice and sends nothing, the repeated call types through seat0, and so do
+later calls with no route, without the notice. The transient seat is gone
 after the server exits. Needs sway 1.10 or later; COMPUTER_USE_LINUX_TEST_SWAY
 may name a command that runs sway (for example in a container) with the same
 XDG_RUNTIME_DIR path and pid namespace. Clients run in this process's
@@ -70,7 +76,10 @@ def gtk_app(root, toolkit_title):
     entry.connect('changed', lambda e: (root / 'gtk-entry').write_text(e.get_text()))
     button = Gtk.Button(label='Agent button')
     button.set_size_request(200, 80)
-    button.connect('clicked', lambda b: (root / 'gtk-clicked').write_text('clicked'))
+    def clicked(_button):
+        with (root / 'gtk-clicked').open('a') as log:
+            log.write('clicked\n')
+    button.connect('clicked', clicked)
     box.pack_start(entry, False, False, 0)
     box.pack_start(button, False, False, 0)
     window.add(box)
@@ -136,6 +145,20 @@ class Server:
             self.proc.wait(timeout=5)
 
 
+def notice(result):
+    """The one-time notice: nothing sent, the reason, and how to continue."""
+    background = result.get('background') or {}
+    return (result.get('ok') is False and background.get('delivered') is False
+            and background.get('retry_to_continue') is True and background.get('used') is False
+            and 'agent-workspace-linux' in result.get('message', '') and 'repeat the call' in result.get('message', ''))
+
+
+def focused_fallback(result):
+    """Delivered through normal focused input, reported without the notice."""
+    return (result.get('ok') is True and result.get('background') == {'requested': True, 'used': False}
+            and 'agent-workspace-linux' not in result.get('message', ''))
+
+
 def check(failures, condition, message):
     if not condition:
         failures.append(message)
@@ -186,9 +209,12 @@ def run_x11(binary, root):
         user_file, agent_file = root / 'user.txt', root / 'agent.txt'
         spawn('xterm', '-T', 'userterm', '-geometry', '60x10+0+0', '-e', 'sh', '-c', 'stty -echo; exec cat > ' + str(user_file))
         spawn('xterm', '-T', 'agentterm', '-geometry', '60x10+640+0', '-e', 'sh', '-c', 'stty -echo; exec cat > ' + str(agent_file))
+        close_file = root / 'close.txt'
+        spawn('xterm', '-T', 'closeterm', '-geometry', '30x5+0+600', '-e', 'sh', '-c', 'stty -echo; exec cat > ' + str(close_file))
         spawn('/usr/bin/python3', __file__, '--gtk', str(root), 'CUL seat fixture')
         user = wait_for(lambda: out('xdotool', 'search', '--name', '^userterm$').split(), 'userterm')[0]
         wait_for(lambda: out('xdotool', 'search', '--name', '^agentterm$').split(), 'agentterm')
+        wait_for(lambda: out('xdotool', 'search', '--name', '^closeterm$').split(), 'closeterm')
         wait_for(lambda: (root / 'gtk-button').exists(), 'GTK fixture')
         out('xdotool', 'windowactivate', '--sync', user)
         out('xdotool', 'type', 'user1\n')
@@ -220,19 +246,35 @@ def run_x11(binary, root):
         check(failures, result.get('ok') is True, f'type_text line: {result}')
         result = server.call('press_key', dict(key='Enter', delivery='background', title='agentterm'))
         check(failures, result.get('ok') is True, f'press_key Enter: {result}')
-        # openbox grabs Alt+F4 on the root window; it would close the user's window.
-        result = server.call('press_key', dict(key='Alt+F4', delivery='background', title='agentterm'))
-        check(failures, result.get('ok') is False and 'grabbed' in result.get('message', ''), f'a window manager chord is refused: {result}')
+        # openbox grabs Alt+F4 on the root window, so the agent seat has no
+        # route for it. The first such call in the session sends nothing.
+        result = server.call('press_key', dict(key='Alt+F4', delivery='background', title='closeterm'))
+        check(failures, notice(result) and 'grabbed' in result['background'].get('reason', ''), f'the first call with no route is the notice: {result}')
+        time.sleep(.5)
+        check(failures, out('xdotool', 'search', '--name', '^closeterm$').strip() != '', 'the notice closed nothing')
+        check(failures, focus() == user_focus, 'the notice left the user focus alone')
         result = server.call('type_text', dict(text='Gtk ok', delivery='background', title='CUL seat fixture'))
         check(failures, result.get('ok') is True, f'type_text into the GTK entry: {result}')
         check(failures, len(masters()) == 1, f'one agent master while the seat is in use: {masters()}')
-        result = server.call('click', dict(x=10, y=10, delivery='background', window_title='agentterm'))
-        check(failures, result.get('ok') is False and 'window manager' in result.get('message', ''), f'background click refused under openbox: {result}')
         out('xdotool', 'type', 'user2\n')
         check(failures, focus() == user_focus, 'the user keeps keyboard focus')
         check(failures, settled(user_file, 'user1\nuser2\n') == 'user1\nuser2\n', f'user text intact: {read(user_file)!r}')
         check(failures, settled(agent_file, 'Agent!x\nline\n') == 'Agent!x\nline\n', f'agent text in the agent xterm: {read(agent_file)!r}')
         check(failures, settled(root / 'gtk-entry', 'Gtk ok') == 'Gtk ok', f'agent text in the GTK entry: {read(root / "gtk-entry")!r}')
+
+        # Repeating the call delivers it through normal focused input:
+        # openbox closes the window.
+        result = server.call('press_key', dict(key='Alt+F4', delivery='background', title='closeterm'))
+        check(failures, focused_fallback(result), f'the repeated call goes through focused input: {result}')
+        check(failures, wait_for(lambda: out('xdotool', 'search', '--name', '^closeterm$').strip() == '', 'closeterm closed', 5), 'Alt+F4 reached closeterm')
+        # Later calls with no route deliver without the notice: a background
+        # click under a window manager raises and focuses the target, then
+        # clicks with the user's pointer.
+        agent_window = out('xdotool', 'search', '--name', '^agentterm$').split()[0]
+        geometry = dict(line.split('=', 1) for line in out('xdotool', 'getwindowgeometry', '--shell', agent_window).split())
+        result = server.call('click', dict(x=int(geometry['X']) + 20, y=int(geometry['Y']) + 20, delivery='background', window_title='agentterm'))
+        check(failures, focused_fallback(result), f'a background click under openbox goes through the user pointer: {result}')
+        check(failures, focus() == agent_window, f'the focused click focused the agent xterm: {focus()} != {agent_window}')
 
         chrome_binary = shutil.which('google-chrome') or shutil.which('chromium')
         if chrome_binary:
@@ -261,6 +303,8 @@ def run_x11(binary, root):
         check(failures, len(stale) == 1, f'the killed server left its master: {stale}')
         # Another client takes the freed X resource range, so the next
         # server's master gets a different name than the leftover one.
+        # closeterm's range is free too, so take two.
+        spawn('xprop', '-root', '-spy', '_NET_ACTIVE_WINDOW')
         spawn('xprop', '-root', '-spy', '_NET_ACTIVE_WINDOW')
         time.sleep(.5)
         server = Server(binary, env)
@@ -280,7 +324,7 @@ def run_x11(binary, root):
         check(failures, result.get('ok') is False and 'not the target' in result.get('message', ''), f'a click off the target is refused: {result}')
         result = server.call('click', dict(x=x, y=y, delivery='background', window_id=gtk_window))
         check(failures, result.get('ok') is True, f'background click without a window manager: {result}')
-        check(failures, settled(root / 'gtk-clicked', 'clicked') == 'clicked', 'the agent pointer pressed the GTK button')
+        check(failures, settled(root / 'gtk-clicked', 'clicked\n') == 'clicked\n', 'the agent pointer pressed the GTK button')
         check(failures, focus() == user_focus, 'the user keeps keyboard focus after the agent click')
         server.close()
         check(failures, masters() == [], f'a server that exits removes its master: {masters()}')
@@ -372,21 +416,15 @@ def run_sway(binary, root):
         check(failures, result.get('ok') is True, f'type_text line: {result}')
         result = server.call('press_key', dict(key='Enter', delivery='background', title='agentterm'))
         check(failures, result.get('ok') is True, f'press_key Enter: {result}')
-        for chord, word in (('Ctrl+q', 'binds'), ('Ctrl+e', 'binds'), ('Super+Return', 'Super')):
-            result = server.call('press_key', dict(key=chord, delivery='background', title='agentterm'))
-            check(failures, result.get('ok') is False and word in result.get('message', ''), f'{chord} is refused: {result}')
         current = seats()
         # The seat lives for one call, so no other client can bind it between calls.
         check(failures, list(current) == ['seat0'], f'no agent seat outlives its call: {current}')
         check(failures, current.get('seat0') == user['id'], f'seat0 keeps the user foot: {current}')
-        # In another binding mode, plain keys are that mode's bindings.
-        msg('mode resize')
-        result = server.call('type_text', dict(text='h', delivery='background', title='agentterm'))
-        check(failures, result.get('ok') is False and 'binding mode' in result.get('message', ''), f'keys are refused outside the default mode: {result}')
-        msg('mode default')
         check(failures, workspaces().get('1') == (True, True) and not workspaces().get('2', (False,))[0], f'the user stays on workspace 1: {workspaces()}')
-        result = server.call('type_text', dict(text='nope', delivery='background', title='CUL seat fixture'))
-        check(failures, result.get('ok') is False and 'GTK' in result.get('message', ''), f'a GTK client is refused: {result}')
+        # GTK binds only the seats present when it started, so the agent seat
+        # has no route to it. The first such call sends nothing.
+        result = server.call('type_text', dict(text='gtk', delivery='background', title='CUL seat fixture'))
+        check(failures, notice(result) and 'GTK' in result['background'].get('reason', ''), f'the first call with no route is the notice: {result}')
         clickterm = find('clickterm')
         rect, user_rect = clickterm['rect'], find('userterm')['rect']
         result = server.call('click', dict(x=user_rect['x'] + 5, y=user_rect['y'] + 5, delivery='background', window_title='clickterm'))
@@ -399,13 +437,26 @@ def run_sway(binary, root):
         current = seats()
         check(failures, current.get('seat0') == user['id'], f'seat0 focus survives the agent click: {current}')
         check(failures, settled(agent_file, 'Agent!x\nline\n') == 'Agent!x\nline\n', f'agent text in the agent foot: {read(agent_file)!r}')
-        check(failures, read(root / 'gtk-entry') is None, 'nothing reached the refused GTK client')
+        check(failures, read(root / 'gtk-entry') is None, 'the notice sent nothing to the GTK client')
         check(failures, read(user_file) == 'user1\n', f'nothing reached the user foot: {read(user_file)!r}')
         # Focused typing goes through wtype, which would bind the agent seat;
         # the server drops that seat first, so the text reaches seat0's foot.
         result = server.call('type_text', dict(text='focused\n'))
         check(failures, result.get('ok') is True, f'focused type_text after background input: {result}')
         check(failures, settled(user_file, 'user1\nfocused\n') == 'user1\nfocused\n', f'focused text reached the user foot: {read(user_file)!r}')
+        # Repeating the call delivers it through seat0, and later calls with
+        # no route (GTK again, sway-bound and Super chords) do too, without
+        # the notice.
+        result = server.call('type_text', dict(text='gtk', delivery='background', title='CUL seat fixture'))
+        check(failures, focused_fallback(result), f'the repeated call goes through focused input: {result}')
+        check(failures, settled(root / 'gtk-entry', 'gtk') == 'gtk', f'the repeated call reached the GTK entry: {read(root / "gtk-entry")!r}')
+        for chord in ('Ctrl+q', 'Super+Return'):
+            result = server.call('press_key', dict(key=chord, delivery='background', title='CUL seat fixture'))
+            check(failures, focused_fallback(result), f'{chord} goes through focused input: {result}')
+        result = server.call('type_text', dict(text='more', delivery='background', title='CUL seat fixture'))
+        check(failures, focused_fallback(result), f'a later call with no route goes through focused input: {result}')
+        check(failures, settled(root / 'gtk-entry', 'gtkmore') == 'gtkmore', f'the later call reached the GTK entry: {read(root / "gtk-entry")!r}')
+        msg(f"[con_id={user['id']}] focus")
         server.close()
         wait_for(lambda: not any(name.startswith('transient-') for name in seats()), 'transient seat removal', 5)
         check(failures, list(seats()) == ['seat0'], f'the transient seat is gone after exit: {seats()}')

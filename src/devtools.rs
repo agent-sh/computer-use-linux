@@ -726,6 +726,11 @@ async fn insert_text_in(
     })
 }
 
+/// Whether DevTools has key events for `chord`, checked before any connection.
+pub(crate) fn key_supported(chord: &Chord) -> std::result::Result<(), String> {
+    key_events(chord).map(drop)
+}
+
 /// Send a chord to the tab's focused element. Returns the element it went to.
 pub(crate) async fn press_key(
     port: u16,
