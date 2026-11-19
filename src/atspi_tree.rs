@@ -1330,13 +1330,16 @@ async fn insert_password_text(
             summary.role
         )));
     };
-    let (count, caret) = match proxies.text().await {
-        Ok(text) => (
-            read_before_edit(deadline, text.character_count(), "character count").await?,
-            read_before_edit(deadline, text.caret_offset(), "caret offset").await?,
-        ),
-        Err(_) => (0, 0),
+    // Without Text the insertion point is unknown, and SetTextContents would
+    // replace whatever the field holds.
+    let Ok(text) = proxies.text().await else {
+        return Ok(FocusedTextInsert::NotEditable(format!(
+            "the named {} does not expose AT-SPI Text, so its insertion point is unknown",
+            summary.role
+        )));
     };
+    let count = read_before_edit(deadline, text.character_count(), "character count").await?;
+    let caret = read_before_edit(deadline, text.caret_offset(), "caret offset").await?;
     let call = if count <= 0 {
         edit_call(editable.set_text_contents(requested), "SetTextContents").await
     } else {

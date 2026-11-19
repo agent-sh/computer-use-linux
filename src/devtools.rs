@@ -229,7 +229,58 @@ fn dechunk(mut body: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
+/// Whether the listener on 127.0.0.1:`port` belongs to this user. Once
+/// the browser exits, another user could take the port and read what is
+/// typed, so a port whose listener is someone else's is refused.
+fn listener_is_ours(port: u16) -> std::result::Result<(), String> {
+    // SAFETY: getuid cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let tables = ["/proc/net/tcp", "/proc/net/tcp6"]
+        .iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .collect::<Vec<_>>();
+    let owners = tables
+        .iter()
+        .flat_map(|table| loopback_listener_uids(table, port))
+        .collect::<Vec<_>>();
+    if owners.is_empty() {
+        return Err(format!(
+            "nothing listens on 127.0.0.1:{port}; is the browser running with --remote-debugging-port={port}?"
+        ));
+    }
+    if owners.iter().any(|owner| *owner != uid) {
+        return Err(format!(
+            "the listener on 127.0.0.1:{port} belongs to another user, so nothing is sent to it"
+        ));
+    }
+    Ok(())
+}
+
+/// The uids of listening sockets in a `/proc/net/tcp` or `tcp6` table that
+/// accept connections to 127.0.0.1:`port`.
+fn loopback_listener_uids(table: &str, port: u16) -> Vec<u32> {
+    const REACHES_LOOPBACK: &[&str] = &[
+        "0100007F",
+        "00000000",
+        "00000000000000000000000000000000",
+        "0000000000000000FFFF00000100007F",
+    ];
+    table
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            let (address, local_port) = fields.get(1)?.split_once(':')?;
+            let listening = fields.get(3)? == &"0A";
+            let matches = u16::from_str_radix(local_port, 16).ok()? == port
+                && REACHES_LOOPBACK.contains(&address);
+            (listening && matches).then(|| fields.get(7)?.parse().ok())?
+        })
+        .collect()
+}
+
 async fn connect(port: u16) -> Result<TcpStream> {
+    listener_is_ours(port).map_err(|error| anyhow!(error))?;
     timeout(CONNECT_TIMEOUT, TcpStream::connect(("127.0.0.1", port)))
         .await
         .with_context(|| format!("connecting to DevTools on 127.0.0.1:{port} timed out"))?
@@ -889,6 +940,17 @@ mod tests {
             .unwrap_err()
             .contains("no page tab"));
         assert!(select_tab(&tabs, " ").is_err());
+    }
+
+    #[test]
+    fn loopback_listeners_are_read_from_proc_net_tcp() {
+        let table = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:2406 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 1 1
+   1: 0100007F:2407 00000000:0000 01 00000000:00000000 00:00000000 00000000  1000        0 2 1
+   2: 0101A8C0:2406 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 3 1
+   3: 00000000:2406 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1002        0 4 1";
+        assert_eq!(loopback_listener_uids(table, 9222), vec![1000, 1002]);
+        assert!(loopback_listener_uids(table, 9223).is_empty());
     }
 
     #[test]

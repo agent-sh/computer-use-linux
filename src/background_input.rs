@@ -295,7 +295,7 @@ pub(crate) fn available_routes(at_spi: bool) -> Vec<String> {
             routes.push(tool);
         }
     }
-    if legacy_tiocsti_enabled() == Some(true) {
+    if legacy_tiocsti_enabled() == Some(true) && has_cap_sys_admin() {
         routes.push("tiocsti");
     }
     routes.into_iter().map(str::to_string).collect()
@@ -318,11 +318,45 @@ pub(crate) fn tty_path(tty: &str) -> std::result::Result<PathBuf, String> {
 
 /// The pseudo-terminal a process reads from: its stdin, when that is a pts.
 pub(crate) fn process_tty(pid: u32) -> Option<PathBuf> {
-    let target = fs::read_link(format!("/proc/{pid}/fd/0")).ok()?;
-    target
-        .to_str()
-        .is_some_and(|path| path.starts_with("/dev/pts/"))
-        .then_some(target)
+    let (_, tty, _) = read_process(pid)?;
+    let path = pts_path(tty?)?;
+    // The pts must be this namespace's: the process holds it open.
+    process_holds_tty(pid, &path).then_some(path)
+}
+
+/// `/dev/pts/N` for Unix98 pty device numbers (majors 136 to 143).
+fn pts_path((major, minor): TtyNumbers) -> Option<PathBuf> {
+    (136..=143)
+        .contains(&major)
+        .then(|| PathBuf::from(format!("/dev/pts/{}", (major - 136) * 256 + minor)))
+}
+
+/// The pts number of a `/dev/pts/N` path.
+fn pts_number(tty: &Path) -> Option<u32> {
+    tty.to_str()?.strip_prefix("/dev/pts/")?.parse().ok()
+}
+
+/// Whether one of the process's standard fds is this very tty: the same
+/// device on the same devpts instance, so a container's pts with the same
+/// number does not count.
+fn process_holds_tty(pid: u32, tty: &Path) -> bool {
+    let Ok(want) = fs::metadata(tty) else {
+        return false;
+    };
+    (0..3).any(|fd| {
+        fs::metadata(format!("/proc/{pid}/fd/{fd}"))
+            .is_ok_and(|have| have.dev() == want.dev() && have.rdev() == want.rdev())
+    })
+}
+
+fn same_mount_namespace(pid: u32) -> bool {
+    match (
+        fs::read_link(format!("/proc/{pid}/ns/mnt")),
+        fs::read_link("/proc/self/ns/mnt"),
+    ) {
+        (Ok(theirs), Ok(ours)) => theirs == ours,
+        _ => false,
+    }
 }
 
 /// A tmux pane that background input reaches.
@@ -540,6 +574,20 @@ pub(crate) fn legacy_tiocsti_enabled() -> Option<bool> {
     parse_legacy_tiocsti(&fs::read_to_string(LEGACY_TIOCSTI).ok()?)
 }
 
+/// Whether this process has CAP_SYS_ADMIN in its effective set.
+fn has_cap_sys_admin() -> bool {
+    fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| effective_caps(&status))
+        .is_some_and(|caps| caps & (1 << 21) != 0)
+}
+
+fn effective_caps(status: &str) -> Option<u64> {
+    status
+        .lines()
+        .find_map(|line| u64::from_str_radix(line.strip_prefix("CapEff:")?.trim(), 16).ok())
+}
+
 fn parse_legacy_tiocsti(value: &str) -> Option<bool> {
     match value.trim() {
         "0" => Some(false),
@@ -635,12 +683,12 @@ fn process_args(pid: u32) -> Vec<String> {
         .collect()
 }
 
-fn processes_on_tty(major: u32, minor: u32) -> Vec<TtyProcess> {
+fn processes_on_tty(tty: &Path, major: u32, minor: u32) -> Vec<TtyProcess> {
     all_pids()
         .into_iter()
         .filter_map(|pid| {
-            let (_, tty, comm) = read_process(pid)?;
-            (tty == Some((major, minor))).then(|| TtyProcess {
+            let (_, ctty, comm) = read_process(pid)?;
+            (ctty == Some((major, minor)) && process_holds_tty(pid, tty)).then(|| TtyProcess {
                 pid,
                 comm,
                 args: process_args(pid),
@@ -652,8 +700,13 @@ fn processes_on_tty(major: u32, minor: u32) -> Vec<TtyProcess> {
 
 /// The terminal emulator holding the tty's pty master: its pid, name, and the
 /// master's fd number in it. Found through `fdinfo`'s `tty-index`.
-fn pty_master_holder(minor: u32) -> Option<(u32, String, i32)> {
+fn pty_master_holder(index: u32) -> Option<(u32, String, i32)> {
     all_pids().into_iter().find_map(|pid| {
+        // A tty-index is per devpts instance; another mount namespace may
+        // have its own pts with the same number.
+        if !same_mount_namespace(pid) {
+            return None;
+        }
         let fds = fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
         for fd in fds.flatten() {
             let Ok(target) = fs::read_link(fd.path()) else {
@@ -665,7 +718,7 @@ fn pty_master_holder(minor: u32) -> Option<(u32, String, i32)> {
             let number = fd.file_name().to_str()?.parse::<i32>().ok()?;
             let info =
                 fs::read_to_string(format!("/proc/{pid}/fdinfo/{number}")).unwrap_or_default();
-            if fdinfo_tty_index(&info) == Some(minor) {
+            if fdinfo_tty_index(&info) == Some(index) {
                 let comm = read_process(pid)
                     .map(|(_, _, comm)| comm)
                     .unwrap_or_default();
@@ -776,8 +829,8 @@ impl TerminalProbe {
 /// only print on the screen, so it is never a channel.
 pub(crate) async fn probe_terminal(tty: &Path) -> Result<TerminalProbe> {
     let (major, minor) = tty_numbers(tty)?;
-    let processes = processes_on_tty(major, minor);
-    let holder = pty_master_holder(minor);
+    let processes = processes_on_tty(tty, major, minor);
+    let holder = pts_number(tty).and_then(pty_master_holder);
     let mut probe = TerminalProbe {
         emulator: holder.as_ref().map(|(pid, name, _)| (name.clone(), *pid)),
         ..TerminalProbe::default()
@@ -850,16 +903,22 @@ pub(crate) async fn probe_terminal(tty: &Path) -> Result<TerminalProbe> {
             .push("no tmux pane or client is on it".to_string()),
     }
 
-    if let Some(channel) = screen_channel(&processes) {
+    if let Some(channel) = screen_channel(&processes, holder.as_ref()) {
         probe.channel = Some(channel);
         return Ok(probe);
     }
 
     match legacy_tiocsti_enabled() {
-        Some(true) => {
+        // The server is never on the target's controlling tty, and on any
+        // other tty the kernel allows TIOCSTI only with CAP_SYS_ADMIN.
+        Some(true) if has_cap_sys_admin() => {
             probe.channel = Some(TerminalChannel::Tiocsti);
             return Ok(probe);
         }
+        Some(true) => probe.notes.push(
+            "TIOCSTI into another terminal needs CAP_SYS_ADMIN, which this server does not have"
+                .to_string(),
+        ),
         Some(false) => probe
             .notes
             .push("the kernel disables TIOCSTI (dev.tty.legacy_tiocsti = 0)".to_string()),
@@ -1001,13 +1060,26 @@ fn wezterm_pane_in_listing(value: &serde_json::Value, tty: &str) -> Option<u64> 
 
 /// A GNU screen window on the tty (its programs carry `STY` and `WINDOW`),
 /// or a screen client whose server it started.
-fn screen_channel(processes: &[TtyProcess]) -> Option<TerminalChannel> {
-    for process in processes {
-        if let Some(session) = environ_value(&process.environ, "STY").filter(|v| !v.is_empty()) {
-            return Some(TerminalChannel::Screen {
-                session,
-                window: environ_value(&process.environ, "WINDOW"),
-            });
+fn screen_channel(
+    processes: &[TtyProcess],
+    holder: Option<&(u32, String, i32)>,
+) -> Option<TerminalChannel> {
+    // STY and WINDOW are inherited, so a terminal started inside a screen
+    // window carries them too. The tty is a screen window only when the
+    // session's own SCREEN process holds its pty master.
+    if let Some((holder_pid, _, _)) = holder {
+        for process in processes {
+            let Some(session) =
+                environ_value(&process.environ, "STY").filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            if screen_session_pid(&session) == Some(*holder_pid) {
+                return Some(TerminalChannel::Screen {
+                    session,
+                    window: environ_value(&process.environ, "WINDOW"),
+                });
+            }
         }
     }
     let clients = processes
@@ -1018,9 +1090,14 @@ fn screen_channel(processes: &[TtyProcess]) -> Option<TerminalChannel> {
     if clients.is_empty() {
         return None;
     }
+    // The server a client started is its child; it names itself SCREEN in
+    // its arguments (its comm stays screen).
     all_pids().into_iter().find_map(|pid| {
-        let (ppid, _, comm) = read_process(pid)?;
-        (comm == "SCREEN" && clients.contains(&ppid)).then(|| TerminalChannel::Screen {
+        let (ppid, _, _) = read_process(pid)?;
+        let server = process_args(pid)
+            .first()
+            .is_some_and(|arg0| arg0 == "SCREEN");
+        (server && clients.contains(&ppid)).then(|| TerminalChannel::Screen {
             session: pid.to_string(),
             window: None,
         })
@@ -1206,6 +1283,19 @@ fn write_master(fd: &std::os::fd::OwnedFd, bytes: &[u8]) -> Result<()> {
 
 /// Paste bytes into a screen window through a private file and screen's
 /// paste buffer.
+/// The screen register background input pastes through.
+const SCREEN_REGISTER: char = 'q';
+
+/// A path quoted for screen's command parser.
+fn screen_quote(path: &str) -> String {
+    format!("'{}'", path.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
+/// The SCREEN server pid at the front of a session name `PID.name`.
+fn screen_session_pid(session: &str) -> Option<u32> {
+    session.split('.').next()?.parse().ok()
+}
+
 async fn screen_paste(session: &str, window: Option<&str>, bytes: &[u8]) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
@@ -1231,18 +1321,20 @@ async fn screen_paste(session: &str, window: Option<&str>, bytes: &[u8]) -> Resu
     if let Some(window) = window {
         base.extend(["-p", window]);
     }
+    // One eval reads the file into a private register, pastes it and clears
+    // it, so a failed read pastes nothing and no text stays in screen. -X
+    // returns before screen runs the command; the -Q round trip after it
+    // returns only once screen has, so the file can go.
+    let read = format!("readreg {SCREEN_REGISTER} {}", screen_quote(&path_text));
+    let paste = format!("paste {SCREEN_REGISTER}");
+    let clear = format!("register {SCREEN_REGISTER} ''");
     let result = async {
-        let mut read = base.clone();
-        read.extend(["-X", "readbuf", &path_text]);
-        run_tool("screen", &read, &[], None).await?;
-        let mut paste = base.clone();
-        paste.extend(["-X", "paste", "."]);
-        run_tool("screen", &paste, &[], None).await
+        let mut eval = base.clone();
+        eval.extend(["-X", "eval", &read, &paste, &clear]);
+        run_tool("screen", &eval, &[], None).await?;
+        run_tool("screen", &["-S", session, "-Q", "info"], &[], None).await
     }
     .await;
-    // screen runs each -X command after its client returns; give it time to
-    // read the file before it goes.
-    tokio::time::sleep(Duration::from_millis(300)).await;
     let _ = fs::remove_file(&path);
     result.map(|_| ())
 }
@@ -1413,6 +1505,20 @@ mod tests {
             Some(17)
         );
         assert_eq!(fdinfo_tty_index("pos:\t0\n"), None);
+    }
+
+    #[test]
+    fn pty_numbers_caps_and_screen_names_parse() {
+        assert_eq!(pts_path((136, 5)), Some(PathBuf::from("/dev/pts/5")));
+        assert_eq!(pts_path((137, 2)), Some(PathBuf::from("/dev/pts/258")));
+        assert_eq!(pts_path((4, 1)), None);
+        assert_eq!(pts_number(Path::new("/dev/pts/12")), Some(12));
+        assert_eq!(
+            effective_caps("Name:\tx\nCapEff:\t0000000000200000\n"),
+            Some(1 << 21)
+        );
+        assert_eq!(screen_session_pid("4242.culbg"), Some(4242));
+        assert_eq!(screen_quote("/run/a b/f"), "'/run/a b/f'");
     }
 
     #[test]

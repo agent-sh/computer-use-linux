@@ -324,6 +324,36 @@ def terminal():
             elif os.environ.get('CI'):
                 raise SystemExit('missing screen')
 
+            # kitty with remote control on its own socket, on a private display.
+            if shutil.which('kitty') and shutil.which('Xvfb'):
+                display = f':{500 + os.getpid() % 400}'
+                xvfb = subprocess.Popen(['Xvfb', display, '-screen', '0', '800x600x24', '-nolisten', 'tcp'],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                kitty = None
+                try:
+                    wait_for(lambda: Path(f'/tmp/.X11-unix/X{display[1:]}').exists(), 'Xvfb')
+                    kitty_env = {k: v for k, v in os.environ.items() if k not in ('WAYLAND_DISPLAY', 'KITTY_LISTEN_ON')}
+                    kitty_env['DISPLAY'] = display
+                    kitty = subprocess.Popen(['kitty', '--config', 'NONE', '-o', 'allow_remote_control=yes',
+                                              '--listen-on', f'unix:@cul-test-{os.getpid()}',
+                                              'sh', '-c', f'tty > {tmp}/kitty.tty; stty -echo; exec cat > {tmp}/kitty.out'],
+                                             env=kitty_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                             start_new_session=True)
+                    kitty_tty = wait_for(lambda: Path(tmp, 'kitty.tty').exists() and Path(tmp, 'kitty.tty').read_text().strip(),
+                                         'kitty tty', 30)
+                    ok(mcp.tool('type_text', text='in kitty', tty=kitty_tty, delivery='background'), 'kitty remote control')
+                    ok(mcp.tool('press_key', key='Enter', tty=kitty_tty, delivery='background'), 'kitty remote control')
+                    wait_for(lambda: Path(tmp, 'kitty.out').read_text() == 'in kitty\n', 'kitty text')
+                finally:
+                    for proc in (kitty, xvfb):
+                        if proc:
+                            try:
+                                os.killpg(proc.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+            else:
+                print('kitty case skipped: kitty or Xvfb missing')
+
             # A plain pty with no multiplexer: refused unless the kernel lets
             # this server take the pty master (then the text must arrive).
             pid, master = pty.fork()
