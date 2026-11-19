@@ -482,18 +482,23 @@ impl Session {
 
 /// Finds the focused element through shadow roots and same-origin frames.
 const FOCUSED_FIELD_SCRIPT: &str = r#"(() => {
-  let e = document.activeElement;
+  let doc = document, e = doc.activeElement;
   for (let i = 0; i < 32 && e; i++) {
     if (e.shadowRoot && e.shadowRoot.activeElement) { e = e.shadowRoot.activeElement; continue; }
     if (e.tagName === 'IFRAME' || e.tagName === 'FRAME') {
       let inner = null;
       try { inner = e.contentDocument; } catch (_) {}
-      if (inner && inner.activeElement && inner.activeElement !== inner.body) { e = inner.activeElement; continue; }
-      return {kind: 'frame'};
+      if (!inner) return {kind: 'frame'};
+      doc = inner; e = inner.activeElement; continue;
     }
     break;
   }
-  if (!e || e === document.body || e === document.documentElement) return {kind: 'none'};
+  // A designMode document or a contenteditable body is an editor itself.
+  if (e && (e === doc.body || e === doc.documentElement)) {
+    if (doc.designMode === 'on' || (doc.body && doc.body.isContentEditable)) return {kind: 'editable', tag: 'body'};
+    return {kind: 'none'};
+  }
+  if (!e) return {kind: 'none'};
   const tag = e.tagName.toLowerCase();
   if (tag === 'textarea' || tag === 'input') {
     let start = null, end = null;

@@ -311,15 +311,31 @@ def terminal():
             if shutil.which('screen'):
                 screen_env = dict(env, SCREENDIR=f'{tmp}/screen')
                 Path(tmp, 'screen').mkdir(mode=0o700)
-                subprocess.run(['screen', '-dmS', 'culbg', 'sh', '-c', f'tty > {tmp}/screen.tty; exec cat > {tmp}/screen.out'],
-                               check=True, env=screen_env)
-                screen_tty = wait_for(lambda: Path(tmp, 'screen.tty').exists() and Path(tmp, 'screen.tty').read_text().strip(),
-                                      'screen tty')
+                # A screen client on its own pty: its tty reaches the session's
+                # current window. The window's own tty is refused.
+                pid, screen_master = pty.fork()
+                if pid == 0:
+                    os.environ.update(screen_env, TERM='xterm')
+                    os.execvp('screen', ['screen', '-S', 'culbg', 'sh', '-c',
+                                         f'tty > {tmp}/window.tty; stty -echo; exec cat > {tmp}/screen.out'])
+                children.append(pid)
+                window_tty = wait_for(lambda: drain(screen_master) is None and Path(tmp, 'window.tty').exists()
+                                      and Path(tmp, 'window.tty').read_text().strip(), 'screen window tty')
+                screen_tty = os.readlink(f'/proc/{pid}/fd/0')
                 mcp.close()
                 mcp = Mcp(screen_env)
+                # Refused, unless the kernel lets this server take the window's
+                # pty master, which reaches exactly that tty.
+                window = mcp.tool('type_text', text='w:', tty=window_tty, delivery='background')
+                if window['ok']:
+                    assert 'pty master' in window['message'], window
+                else:
+                    assert 'GNU screen' in window['message'], window
+                prefix = 'w:' if window['ok'] else ''
                 ok(mcp.tool('type_text', text='in screen', tty=screen_tty, delivery='background'), 'GNU screen')
                 ok(mcp.tool('press_key', key='Enter', tty=screen_tty, delivery='background'), 'GNU screen')
-                wait_for(lambda: Path(tmp, 'screen.out').read_text() == 'in screen\n', 'screen text')
+                wait_for(lambda: drain(screen_master) is None and Path(tmp, 'screen.out').read_text() == prefix + 'in screen\n',
+                         'screen text')
                 subprocess.run(['screen', '-S', 'culbg', '-X', 'quit'], env=screen_env)
             elif os.environ.get('CI'):
                 raise SystemExit('missing screen')
@@ -396,8 +412,10 @@ def drain(fd):
 
 # ---------------------------------------------------------------- devtools
 
-PAGE = ('<title>CUL tab test</title><form onsubmit="document.title=\'SUBMITTED \'+f.value;return false">'
+PAGE = ('<title>CUL tab test</title><form onsubmit="document.title=\'SUBMITTED \'+f.value;'
+        'var b=fr.contentDocument.body;b.focus();return false">'
         '<input id=f name=f value=abc autofocus oninput="document.title=\'V:\'+this.value"></form>'
+        '<iframe id=fr srcdoc="<body contenteditable oninput=&quot;parent.document.title=\'E:\'+document.body.textContent&quot;></body>"></iframe>'
         '<script>f.focus();f.setSelectionRange(3,3)</script>')
 
 
@@ -436,6 +454,9 @@ def devtools():
             refused(mcp.tool('type_text', text='x\ny', browser_tab='V:abc'), 'control character')
             ok(mcp.tool('press_key', key='Enter', browser_tab='V:abc'), 'dispatchKeyEvent', 'input type=text')
             wait_for(lambda: title() == 'SUBMITTED abcXYZ', 'form submit', 5)
+            # Submitting focused a same-origin iframe's contenteditable body.
+            ok(mcp.tool('type_text', text='ED', browser_tab='SUBMITTED'), 'contenteditable body')
+            wait_for(lambda: title() == 'E:ED', 'iframe editor text', 5)
             print('devtools ok')
         finally:
             if mcp:

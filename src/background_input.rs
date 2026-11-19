@@ -448,6 +448,7 @@ fn tmux_sockets(processes: &[TtyProcess]) -> Vec<PathBuf> {
 fn uid_of(pid: u32) -> u32 {
     fs::metadata(format!("/proc/{pid}"))
         .map(|metadata| metadata.uid())
+        // SAFETY: getuid cannot fail.
         .unwrap_or_else(|_| unsafe { libc::getuid() })
 }
 
@@ -572,6 +573,26 @@ pub(crate) async fn tmux_send_key(pane: &TmuxPane, key: &str) -> Result<()> {
 /// process push input into a tty with TIOCSTI.
 pub(crate) fn legacy_tiocsti_enabled() -> Option<bool> {
     parse_legacy_tiocsti(&fs::read_to_string(LEGACY_TIOCSTI).ok()?)
+}
+
+/// The server's own controlling tty, where TIOCSTI needs no capability.
+fn own_controlling_tty() -> Option<TtyNumbers> {
+    stat_tty(&fs::read_to_string("/proc/self/stat").ok()?)
+}
+
+/// Whether `pid` is `ancestor` or one of its descendants.
+pub(crate) fn is_same_or_descendant(pid: u32, ancestor: u32) -> bool {
+    let mut current = pid;
+    for _ in 0..64 {
+        if current == ancestor {
+            return true;
+        }
+        match read_process(current) {
+            Some((parent, _, _)) if parent > 1 && parent != current => current = parent,
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// Whether this process has CAP_SYS_ADMIN in its effective set.
@@ -903,15 +924,23 @@ pub(crate) async fn probe_terminal(tty: &Path) -> Result<TerminalProbe> {
             .push("no tmux pane or client is on it".to_string()),
     }
 
-    if let Some(channel) = screen_channel(&processes, holder.as_ref()) {
+    if let Some(channel) = screen_channel(&processes) {
         probe.channel = Some(channel);
         return Ok(probe);
+    }
+    if processes
+        .iter()
+        .any(|process| environ_value(&process.environ, "STY").is_some())
+    {
+        probe.notes.push(
+            "it is inside GNU screen, whose window numbers cannot be tied to a tty; pass the tty of the terminal the screen client runs in".to_string(),
+        );
     }
 
     match legacy_tiocsti_enabled() {
         // The server is never on the target's controlling tty, and on any
         // other tty the kernel allows TIOCSTI only with CAP_SYS_ADMIN.
-        Some(true) if has_cap_sys_admin() => {
+        Some(true) if has_cap_sys_admin() || own_controlling_tty() == Some((major, minor)) => {
             probe.channel = Some(TerminalChannel::Tiocsti);
             return Ok(probe);
         }
@@ -1060,28 +1089,13 @@ fn wezterm_pane_in_listing(value: &serde_json::Value, tty: &str) -> Option<u64> 
 
 /// A GNU screen window on the tty (its programs carry `STY` and `WINDOW`),
 /// or a screen client whose server it started.
-fn screen_channel(
-    processes: &[TtyProcess],
-    holder: Option<&(u32, String, i32)>,
-) -> Option<TerminalChannel> {
+fn screen_channel(processes: &[TtyProcess]) -> Option<TerminalChannel> {
     // STY and WINDOW are inherited, so a terminal started inside a screen
     // window carries them too. The tty is a screen window only when the
     // session's own SCREEN process holds its pty master.
-    if let Some((holder_pid, _, _)) = holder {
-        for process in processes {
-            let Some(session) =
-                environ_value(&process.environ, "STY").filter(|value| !value.is_empty())
-            else {
-                continue;
-            };
-            if screen_session_pid(&session) == Some(*holder_pid) {
-                return Some(TerminalChannel::Screen {
-                    session,
-                    window: environ_value(&process.environ, "WINDOW"),
-                });
-            }
-        }
-    }
+    // A screen window's own tty is refused: screen's window numbers can be
+    // swapped without updating WINDOW in the programs, so the number cannot
+    // be trusted to name this tty. Its client's tty is used instead.
     let clients = processes
         .iter()
         .filter(|process| process.comm == "screen")
@@ -1274,26 +1288,60 @@ pub(crate) async fn terminal_send_key(
     }
 }
 
+/// Write to a copied pty master without blocking: a program that stops
+/// reading would otherwise hold the input lock forever. Gives up after two
+/// seconds and says how much went in.
 fn write_master(fd: &std::os::fd::OwnedFd, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let mut file = fs::File::from(fd.try_clone()?);
-    file.write_all(bytes)
-        .context("writing to the pty master failed")
+    use std::os::fd::AsRawFd;
+    let raw = fd.as_raw_fd();
+    // SAFETY: fcntl and write on an fd this process owns, with a valid buffer.
+    unsafe {
+        let flags = libc::fcntl(raw, libc::F_GETFL);
+        if flags < 0 || libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+            return Err(anyhow!(
+                "cannot make the pty master non-blocking: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut sent = 0;
+    while sent < bytes.len() {
+        // SAFETY: the slice is valid for its length.
+        let written =
+            unsafe { libc::write(raw, bytes[sent..].as_ptr().cast(), bytes.len() - sent) };
+        if written > 0 {
+            sent += written as usize;
+            continue;
+        }
+        let error = std::io::Error::last_os_error();
+        let retry = matches!(error.raw_os_error(), Some(libc::EAGAIN | libc::EINTR));
+        if !retry || std::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "writing to the pty master stopped after {sent} of {} bytes: {}",
+                bytes.len(),
+                if retry {
+                    "the program is not reading".to_string()
+                } else {
+                    error.to_string()
+                }
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
 }
 
 /// Paste bytes into a screen window through a private file and screen's
 /// paste buffer.
 /// The screen register background input pastes through.
-const SCREEN_REGISTER: char = 'q';
+/// Written as `^_` (0x1F) in commands: a control-character register no
+/// one stores text or macros in.
+const SCREEN_REGISTER: &str = "^_";
 
 /// A path quoted for screen's command parser.
 fn screen_quote(path: &str) -> String {
     format!("'{}'", path.replace('\\', "\\\\").replace('\'', "\\'"))
-}
-
-/// The SCREEN server pid at the front of a session name `PID.name`.
-fn screen_session_pid(session: &str) -> Option<u32> {
-    session.split('.').next()?.parse().ok()
 }
 
 async fn screen_paste(session: &str, window: Option<&str>, bytes: &[u8]) -> Result<()> {
@@ -1517,7 +1565,6 @@ mod tests {
             effective_caps("Name:\tx\nCapEff:\t0000000000200000\n"),
             Some(1 << 21)
         );
-        assert_eq!(screen_session_pid("4242.culbg"), Some(4242));
         assert_eq!(screen_quote("/run/a b/f"), "'/run/a b/f'");
     }
 

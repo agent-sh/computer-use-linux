@@ -10185,9 +10185,14 @@ enum BackgroundRoute {
     Element,
     /// A browser tab over DevTools; the selector is its id, URL or title.
     BrowserTab(String),
-    /// The program in a terminal, through tmux (or TIOCSTI where the kernel
-    /// allows it).
-    Terminal(std::path::PathBuf),
+    /// The program in a terminal, by its tty. The pid is the terminal
+    /// window's own process when the tty came from a window: its terminal
+    /// must hold that tty's pty master, so a terminal whose pts belongs to
+    /// another devpts instance (a container) is never mistaken for one here.
+    Terminal(std::path::PathBuf, Option<u32>),
+    /// A Hyprland window, through send_key_state, when
+    /// COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND=1 opts in.
+    HyprlandWindow,
 }
 
 /// Appended to a background refusal on GNOME, which has no second input
@@ -10229,7 +10234,7 @@ impl ComputerUseLinux {
         }
         if let Some(tty) = target.tty.as_deref().filter(|tty| !tty.trim().is_empty()) {
             return crate::background_input::tty_path(tty)
-                .map(BackgroundRoute::Terminal)
+                .map(|tty| BackgroundRoute::Terminal(tty, None))
                 .map_err(|error| format!("Nothing was sent: {error}."));
         }
         // A pid inside a tmux pane has no terminal window of its own; its
@@ -10239,7 +10244,7 @@ impl ComputerUseLinux {
             .filter(|_| target.terminal_command.is_none() && target.terminal_cwd.is_none())
         {
             if let Some(tty) = crate::background_input::process_tty(pid) {
-                return Ok(BackgroundRoute::Terminal(tty));
+                return Ok(BackgroundRoute::Terminal(tty, None));
             }
         }
         if !target.has_target() {
@@ -10256,8 +10261,13 @@ impl ComputerUseLinux {
             .map_err(|error| format!("Nothing was sent: {error:#}"))?;
         match window.terminal.as_ref() {
             Some(terminal) => crate::background_input::tty_path(&terminal.tty)
-                .map(BackgroundRoute::Terminal)
+                .map(|tty| BackgroundRoute::Terminal(tty, window.pid))
                 .map_err(|error| format!("Nothing was sent: {error}.")),
+            None if hyprland_background_applies(target)
+                && window.backend == registry::HYPRLAND_BACKEND =>
+            {
+                Ok(BackgroundRoute::HyprlandWindow)
+            }
             None => Err(format!(
                 "Nothing was sent and keyboard focus did not move: window_id {} is not a terminal with a known tty, and this desktop has no route that types into a whole window without focusing it. Name an element from get_app_state, a browser_tab, or a terminal running tmux.{}",
                 window.window_id,
@@ -10303,8 +10313,34 @@ impl ComputerUseLinux {
                 self.background_browser_tab(&tab, input, chord.as_ref())
                     .await
             }
-            (BackgroundRoute::Terminal(tty), input, chord) => {
-                self.background_terminal(&tty, input, chord.as_ref()).await
+            (BackgroundRoute::Terminal(tty, owner), input, chord) => {
+                self.background_terminal(&tty, owner, input, chord.as_ref())
+                    .await
+            }
+            (BackgroundRoute::HyprlandWindow, input, _) => {
+                let (shown, presses) = match input {
+                    BackgroundInput::Text(text) => {
+                        (text, crate::hyprland_input::text_to_key_presses(text))
+                    }
+                    BackgroundInput::Key(key) => (
+                        key,
+                        crate::hyprland_input::chord_to_key_press(key)
+                            .map(|press| vec![press])
+                            .ok_or_else(|| "Unsupported key.".to_string()),
+                    ),
+                };
+                let _input_guard = InputOperationGuard::new(
+                    Arc::clone(&self.input_operation_lock).lock_owned().await,
+                );
+                return self
+                    .hyprland_background_input(action, target, shown, presses, received.clone())
+                    .await
+                    .unwrap_or_else(|| {
+                        fail(format!(
+                            "Nothing was sent: the target is not a Hyprland window.{}",
+                            background_isolation_hint()
+                        ))
+                    });
             }
             (BackgroundRoute::Element, BackgroundInput::Key(_), None) => {
                 Err("Unsupported key.".to_string())
@@ -10501,6 +10537,7 @@ impl ComputerUseLinux {
     async fn background_terminal(
         &self,
         tty: &Path,
+        owner: Option<u32>,
         input: BackgroundInput<'_>,
         chord: Option<&crate::background_input::Chord>,
     ) -> std::result::Result<String, String> {
@@ -10508,6 +10545,19 @@ impl ComputerUseLinux {
         let probe = bg::probe_terminal(tty)
             .await
             .map_err(|error| format!("Nothing was sent: {error:#}"))?;
+        if let Some(owner) = owner {
+            let held = probe
+                .emulator
+                .as_ref()
+                .is_some_and(|(_, holder)| bg::is_same_or_descendant(*holder, owner));
+            if !held {
+                return Err(format!(
+                    "Nothing was sent: the window's terminal (pid {owner}) does not hold the pty master of {} as this server sees it, so the tty may belong to another devpts instance, such as a container's. Pass the tty of a terminal on this host.{}",
+                    tty.display(),
+                    background_isolation_hint()
+                ));
+            }
+        }
         let Some(channel) = probe.channel.as_ref() else {
             return Err(format!(
                 "Nothing was sent and keyboard focus did not move: {}.{}",
