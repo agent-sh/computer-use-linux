@@ -21,6 +21,7 @@ include = [
     "/examples/*.rs",
     "/gnome-shell-extension/**",
     "/scripts/app_state_capture_order_test.py",
+    "/scripts/background_input_test.py",
     "/scripts/cosmic_focus_test.py",
     "/scripts/gnome_indicator_test.py",
     "/scripts/hyprland_background_test.py",

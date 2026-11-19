@@ -92,6 +92,18 @@ SEMANTIC_SELECTORS = {
 
 OBJECT_REF_SELECTORS = SEMANTIC_SELECTORS | {"element_identifier"}
 
+# type_text and press_key deliver in the background through these.
+BACKGROUND_KEYBOARD_PROPS = {
+    "delivery",
+    "element_index",
+    "snapshot_id",
+    "element_identifier",
+    "role",
+    "name",
+    "states",
+    "browser_tab",
+}
+
 POST_ACTION_CAPTURE_TOOLS = {
     "activate_window",
     "move_window",
@@ -461,6 +473,8 @@ def main() -> int:
                 raise AssertionError(f"{name} exposes a raw process-control parameter: {sorted(props)}")
             if name in {"press_key", "type_text", "activate_window"} and not FOCUS_SELECTORS <= props:
                 raise AssertionError(f"{name} is missing focus target selectors: {sorted(FOCUS_SELECTORS - props)}")
+            if name in {"press_key", "type_text"} and not BACKGROUND_KEYBOARD_PROPS <= props:
+                raise AssertionError(f"{name} is missing background delivery parameters: {sorted(BACKGROUND_KEYBOARD_PROPS - props)}")
             if name == "click" and not SEMANTIC_SELECTORS <= props:
                 raise AssertionError(f"{name} is missing semantic element selectors: {sorted(SEMANTIC_SELECTORS - props)}")
             if name in {"perform_action", "set_value"} and not OBJECT_REF_SELECTORS <= props:

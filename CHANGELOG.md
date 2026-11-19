@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `type_text` and `press_key` take `delivery: "background"`, which reaches the target without moving the user's keyboard focus, the keyboard half of [#480](https://github.com/agent-sh/computer-use-linux/issues/480). The target picks the route, and a target no route serves is refused with nothing sent, never typed through focus. An element from `get_app_state` (`element_index`, `element_identifier` or `role`/`name`/`states`) takes text through AT-SPI EditableText at its caret or end, read back like the focused-field fallback; a password field is filled and reported unverifiable. `press_key` on an element runs the AT-SPI action the key means: Enter or space on a button or menu item, space on a check box, radio button or toggle, Enter on a link or on a single-line field with an `activate` action, and nothing else. `browser_tab` sends text (`Input.insertText`, read back in inputs and textareas) and keys (`Input.dispatchKeyEvent`) to a tab of a browser the user started with `--remote-debugging-port`, named by the new `COMPUTER_USE_LINUX_DEVTOOLS` (a port or a `DevToolsActivePort` path; loopback only). A terminal named by `tty` or the terminal selectors is reached through kitty remote control, `wezterm cli`, tmux, GNU screen, TIOCSTI where the kernel allows it, or the terminal's pty master through `pidfd_getfd` where ptrace rules allow it, and the result names the channel. On GNOME, refusals point to agent-workspace-linux for a fully isolated session. Naming an element or `browser_tab` selects background delivery by itself. `doctor` lists the usable routes in `capabilities.background_input`.
+- The `press_key` grammar accepts `KP_Enter` (keypad Enter) on every backend.
+
 ## [0.7.56] - 2026-11-17
 
 ### Added

@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.56";
-export const GENERATED_TOOL_CATALOG_HASH = "88fdbedb6fab2e9bde4236382de77f35d32542894a77d7ec3ff9a3fde53078ba";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "dbc5fec64bafdd29cb7dc22464241e3583e59dbfffe052c02493fc9632b2ed8e";
+export const GENERATED_TOOL_CATALOG_HASH = "fa3f2480b7ff98d9788a4837383cf35cc10937dca510d2712f7011dbbc4b4db8";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "233c6cef34a2869261c2c2b83254798f2dc7559a1486d0bd2713d8b1ff1ee1a5";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -1317,9 +1317,24 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). With PIXELFLUX_CU and PIXELFLUX_CU_TOKEN set, chords go to pixelflux. An unreachable pixelflux falls through to the routes below; a pixelflux error does not. On X11, chords go through xdotool (XTEST), or ydotool when xdotool is missing or cannot start. On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. When ydotool is absent and the session has no RemoteDesktop portal (for example wlroots compositors), chords go through wtype instead. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. On KDE Plasma every key in a portal chord is a physical keycode. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, kp_enter (keypad Enter), escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). With PIXELFLUX_CU and PIXELFLUX_CU_TOKEN set, chords go to pixelflux. An unreachable pixelflux falls through to the routes below; a pixelflux error does not. On X11, chords go through xdotool (XTEST), or ydotool when xdotool is missing or cannot start. On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. When ydotool is absent and the session has no RemoteDesktop portal (for example wlroots compositors), chords go through wtype instead. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. On KDE Plasma every key in a portal chord is a physical keycode. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass delivery=\"background\" (the default when an element or browser_tab is named) to leave the user's keyboard focus alone: input goes to a named element through AT-SPI, to a browser tab over a DevTools port the user opened (COMPUTER_USE_LINUX_DEVTOOLS), or to a terminal's program through tmux; when no route serves the target the call is refused with nothing sent, never typed through focus. On an element, only keys that mean an action map (Enter or space on a button or menu item, space on a check box, radio button or toggle, Enter on a link or a single-line field with an activate action); others are refused. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
+        "KeyboardDelivery": {
+          "description": "How type_text and press_key deliver input.",
+          "oneOf": [
+            {
+              "const": "focus",
+              "description": "Focus the target window, then type into it.",
+              "type": "string"
+            },
+            {
+              "const": "background",
+              "description": "Leave the user's keyboard focus alone and deliver through a route the\ncall names.",
+              "type": "string"
+            }
+          ]
+        },
         "ScreenshotOutputFormat": {
           "enum": [
             "png",
@@ -1335,6 +1350,43 @@ export const GENERATED_MCP_TOOLS =
           "description": "Application id, ignoring ASCII case: the full desktop id, or its last\ndot-separated segment outside a terminal match. A segment that matches several apps is\nrejected.",
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "browser_tab": {
+          "default": null,
+          "description": "Background delivery to a browser tab over DevTools: a target id, or a\ncase-insensitive substring of one page's URL or title. Needs\nCOMPUTER_USE_LINUX_DEVTOOLS (the loopback port of a browser the user\nstarted with --remote-debugging-port, or its DevToolsActivePort\nfile). Input goes to the tab's focused element.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "delivery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KeyboardDelivery"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "\"focus\" focuses the target window and types into it. \"background\"\nleaves the user's keyboard focus where it is and delivers through the\nroute the call names: an element (element_index, element_identifier\nor role/name/states), a browser_tab, or a terminal (tty, terminal_pid,\nterminal_command, terminal_cwd, or a terminal window) whose program\nruns in tmux. When no route serves the target, nothing is sent and\nthe call is refused; it never falls back to focusing. Default:\n\"background\" when an element or browser_tab is named, else \"focus\"."
+        },
+        "element_identifier": {
+          "default": null,
+          "description": "A node's object_ref from get_app_state or get_tree_page, for\nbackground delivery to that element. Wins over element_index and the\nselectors.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "element_index": {
+          "default": null,
+          "description": "Background delivery to an element: its element_index from the latest\nget_app_state or include_tree snapshot. type_text inserts at its caret\n(or end) through AT-SPI EditableText and reads it back; press_key runs\nthe AT-SPI action the key means (Enter or space on a button or menu\nitem, space on a check box, radio button or toggle, Enter on a link\nor on a single-line field with an activate action).",
+          "minimum": 0,
+          "type": [
+            "integer",
             "null"
           ]
         },
@@ -1384,6 +1436,14 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "name": {
+          "default": null,
+          "description": "Background delivery to the element whose accessible name contains\nthis, ignoring case.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "pid": {
           "default": null,
           "description": "Process id. It must match exactly one window.",
@@ -1399,6 +1459,14 @@ export const GENERATED_MCP_TOOLS =
           "minimum": 1,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "role": {
+          "default": null,
+          "description": "Background delivery to the element whose AT-SPI role contains this,\nignoring case (with name and states, it must match one element).",
+          "type": [
+            "string",
             "null"
           ]
         },
@@ -1434,6 +1502,22 @@ export const GENERATED_MCP_TOOLS =
             "string",
             "null"
           ]
+        },
+        "snapshot_id": {
+          "default": null,
+          "description": "snapshot_id of the result element_index or the selector comes from.\nIf a later snapshot replaced it, the call is refused before input.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "states": {
+          "default": [],
+          "description": "AT-SPI states the background target element must all have.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "terminal_command": {
           "default": null,
@@ -2324,9 +2408,24 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Keyboard success confirms dispatch, not field-content verification; re-observe the target before retrying. On GNOME, when a configured keyboard layout group cannot type a character of the text, the text goes into the focused editable field of the verified target window through AT-SPI EditableText instead: inserted at the caret, replacing a selection, and reported as ok only when the field reads it back with the rest unchanged. Password fields, text with a newline, tab or other control character, and focus outside an editable field of that active window keep the refusal. X11 xdotool can silently substitute symbols under non-US or changing XKB layouts; inspect the text before pressing Enter or submitting it. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators. On Hyprland, confirmed password fields are rejected, and ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Keyboard success confirms dispatch, not field-content verification; re-observe the target before retrying. On GNOME, when a configured keyboard layout group cannot type a character of the text, the text goes into the focused editable field of the verified target window through AT-SPI EditableText instead: inserted at the caret, replacing a selection, and reported as ok only when the field reads it back with the rest unchanged. Password fields, text with a newline, tab or other control character, and focus outside an editable field of that active window keep the refusal. Pass delivery=\"background\" (the default when an element or browser_tab is named) to leave the user's keyboard focus alone: input goes to a named element through AT-SPI, to a browser tab over a DevTools port the user opened (COMPUTER_USE_LINUX_DEVTOOLS), or to a terminal's program through tmux; when no route serves the target the call is refused with nothing sent, never typed through focus. Into a named element the text goes in at its caret (or end) and must read back; a password field is filled unverified. X11 xdotool can silently substitute symbols under non-US or changing XKB layouts; inspect the text before pressing Enter or submitting it. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators. On Hyprland, confirmed password fields are rejected, and ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
+        "KeyboardDelivery": {
+          "description": "How type_text and press_key deliver input.",
+          "oneOf": [
+            {
+              "const": "focus",
+              "description": "Focus the target window, then type into it.",
+              "type": "string"
+            },
+            {
+              "const": "background",
+              "description": "Leave the user's keyboard focus alone and deliver through a route the\ncall names.",
+              "type": "string"
+            }
+          ]
+        },
         "ScreenshotOutputFormat": {
           "enum": [
             "png",
@@ -2342,6 +2441,43 @@ export const GENERATED_MCP_TOOLS =
           "description": "Application id, ignoring ASCII case: the full desktop id, or its last\ndot-separated segment outside a terminal match. A segment that matches several apps is\nrejected.",
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "browser_tab": {
+          "default": null,
+          "description": "Background delivery to a browser tab over DevTools: a target id, or a\ncase-insensitive substring of one page's URL or title. Needs\nCOMPUTER_USE_LINUX_DEVTOOLS (the loopback port of a browser the user\nstarted with --remote-debugging-port, or its DevToolsActivePort\nfile). Input goes to the tab's focused element.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "delivery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KeyboardDelivery"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "\"focus\" focuses the target window and types into it. \"background\"\nleaves the user's keyboard focus where it is and delivers through the\nroute the call names: an element (element_index, element_identifier\nor role/name/states), a browser_tab, or a terminal (tty, terminal_pid,\nterminal_command, terminal_cwd, or a terminal window) whose program\nruns in tmux. When no route serves the target, nothing is sent and\nthe call is refused; it never falls back to focusing. Default:\n\"background\" when an element or browser_tab is named, else \"focus\"."
+        },
+        "element_identifier": {
+          "default": null,
+          "description": "A node's object_ref from get_app_state or get_tree_page, for\nbackground delivery to that element. Wins over element_index and the\nselectors.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "element_index": {
+          "default": null,
+          "description": "Background delivery to an element: its element_index from the latest\nget_app_state or include_tree snapshot. type_text inserts at its caret\n(or end) through AT-SPI EditableText and reads it back; press_key runs\nthe AT-SPI action the key means (Enter or space on a button or menu\nitem, space on a check box, radio button or toggle, Enter on a link\nor on a single-line field with an activate action).",
+          "minimum": 0,
+          "type": [
+            "integer",
             "null"
           ]
         },
@@ -2387,6 +2523,14 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "name": {
+          "default": null,
+          "description": "Background delivery to the element whose accessible name contains\nthis, ignoring case.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "pid": {
           "default": null,
           "description": "Process id. It must match exactly one window.",
@@ -2402,6 +2546,14 @@ export const GENERATED_MCP_TOOLS =
           "minimum": 1,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "role": {
+          "default": null,
+          "description": "Background delivery to the element whose AT-SPI role contains this,\nignoring case (with name and states, it must match one element).",
+          "type": [
+            "string",
             "null"
           ]
         },
@@ -2437,6 +2589,22 @@ export const GENERATED_MCP_TOOLS =
             "string",
             "null"
           ]
+        },
+        "snapshot_id": {
+          "default": null,
+          "description": "snapshot_id of the result element_index or the selector comes from.\nIf a later snapshot replaced it, the call is refused before input.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "states": {
+          "default": [],
+          "description": "AT-SPI states the background target element must all have.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "terminal_command": {
           "default": null,

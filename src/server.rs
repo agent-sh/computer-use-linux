@@ -3021,7 +3021,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "press_key",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
-        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). With PIXELFLUX_CU and PIXELFLUX_CU_TOKEN set, chords go to pixelflux. An unreachable pixelflux falls through to the routes below; a pixelflux error does not. On X11, chords go through xdotool (XTEST), or ydotool when xdotool is missing or cannot start. On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. When ydotool is absent and the session has no RemoteDesktop portal (for example wlroots compositors), chords go through wtype instead. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. On KDE Plasma every key in a portal chord is a physical keycode. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, kp_enter (keypad Enter), escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). With PIXELFLUX_CU and PIXELFLUX_CU_TOKEN set, chords go to pixelflux. An unreachable pixelflux falls through to the routes below; a pixelflux error does not. On X11, chords go through xdotool (XTEST), or ydotool when xdotool is missing or cannot start. On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. When ydotool is absent and the session has no RemoteDesktop portal (for example wlroots compositors), chords go through wtype instead. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. On KDE Plasma every key in a portal chord is a physical keycode. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass delivery=\"background\" (the default when an element or browser_tab is named) to leave the user's keyboard focus alone: input goes to a named element through AT-SPI, to a browser tab over a DevTools port the user opened (COMPUTER_USE_LINUX_DEVTOOLS), or to a terminal's program through tmux; when no route serves the target the call is refused with nothing sent, never typed through focus. On an element, only keys that mean an action map (Enter or space on a button or menu item, space on a check box, radio button or toggle, Enter on a link or a single-line field with an activate action); others are refused. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -3035,8 +3035,28 @@ impl ComputerUseLinux {
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
         let target = params.window_target();
-        let Json(output) = self.dispatch_press_key(params).await;
-        let raised = keyboard_target_raised(&target);
+        let (output, raised) = match params.background.background() {
+            Ok(false) => {
+                let raised = keyboard_target_raised(&target);
+                (self.dispatch_press_key(params).await.0, raised)
+            }
+            background => {
+                let received = Some(serde_json::json!(params.clone()));
+                let output = match background {
+                    Ok(_) => {
+                        self.dispatch_background_keyboard(
+                            BackgroundInput::Key(&params.key),
+                            &target,
+                            &params.background,
+                            received,
+                        )
+                        .await
+                    }
+                    Err(message) => action_result("press_key", Err(message), received),
+                };
+                (output, TargetRaised::No)
+            }
+        };
         self.finish_action_output(
             output,
             &capture,
@@ -3285,7 +3305,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "type_text",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
-        description = "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Keyboard success confirms dispatch, not field-content verification; re-observe the target before retrying. On GNOME, when a configured keyboard layout group cannot type a character of the text, the text goes into the focused editable field of the verified target window through AT-SPI EditableText instead: inserted at the caret, replacing a selection, and reported as ok only when the field reads it back with the rest unchanged. Password fields, text with a newline, tab or other control character, and focus outside an editable field of that active window keep the refusal. X11 xdotool can silently substitute symbols under non-US or changing XKB layouts; inspect the text before pressing Enter or submitting it. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators. On Hyprland, confirmed password fields are rejected, and ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+        description = "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Keyboard success confirms dispatch, not field-content verification; re-observe the target before retrying. On GNOME, when a configured keyboard layout group cannot type a character of the text, the text goes into the focused editable field of the verified target window through AT-SPI EditableText instead: inserted at the caret, replacing a selection, and reported as ok only when the field reads it back with the rest unchanged. Password fields, text with a newline, tab or other control character, and focus outside an editable field of that active window keep the refusal. Pass delivery=\"background\" (the default when an element or browser_tab is named) to leave the user's keyboard focus alone: input goes to a named element through AT-SPI, to a browser tab over a DevTools port the user opened (COMPUTER_USE_LINUX_DEVTOOLS), or to a terminal's program through tmux; when no route serves the target the call is refused with nothing sent, never typed through focus. Into a named element the text goes in at its caret (or end) and must read back; a password field is filled unverified. X11 xdotool can silently substitute symbols under non-US or changing XKB layouts; inspect the text before pressing Enter or submitting it. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators. On Hyprland, confirmed password fields are rejected, and ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -3299,13 +3319,33 @@ impl ComputerUseLinux {
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
         let target = params.window_target();
-        let Json(mut output) = self.dispatch_type_text(params).await;
-        if output.ok && !output.message.starts_with(TYPE_TEXT_ATSPI_ROUTE) {
-            output.message.push_str(
-                " Field contents were not verified; re-observe the target before retrying.",
-            );
-        }
-        let raised = keyboard_target_raised(&target);
+        let (output, raised) = match params.background.background() {
+            Ok(false) => {
+                let Json(mut output) = self.dispatch_type_text(params).await;
+                if output.ok && !output.message.starts_with(TYPE_TEXT_ATSPI_ROUTE) {
+                    output.message.push_str(
+                        " Field contents were not verified; re-observe the target before retrying.",
+                    );
+                }
+                (output, keyboard_target_raised(&target))
+            }
+            background => {
+                let received = Some(serde_json::json!(params.clone()));
+                let output = match background {
+                    Ok(_) => {
+                        self.dispatch_background_keyboard(
+                            BackgroundInput::Text(&params.text),
+                            &target,
+                            &params.background,
+                            received,
+                        )
+                        .await
+                    }
+                    Err(message) => action_result("type_text", Err(message), received),
+                };
+                (output, TargetRaised::No)
+            }
+        };
         self.finish_action_output(
             output,
             &capture,
@@ -5464,6 +5504,102 @@ struct DragParams {
     capture: PostActionCaptureParams,
 }
 
+/// How type_text and press_key deliver input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum KeyboardDelivery {
+    /// Focus the target window, then type into it.
+    Focus,
+    /// Leave the user's keyboard focus alone and deliver through a route the
+    /// call names.
+    Background,
+}
+
+/// The background delivery fields type_text and press_key share.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+struct BackgroundKeyboardParams {
+    /// "focus" focuses the target window and types into it. "background"
+    /// leaves the user's keyboard focus where it is and delivers through the
+    /// route the call names: an element (element_index, element_identifier
+    /// or role/name/states), a browser_tab, or a terminal (tty, terminal_pid,
+    /// terminal_command, terminal_cwd, or a terminal window) whose program
+    /// runs in tmux. When no route serves the target, nothing is sent and
+    /// the call is refused; it never falls back to focusing. Default:
+    /// "background" when an element or browser_tab is named, else "focus".
+    #[serde(default)]
+    delivery: Option<KeyboardDelivery>,
+    /// Background delivery to an element: its element_index from the latest
+    /// get_app_state or include_tree snapshot. type_text inserts at its caret
+    /// (or end) through AT-SPI EditableText and reads it back; press_key runs
+    /// the AT-SPI action the key means (Enter or space on a button or menu
+    /// item, space on a check box, radio button or toggle, Enter on a link
+    /// or on a single-line field with an activate action).
+    #[serde(default)]
+    element_index: Option<u32>,
+    /// snapshot_id of the result element_index or the selector comes from.
+    /// If a later snapshot replaced it, the call is refused before input.
+    #[serde(default)]
+    snapshot_id: Option<String>,
+    /// A node's object_ref from get_app_state or get_tree_page, for
+    /// background delivery to that element. Wins over element_index and the
+    /// selectors.
+    #[serde(default)]
+    element_identifier: Option<String>,
+    /// Background delivery to the element whose AT-SPI role contains this,
+    /// ignoring case (with name and states, it must match one element).
+    #[serde(default)]
+    role: Option<String>,
+    /// Background delivery to the element whose accessible name contains
+    /// this, ignoring case.
+    #[serde(default)]
+    name: Option<String>,
+    /// AT-SPI states the background target element must all have.
+    #[serde(default)]
+    states: Vec<String>,
+    /// Background delivery to a browser tab over DevTools: a target id, or a
+    /// case-insensitive substring of one page's URL or title. Needs
+    /// COMPUTER_USE_LINUX_DEVTOOLS (the loopback port of a browser the user
+    /// started with --remote-debugging-port, or its DevToolsActivePort
+    /// file). Input goes to the tab's focused element.
+    #[serde(default)]
+    browser_tab: Option<String>,
+}
+
+impl BackgroundKeyboardParams {
+    fn selector(&self) -> ElementSelector<'_> {
+        ElementSelector {
+            role: self.role.as_deref(),
+            name: self.name.as_deref(),
+            text: None,
+            states: &self.states,
+        }
+    }
+
+    fn names_element(&self) -> bool {
+        self.element_index.is_some()
+            || trimmed_nonempty(self.element_identifier.as_deref()).is_some()
+            || !self.selector().is_empty()
+    }
+
+    fn browser_tab(&self) -> Option<&str> {
+        trimmed_nonempty(self.browser_tab.as_deref())
+    }
+
+    /// Whether the call asks for background delivery. An element or tab has
+    /// no focus route, so naming one with delivery "focus" is refused.
+    fn background(&self) -> std::result::Result<bool, String> {
+        let named = self.names_element() || self.browser_tab().is_some();
+        match self.delivery {
+            Some(KeyboardDelivery::Background) => Ok(true),
+            Some(KeyboardDelivery::Focus) if named => Err(
+                "Nothing was sent: an element or browser_tab is delivered in the background only; drop delivery or pass delivery=\"background\".".to_string(),
+            ),
+            Some(KeyboardDelivery::Focus) => Ok(false),
+            None => Ok(named),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 struct PressKeyParams {
     /// Key or chord in the grammar the tool description gives, for example
@@ -5510,6 +5646,8 @@ struct PressKeyParams {
     /// match outside a terminal match, the first wins.
     #[serde(default)]
     title: Option<String>,
+    #[serde(flatten)]
+    background: BackgroundKeyboardParams,
     #[serde(flatten)]
     capture: PostActionCaptureParams,
 }
@@ -5559,6 +5697,8 @@ struct TypeTextParams {
     /// match outside a terminal match, the first wins.
     #[serde(default)]
     title: Option<String>,
+    #[serde(flatten)]
+    background: BackgroundKeyboardParams,
     #[serde(flatten)]
     capture: PostActionCaptureParams,
 }
@@ -5691,6 +5831,9 @@ fn type_text_atspi_result(
         }
         Ok(FocusedTextInsert::PasswordField) => Err(format!(
             "{refusal} The focused field is a password field, so the AT-SPI text fallback was not used. set_value can fill it."
+        )),
+        Ok(FocusedTextInsert::PasswordUnverifiable) => Err(format!(
+            "{refusal} No AT-SPI text fallback: the field is a password field."
         )),
         Ok(FocusedTextInsert::Mismatch {
             expected_count,
@@ -10017,6 +10160,436 @@ fn prepare_app_state_screenshot(
     prepare_screenshot_payload(raw, options)
 }
 
+/// What background delivery sends.
+#[derive(Debug, Clone, Copy)]
+enum BackgroundInput<'a> {
+    Text(&'a str),
+    Key(&'a str),
+}
+
+impl BackgroundInput<'_> {
+    fn action(&self) -> &'static str {
+        match self {
+            BackgroundInput::Text(_) => "type_text",
+            BackgroundInput::Key(_) => "press_key",
+        }
+    }
+}
+
+/// The route a background type_text or press_key takes. Each one reaches its
+/// target without moving the compositor's keyboard focus. Routes for other
+/// desktops plug in here, after the terminal route.
+#[derive(Debug, Clone)]
+enum BackgroundRoute {
+    /// The element the call names, through AT-SPI.
+    Element,
+    /// A browser tab over DevTools; the selector is its id, URL or title.
+    BrowserTab(String),
+    /// The program in a terminal, through tmux (or TIOCSTI where the kernel
+    /// allows it).
+    Terminal(std::path::PathBuf),
+}
+
+/// Appended to a background refusal on GNOME, which has no second input
+/// focus: the way to give an agent its own keyboard and pointer there.
+fn background_isolation_hint() -> &'static str {
+    if env_contains("XDG_CURRENT_DESKTOP", "gnome") {
+        " For full isolation with its own keyboard and pointer, run the app in an agent-workspace-linux workspace."
+    } else {
+        ""
+    }
+}
+
+impl ComputerUseLinux {
+    /// Which background route serves the call, or why none does. Order:
+    /// element, browser tab, terminal.
+    async fn background_route(
+        &self,
+        background: &BackgroundKeyboardParams,
+        target: &WindowTarget,
+    ) -> std::result::Result<BackgroundRoute, String> {
+        let element = background.names_element();
+        let tab = background.browser_tab();
+        if element && tab.is_some() {
+            return Err(
+                "Nothing was sent: name an element or a browser_tab, not both.".to_string(),
+            );
+        }
+        if element {
+            if target.has_terminal_target() {
+                return Err(
+                    "Nothing was sent: terminal selectors do not combine with an element target."
+                        .to_string(),
+                );
+            }
+            return Ok(BackgroundRoute::Element);
+        }
+        if let Some(tab) = tab {
+            return Ok(BackgroundRoute::BrowserTab(tab.to_string()));
+        }
+        if let Some(tty) = target.tty.as_deref().filter(|tty| !tty.trim().is_empty()) {
+            return crate::background_input::tty_path(tty)
+                .map(BackgroundRoute::Terminal)
+                .map_err(|error| format!("Nothing was sent: {error}."));
+        }
+        // A pid inside a tmux pane has no terminal window of its own; its
+        // stdin names the pane's tty.
+        if let Some(pid) = target
+            .terminal_pid
+            .filter(|_| target.terminal_command.is_none() && target.terminal_cwd.is_none())
+        {
+            if let Some(tty) = crate::background_input::process_tty(pid) {
+                return Ok(BackgroundRoute::Terminal(tty));
+            }
+        }
+        if !target.has_target() {
+            return Err(format!(
+                "Nothing was sent and keyboard focus did not move: background delivery needs a target it can reach without focus: an element from get_app_state (element_index, element_identifier or role/name/states), a browser_tab with {} set, or a terminal (tty, terminal_pid, terminal_command, terminal_cwd) running tmux.{}",
+                crate::devtools::DEVTOOLS_ENV,
+                background_isolation_hint()
+            ));
+        }
+        let windows = list_windows()
+            .await
+            .map_err(|error| format!("Nothing was sent: {error:#}"))?;
+        let window = resolve_window_target(&windows, target)
+            .map_err(|error| format!("Nothing was sent: {error:#}"))?;
+        match window.terminal.as_ref() {
+            Some(terminal) => crate::background_input::tty_path(&terminal.tty)
+                .map(BackgroundRoute::Terminal)
+                .map_err(|error| format!("Nothing was sent: {error}.")),
+            None => Err(format!(
+                "Nothing was sent and keyboard focus did not move: window_id {} is not a terminal with a known tty, and this desktop has no route that types into a whole window without focusing it. Name an element from get_app_state, a browser_tab, or a terminal running tmux.{}",
+                window.window_id,
+                background_isolation_hint()
+            )),
+        }
+    }
+
+    /// type_text or press_key with delivery "background": never focuses a
+    /// window, and refuses rather than falling back to focused input.
+    async fn dispatch_background_keyboard(
+        &self,
+        input: BackgroundInput<'_>,
+        target: &WindowTarget,
+        background: &BackgroundKeyboardParams,
+        received: Option<serde_json::Value>,
+    ) -> ActionOutput {
+        let action = input.action();
+        let fail = |message: String| action_result(action, Err(message), received.clone());
+        let chord = match input {
+            BackgroundInput::Key(key) => match key_chord(key)
+                .and_then(|_| crate::hyprland_input::chord_to_key_press(key))
+            {
+                Some(press) => Some(crate::background_input::Chord::from_key_press(&press)),
+                None => return fail("Unsupported key. Use names like Enter, Escape, Tab, ArrowLeft, Super, Ctrl+L, or a single US keyboard letter/digit.".to_string()),
+            },
+            BackgroundInput::Text(_) => None,
+        };
+        let route = match self.background_route(background, target).await {
+            Ok(route) => route,
+            Err(message) => return fail(message),
+        };
+        let result = match (route, input, chord) {
+            (BackgroundRoute::Element, BackgroundInput::Text(text), _) => {
+                self.background_element_text(text, target, background).await
+            }
+            (BackgroundRoute::Element, BackgroundInput::Key(key), Some(chord)) => {
+                return self
+                    .background_element_key(key, &chord, target, background, received)
+                    .await
+            }
+            (BackgroundRoute::BrowserTab(tab), input, chord) => {
+                self.background_browser_tab(&tab, input, chord.as_ref())
+                    .await
+            }
+            (BackgroundRoute::Terminal(tty), input, chord) => {
+                self.background_terminal(&tty, input, chord.as_ref()).await
+            }
+            (BackgroundRoute::Element, BackgroundInput::Key(_), None) => {
+                Err("Unsupported key.".to_string())
+            }
+        };
+        match result {
+            Ok(message) => successful_action_with_focus(action, &message, received, None),
+            Err(message) => fail(message),
+        }
+    }
+
+    fn background_element_target(target: &WindowTarget) -> ElementActionTarget {
+        ElementActionTarget {
+            window_id: target.window_id,
+            pid: target.pid,
+            app_id: target.app_id.clone(),
+            wm_class: target.wm_class.clone(),
+            window_title: target.title.clone(),
+        }
+    }
+
+    /// The cached node an element_index or selector names, for its role.
+    fn background_cached_node(
+        &self,
+        background: &BackgroundKeyboardParams,
+    ) -> Option<AccessibilityNode> {
+        if trimmed_nonempty(background.element_identifier.as_deref()).is_some() {
+            return None;
+        }
+        self.resolve_cached_node(
+            background.element_index,
+            &background.selector(),
+            ElementResolvePurpose::SetValue,
+        )
+        .ok()
+    }
+
+    async fn background_element_text(
+        &self,
+        text: &str,
+        target: &WindowTarget,
+        background: &BackgroundKeyboardParams,
+    ) -> std::result::Result<String, String> {
+        let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        let identifier = trimmed_nonempty(background.element_identifier.as_deref());
+        self.check_element_snapshot(
+            "type_text",
+            background.snapshot_id.as_deref(),
+            identifier.is_none(),
+        )?;
+        self.check_element_action_target(
+            &Self::background_element_target(target),
+            background.element_index,
+            identifier,
+            &background.selector(),
+            ElementResolvePurpose::SetValue,
+        )
+        .await?;
+        let object_ref = self.resolve_object_ref(
+            background.element_index,
+            identifier,
+            &background.selector(),
+            ElementResolvePurpose::SetValue,
+        )?;
+        // Mask unless the snapshot shows a field that is not a password.
+        let secret = self
+            .background_cached_node(background)
+            .is_none_or(|node| crate::indicator::is_secret_role(&node.role));
+        self.indicator.text("type_text", text, secret).await;
+        let insert = crate::atspi_tree::insert_text_into_element(&object_ref, text).await;
+        background_element_text_result(text, insert)
+    }
+
+    async fn background_element_key(
+        &self,
+        key: &str,
+        chord: &crate::background_input::Chord,
+        target: &WindowTarget,
+        background: &BackgroundKeyboardParams,
+        received: Option<serde_json::Value>,
+    ) -> ActionOutput {
+        let fail = |message: String| action_result("press_key", Err(message), received.clone());
+        let identifier = trimmed_nonempty(background.element_identifier.as_deref());
+        if let Err(message) = self.check_element_snapshot(
+            "press_key",
+            background.snapshot_id.as_deref(),
+            identifier.is_none(),
+        ) {
+            return fail(message);
+        }
+        let (role, states, actions) = match identifier {
+            Some(identifier) => {
+                match crate::atspi_tree::element_role_states_actions(identifier).await {
+                    Ok(described) => described,
+                    Err(error) => return fail(format!("Nothing was sent: {error:#}")),
+                }
+            }
+            None => match self.resolve_cached_node(
+                background.element_index,
+                &background.selector(),
+                ElementResolvePurpose::Action,
+            ) {
+                Ok(node) => (
+                    node.role,
+                    node.states,
+                    node.actions.into_iter().map(|action| action.name).collect(),
+                ),
+                Err(message) => return fail(message),
+            },
+        };
+        let action_name =
+            match crate::background_input::element_key_action(chord, &role, &states, &actions) {
+                Ok(action) => action,
+                Err(reason) => {
+                    return fail(format!(
+                        "Nothing was sent and keyboard focus did not move: {reason}."
+                    ))
+                }
+            };
+        self.indicator.keys(key, false).await;
+        let params = ActionParams {
+            element_index: background.element_index,
+            snapshot_id: background.snapshot_id.clone(),
+            element_identifier: background.element_identifier.clone(),
+            role: background.role.clone(),
+            name: background.name.clone(),
+            text: None,
+            states: background.states.clone(),
+            action: Some(action_name.clone()),
+            target: Self::background_element_target(target),
+            capture: PostActionCaptureParams::default(),
+        };
+        let (Json(mut output), _) = self
+            .perform_element_action(&params, Some(&action_name))
+            .await;
+        output.action = "press_key".to_string();
+        output.received = received;
+        if output.ok {
+            output.message = format!(
+                "{key} on the {role} ran its AT-SPI {action_name:?} action without keyboard focus; focus did not move. {}",
+                output.message
+            );
+        }
+        output
+    }
+
+    async fn background_browser_tab(
+        &self,
+        selector: &str,
+        input: BackgroundInput<'_>,
+        chord: Option<&crate::background_input::Chord>,
+    ) -> std::result::Result<String, String> {
+        let port = crate::devtools::configured_port().map_err(|error| {
+            format!("Nothing was sent: {error}.{}", background_isolation_hint())
+        })?;
+        let tabs = crate::devtools::list_tabs(port)
+            .await
+            .map_err(|error| format!("Nothing was sent: {error:#}"))?;
+        let tab = crate::devtools::select_tab(&tabs, selector)
+            .map_err(|error| format!("Nothing was sent: {error}."))?
+            .clone();
+        let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        let place = format!("tab {} ({:?})", tab.id, tab.title);
+        match (input, chord) {
+            (BackgroundInput::Text(text), _) => {
+                // The tab's field is unknown until DevTools reads it.
+                self.indicator.text("type_text", text, true).await;
+                match crate::devtools::insert_text(port, &tab, text).await {
+                    Ok(crate::devtools::TabTextOutcome::Verified { field }) => Ok(format!(
+                        "Inserted through DevTools Input.insertText into the focused {field} of {place}, which reads it back at the caret with the rest unchanged. OS keyboard focus did not move."
+                    )),
+                    Ok(crate::devtools::TabTextOutcome::PasswordVerified) => Ok(format!(
+                        "Inserted through DevTools Input.insertText into the focused password field of {place}; it reads back as expected. OS keyboard focus did not move."
+                    )),
+                    Ok(crate::devtools::TabTextOutcome::Unverified { field }) => Ok(format!(
+                        "Inserted through DevTools Input.insertText into the focused {field} of {place}; a contenteditable element is not read back, so re-observe it. OS keyboard focus did not move."
+                    )),
+                    Err(error) => Err(format!("{place}: {error}.")),
+                }
+            }
+            (BackgroundInput::Key(key), Some(chord)) => {
+                self.indicator.keys(key, false).await;
+                crate::devtools::press_key(port, &tab, chord)
+                    .await
+                    .map(|field| format!(
+                        "Sent {key} through DevTools Input.dispatchKeyEvent to {field} in {place}. Browser shortcuts handled outside the page do not run this way. OS keyboard focus did not move."
+                    ))
+                    .map_err(|error| format!("{place}: {error}."))
+            }
+            (BackgroundInput::Key(_), None) => Err("Unsupported key.".to_string()),
+        }
+    }
+
+    async fn background_terminal(
+        &self,
+        tty: &Path,
+        input: BackgroundInput<'_>,
+        chord: Option<&crate::background_input::Chord>,
+    ) -> std::result::Result<String, String> {
+        use crate::background_input as bg;
+        let probe = bg::probe_terminal(tty)
+            .await
+            .map_err(|error| format!("Nothing was sent: {error:#}"))?;
+        let Some(channel) = probe.channel.as_ref() else {
+            return Err(format!(
+                "Nothing was sent and keyboard focus did not move: {}.{}",
+                probe.refusal(tty),
+                background_isolation_hint()
+            ));
+        };
+        let route = channel.describe();
+        let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        match (input, chord) {
+            (BackgroundInput::Text(text), _) => {
+                self.indicator.text("type_text", text, false).await;
+                bg::terminal_send_text(channel, tty, text)
+                    .await
+                    .map_err(|error| format!("{route} on {}: {error:#}", tty.display()))?;
+                Ok(format!(
+                    "Sent to the program on {} through {route}. The terminal window was not focused. Terminal contents were not verified; re-observe before retrying.",
+                    tty.display()
+                ))
+            }
+            (BackgroundInput::Key(key), Some(chord)) => {
+                self.indicator.keys(key, false).await;
+                let sent = bg::terminal_send_key(channel, tty, chord)
+                    .await
+                    .map_err(|error| format!("{route} on {}: {error}", tty.display()))?;
+                Ok(format!(
+                    "Sent {key} (as {sent}) to the program on {} through {route}. The terminal window was not focused.",
+                    tty.display()
+                ))
+            }
+            (BackgroundInput::Key(_), None) => Err("Unsupported key.".to_string()),
+        }
+    }
+}
+
+/// The background type_text result for an AT-SPI insert into a named element.
+fn background_element_text_result(
+    text: &str,
+    insert: Result<FocusedTextInsert>,
+) -> std::result::Result<String, String> {
+    const MAY_HAVE_CHANGED: &str = "The field may have changed; re-observe it before retrying.";
+    match insert {
+        Ok(FocusedTextInsert::Verified { role, .. }) => Ok(format!(
+            "Inserted through AT-SPI EditableText into the named {role} without focusing it; it reads back the text at the insertion point with the rest unchanged. Keyboard focus did not move."
+        )),
+        Ok(FocusedTextInsert::PasswordUnverifiable) => Ok(
+            "Inserted through AT-SPI EditableText into the named password field without focusing it; its contents cannot be read back to verify. Keyboard focus did not move.".to_string(),
+        ),
+        Ok(FocusedTextInsert::NotEditable(reason)) => Err(format!("Nothing was sent: {reason}.")),
+        Ok(FocusedTextInsert::PasswordField) => {
+            Err("Nothing was sent: the element is a password field.".to_string())
+        }
+        Ok(FocusedTextInsert::Mismatch {
+            expected_count,
+            read_count,
+            read_text,
+            read_truncated,
+        }) => Err(format!(
+            "AT-SPI took the insert, but the field does not read it back: expected {text:?} at the insertion point, the rest unchanged, and {expected_count} characters in all; read {read_text:?}{} at the insertion point and {read_count} characters. {MAY_HAVE_CHANGED}",
+            if read_truncated { " (first part)" } else { "" }
+        )),
+        Ok(FocusedTextInsert::ReadbackFailed) => Err(format!(
+            "AT-SPI took the insert, but reading the field back failed. {MAY_HAVE_CHANGED}"
+        )),
+        Ok(FocusedTextInsert::ReadbackTimedOut) => Err(format!(
+            "AT-SPI took the insert, but reading the field back timed out. {MAY_HAVE_CHANGED}"
+        )),
+        Ok(FocusedTextInsert::EditFailed {
+            reason,
+            may_have_changed,
+        }) => Err(format!(
+            "AT-SPI insert failed: {reason}. {}",
+            if may_have_changed {
+                MAY_HAVE_CHANGED
+            } else {
+                "No text was changed."
+            }
+        )),
+        Err(error) => Err(format!("Nothing was sent: {error:#}.")),
+    }
+}
+
 /// Whether targeted keyboard input goes through Hyprland background mode,
 /// which never raises or focuses the target.
 fn hyprland_background_applies(target: &WindowTarget) -> bool {
@@ -12242,6 +12815,7 @@ fn xdotool_keysym_name(key: &str) -> Option<String> {
     let normalized = normalize_key(key);
     let named = match normalized.as_str() {
         "enter" | "return" => "Return",
+        "kpenter" | "kp_enter" => "KP_Enter",
         "escape" | "esc" => "Escape",
         "tab" => "Tab",
         "backspace" => "BackSpace",
@@ -12388,6 +12962,7 @@ fn modifier_keysym(key: &str) -> Option<i32> {
 fn named_keysym(key: &str) -> Option<i32> {
     let keysym = match normalize_key(key).as_str() {
         "enter" | "return" => xkey::Return,
+        "kpenter" | "kp_enter" => xkey::KP_Enter,
         "escape" | "esc" => xkey::Escape,
         "tab" => xkey::Tab,
         "backspace" => xkey::BackSpace,
@@ -12454,6 +13029,7 @@ fn modifier_keycode(key: &str) -> Option<u16> {
 fn keycode(key: &str) -> Option<u16> {
     match normalize_key(key).as_str() {
         "enter" | "return" => Some(28),
+        "kpenter" | "kp_enter" => Some(96),
         "escape" | "esc" => Some(1),
         "tab" => Some(15),
         "backspace" => Some(14),

@@ -58,9 +58,18 @@ NOT_ENVIRONMENT = {
     "GET_FOCUSED_WINDOW": "labwc IPC request",
     "GET_WINDOWS": "labwc IPC request",
     "IHDR": "PNG chunk type",
+    "KITTY_LISTEN_ON": "read from the environment of a process on the target tty, not the server's",
+    "KITTY_WINDOW_ID": "read from the environment of a process on the target tty, not the server's",
     "PICTURES": "xdg-user-dir argument",
+    "SCREEN": "GNU screen's server process name",
     "SHIFT": "modifier name",
+    "STY": "read from the environment of a process on the target tty, not the server's",
     "SUPER": "modifier name",
+    "TIOCSTI": "ioctl name in a message",
+    "TMUX": "read from the environment of a process on the target tty, not the server's",
+    "TMUX_TMPDIR": "read from the environment of a tmux client on the target tty, not the server's",
+    "WEZTERM_UNIX_SOCKET": "read from the environment of a process on the target tty and passed to wezterm cli",
+    "WINDOW": "read from the environment of a process on the target tty, not the server's",
 }
 
 # Variables the server reads that hosts are not expected to pass.
