@@ -2983,12 +2983,12 @@ impl ComputerUseLinux {
                 }
             }
         };
-        let raised = background_target_raised(true, report.as_ref());
+        // Neither the pen nor a focused drag raises the target.
         self.finish_background_output(
             output,
             &capture,
             target.as_ref(),
-            raised,
+            TargetRaised::No,
             PostActionScope::default(),
             report,
         )
@@ -4483,7 +4483,7 @@ pub async fn serve_mcp(listen: Option<crate::http_listen::ListenConfig>) -> Resu
         result = running.waiting() => {
             tree_spiller.remove_current();
             crate::agent_seat::shutdown();
-        crate::virtual_pen::shutdown();
+            crate::virtual_pen::shutdown();
             result?;
             return Ok(());
         }
@@ -11280,6 +11280,9 @@ impl ComputerUseLinux {
             Ok(window) => window.clone(),
             Err(error) => return fail(format!("Nothing was sent: {error:#}")),
         };
+        if pen::screen_locked().await {
+            return fail("Nothing was sent: the screen is locked.".to_string());
+        }
         let cached = self.desktop_size.lock().ok().and_then(|guard| *guard);
         let capture = match cached {
             Some(size) => size,
@@ -11366,6 +11369,11 @@ impl ComputerUseLinux {
                 let Some(monitor) = layout.monitor_at(point) else {
                     return fail("Nothing was sent: no monitor holds the point.".to_string());
                 };
+                // A touchscreen maps to one monitor, through that monitor's
+                // rotation, which the device values here do not apply.
+                if monitor.transform != 0 {
+                    return fail("Nothing was sent: a background scroll pans with a virtual touchscreen, and this monitor is rotated or flipped.".to_string());
+                }
                 // Scrolling down moves the content up: the finger moves up.
                 let motion = (
                     -f64::from(dx) * pen::PAN_PER_NOTCH,
@@ -11378,7 +11386,20 @@ impl ComputerUseLinux {
                             return fail(format!("Nothing was sent: {}", as_sentence(&error)))
                         }
                     };
-                let distance = motion.0.abs() + motion.1.abs();
+                // Every stroke ends on the target too, with nothing above it.
+                for (_, end) in &strokes {
+                    if let Err(error) = pen::check_point_on_target(&windows, window.window_id, *end)
+                    {
+                        return fail(format!(
+                            "Nothing was sent: the pan would end off the target: {}",
+                            as_sentence(&error)
+                        ));
+                    }
+                }
+                let distance: f64 = strokes
+                    .iter()
+                    .map(|(from, to)| (to.0 - from.0).abs() + (to.1 - from.1).abs())
+                    .sum();
                 let count = strokes.len();
                 (
                     Gesture::Pan { strokes },

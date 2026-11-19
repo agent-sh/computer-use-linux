@@ -97,6 +97,8 @@ pub(crate) fn availability() -> std::result::Result<(), String> {
     classify(&SessionFacts::from_env())?;
     let writable = std::ffi::CString::new("/dev/uinput")
         .ok()
+        // SAFETY: path is a NUL-terminated CString that outlives the call,
+        // and access only reads it.
         .is_some_and(|path| unsafe { libc::access(path.as_ptr(), libc::W_OK) } == 0);
     if !writable {
         return Err("/dev/uinput is not writable for this user, so no virtual pen can be made (the same access the uinput pointer needs)".to_string());
@@ -110,7 +112,7 @@ pub(crate) fn doctor_summary() -> serde_json::Value {
         Ok(()) => serde_json::json!({
             "available": true,
             "routes": [PEN_ROUTE, TOUCH_ROUTE],
-            "note": "Background click and drag use a virtual pen, background scroll a one-finger touch pan; the user's mouse pointer does not move. A pen click gives the clicked window keyboard focus. Apps without tablet support never see the pen, scrolling needs touch panning in the app, a drag stays inside one window, and the pen hovers for up to 8 s after an action. Needs the computer-use-linux GNOME Shell extension to check the window under the point.",
+            "note": "Background click and drag use a virtual pen, background scroll a one-finger touch pan; the user's mouse pointer does not move. A pen tap or a touch gives the window keyboard focus. Apps without tablet support never see the pen, scrolling needs touch panning in the app, a drag stays inside one window, and the pen hovers for up to 8 s after an action. Needs the computer-use-linux GNOME Shell extension to check the window under the point.",
         }),
         Err(reason) => serde_json::json!({ "available": false, "reason": reason }),
     }
@@ -180,11 +182,13 @@ pub(crate) struct MonitorSpec {
     pub serial: String,
 }
 
-/// A logical monitor: its rectangle and the monitors it shows.
+/// A logical monitor: its rectangle, the monitor it shows, and its
+/// rotation (DisplayConfig's transform, 0 for none).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Monitor {
     pub rect: Rect,
     pub spec: MonitorSpec,
+    pub transform: u32,
 }
 
 /// One monitor of DisplayConfig.GetCurrentState: its spec, and the size of
@@ -238,6 +242,7 @@ pub(crate) fn layout_from_state(
                     height: (f64::from(height) / scale).round(),
                 },
                 spec: monitor.spec.clone(),
+                transform: state.transform,
             })
         })
         .collect()
@@ -357,6 +362,25 @@ pub(crate) fn check_point_on_target(
             (Some(a), Some(b)) => a == b || a < 0 || b < 0,
             _ => true,
         };
+    // The focused window is on the workspace the user sees. With none (the
+    // overview is open, or nothing has focus) that workspace is unknown.
+    let focused = windows.iter().find(|window| window.focused).ok_or_else(|| {
+        "no window has keyboard focus, so the visible workspace is unknown (the overview may be open)"
+            .to_string()
+    })?;
+    if focused.workspace.is_none_or(|index| index < 0)
+        && target.workspace.is_some_and(|index| index >= 0)
+    {
+        return Err(
+            "the focused window is on every workspace, so the visible workspace is unknown"
+                .to_string(),
+        );
+    }
+    if !same_workspace(focused) {
+        return Err(format!(
+            "window_id {target_id} is not on the workspace the user sees"
+        ));
+    }
     let top = windows
         .iter()
         .rev()
@@ -373,9 +397,9 @@ pub(crate) fn check_point_on_target(
     Ok(rect)
 }
 
-/// Finger strokes that pan by motion (logical pixels, along one axis)
-/// starting at start, each inside bounds. A stroke starts at start when it
-/// has room there; otherwise it starts at the far side of bounds.
+/// Finger strokes that pan by motion (logical pixels, along one axis), each
+/// starting at start and staying inside bounds. A point outside bounds, or
+/// one with too little room in the pan's direction, has no strokes.
 pub(crate) fn pan_strokes(
     start: (f64, f64),
     motion: (f64, f64),
@@ -383,39 +407,27 @@ pub(crate) fn pan_strokes(
 ) -> std::result::Result<Vec<Stroke>, String> {
     let horizontal = motion.0 != 0.0;
     let distance = if horizontal { motion.0 } else { motion.1 };
-    let (lo, hi, from, fixed) = if horizontal {
-        (
-            bounds.x,
-            bounds.x + bounds.width,
-            start.0,
-            start.1.clamp(bounds.y, bounds.y + bounds.height),
-        )
-    } else {
-        (
-            bounds.y,
-            bounds.y + bounds.height,
-            start.1,
-            start.0.clamp(bounds.x, bounds.x + bounds.width),
-        )
-    };
-    if hi - lo < MIN_STROKE {
+    if !bounds.contains(start) {
         return Err(format!(
-            "the window has less than {MIN_STROKE} px to pan in, away from its and the monitor's edges"
+            "a touch pan must start {PAN_MARGIN:.0} px or more from the monitor's edges and 8 px or more inside the window, and ({:.0}, {:.0}) is not",
+            start.0, start.1
         ));
     }
-    let from = from.clamp(lo, hi);
+    let (lo, hi, begin, fixed) = if horizontal {
+        (bounds.x, bounds.x + bounds.width, start.0, start.1)
+    } else {
+        (bounds.y, bounds.y + bounds.height, start.1, start.0)
+    };
     let backward = distance < 0.0;
+    let room = if backward { begin - lo } else { hi - begin };
     let mut remaining = distance.abs();
+    if room < MIN_STROKE.min(remaining) {
+        return Err(format!(
+            "the point is {room:.0} px from where a pan in that direction must stop; scroll from a point farther from the window's or the monitor's edge"
+        ));
+    }
     let mut strokes = Vec::new();
     while remaining > 0.5 && strokes.len() < MAX_STROKES {
-        let room = if backward { from - lo } else { hi - from };
-        let (begin, room) = if room >= MIN_STROKE.min(remaining) {
-            (from, room)
-        } else if backward {
-            (hi, hi - lo)
-        } else {
-            (lo, hi - lo)
-        };
         let length = room.min(remaining);
         let end = if backward {
             begin - length
@@ -431,6 +443,11 @@ pub(crate) fn pan_strokes(
         };
         strokes.push((point(begin), point(end)));
         remaining -= length;
+    }
+    if remaining > 0.5 {
+        return Err(format!(
+            "the scroll needs more than {MAX_STROKES} touch strokes from this point; scroll fewer pages, or from a point with more room in that direction"
+        ));
     }
     Ok(strokes)
 }
@@ -568,8 +585,9 @@ impl<E: Events> PenEvents<E> {
         }
     }
 
-    /// Repeats value with one-unit jitter, so libinput's motion smoothing
-    /// ends on it before a press or release there.
+    /// A few more frames at value, one unit apart, before a press or
+    /// release there: without them GTK reported a drag's release short of
+    /// its end point.
     pub(crate) fn settle(&mut self, (x, y): (i32, i32)) -> Result<()> {
         for step in 0..4 {
             let nudge = if step % 2 == 0 { 1 } else { 0 };
@@ -885,6 +903,7 @@ fn start_reaper() {
                 };
                 let idle = devices.last_use.elapsed();
                 if idle >= crate::agent_seat::IDLE_LIFETIME {
+                    let _process = process_lock(Duration::from_secs(2));
                     *guard = None;
                     REAPER.store(false, std::sync::atomic::Ordering::SeqCst);
                     return;
@@ -906,7 +925,44 @@ fn start_reaper() {
 
 /// Removes both devices now. Called when the server exits.
 pub(crate) fn shutdown() {
+    let _process = process_lock(Duration::from_secs(2));
     *lock_devices() = None;
+}
+
+/// Held while this server sends through or removes its devices. Every
+/// server's devices share one vendor and product id, so one settings path:
+/// another server's reset must not land between this one's mapping check
+/// and its events.
+struct ProcessLock {
+    /// The lock lasts as long as the open file.
+    _file: std::fs::File,
+}
+
+fn process_lock(wait: Duration) -> std::result::Result<ProcessLock, PenError> {
+    use std::os::fd::AsRawFd;
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(std::env::temp_dir);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("computer-use-linux-virtual-pen.lock"))
+        .map_err(|error| PenError::NoRoute(format!("the virtual pen lock file: {error}")))?;
+    let deadline = Instant::now() + wait;
+    loop {
+        // SAFETY: the descriptor belongs to file, which lives past the call.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(ProcessLock { _file: file });
+        }
+        if Instant::now() >= deadline {
+            return Err(PenError::NoRoute(
+                "another computer-use-linux server is using the virtual pen".to_string(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// The area a device covers for point, writing its output setting when
@@ -921,9 +977,11 @@ fn covering_area(
     layout: &Layout,
 ) -> Result<Rect> {
     let current = wait_mapping(connection, node, |mapping| mapping != Mapping::Unknown)?;
-    match current {
-        Mapping::Layout => return Ok(layout.bounds),
-        Mapping::Monitor(rect) if rect.contains(point) => return Ok(rect),
+    match (kind, current) {
+        (_, Mapping::Layout) => return Ok(layout.bounds),
+        // The pen covers the whole layout, where mutter's matrix is plain;
+        // a monitor's would carry that monitor's rotation.
+        (Kind::Touch, Mapping::Monitor(rect)) if rect.contains(point) => return Ok(rect),
         _ => {}
     }
     match kind {
@@ -964,6 +1022,14 @@ fn covering_area(
 pub(crate) fn perform(gesture: &Gesture, layout: &Layout) -> std::result::Result<(), PenError> {
     let connection = zbus::blocking::Connection::session()
         .map_err(|error| PenError::NoRoute(format!("no session bus to reach mutter: {error}")))?;
+    // A device node no device has: mutter answers "does not exist" when its
+    // InputMapping service runs.
+    mapping(
+        &connection,
+        Path::new("/dev/input/computer_use_linux_probe"),
+    )
+    .map_err(|error| PenError::NoRoute(format!("{error:#}")))?;
+    let _process = process_lock(Duration::from_secs(5))?;
     let mut guard = lock_devices();
     let devices = guard.get_or_insert_with(|| Devices {
         pen: None,
@@ -1003,10 +1069,10 @@ fn run_pen(
     layout: &Layout,
 ) -> std::result::Result<(), PenError> {
     if devices.pen.is_none() {
+        reset_output(Kind::Pen);
         let (device, node) = create(Kind::Pen).map_err(|error| {
             PenError::NoRoute(format!("the virtual pen could not be made: {error:#}"))
         })?;
-        reset_output(Kind::Pen);
         devices.pen = Some(Pen {
             events: PenEvents::new(device),
             node,
@@ -1091,12 +1157,12 @@ fn run_touch(
     layout: &Layout,
 ) -> std::result::Result<(), PenError> {
     if devices.touch.is_none() {
+        reset_output(Kind::Touch);
         let (device, node) = create(Kind::Touch).map_err(|error| {
             PenError::NoRoute(format!(
                 "the virtual touchscreen could not be made: {error:#}"
             ))
         })?;
-        reset_output(Kind::Touch);
         devices.touch = Some(Touch {
             events: TouchEvents::new(device),
             node,
@@ -1150,6 +1216,26 @@ fn run_touch(
         std::thread::sleep(Duration::from_millis(80));
     }
     Ok(())
+}
+
+/// Whether GNOME Shell's lock screen is up (org.gnome.ScreenSaver). The
+/// window list cannot show it, and a tap there would reach the lock screen.
+pub(crate) async fn screen_locked() -> bool {
+    let Ok(connection) = zbus::Connection::session().await else {
+        return false;
+    };
+    let reply = tokio::time::timeout(
+        Duration::from_secs(2),
+        connection.call_method(
+            Some("org.gnome.ScreenSaver"),
+            "/org/gnome/ScreenSaver",
+            Some("org.gnome.ScreenSaver"),
+            "GetActive",
+            &(),
+        ),
+    )
+    .await;
+    matches!(reply, Ok(Ok(message)) if message.body().deserialize::<bool>().unwrap_or(false))
 }
 
 /// The logical layout from mutter's DisplayConfig.GetCurrentState.
@@ -1318,6 +1404,7 @@ mod tests {
                     height: 1080.0,
                 },
                 spec: spec("DP-1"),
+                transform: 0,
             },
             Monitor {
                 rect: Rect {
@@ -1327,6 +1414,7 @@ mod tests {
                     height: 1080.0,
                 },
                 spec: spec("DP-2"),
+                transform: 0,
             },
         ];
         // A 2x capture of a 3840x1080 layout.
@@ -1380,12 +1468,31 @@ mod tests {
         assert!(covered.contains("window_id 2"), "{covered}");
         let outside = check_point_on_target(&windows, 1, (900.0, 100.0)).unwrap_err();
         assert!(outside.contains("outside window_id 1"), "{outside}");
-        // A window on another workspace or minimized does not cover it.
+        // The focused window is on another workspace: the target is not on
+        // the one the user sees.
         windows[1].workspace = Some(1);
+        let away = check_point_on_target(&windows, 1, (100.0, 100.0)).unwrap_err();
+        assert!(
+            away.contains("not on the workspace the user sees"),
+            "{away}"
+        );
+        // With the focus on the target's workspace, a window elsewhere or a
+        // minimized one does not cover the point.
+        windows.push(window(3, (2000, 0, 100, 100), true));
+        windows[1].focused = false;
         assert!(check_point_on_target(&windows, 1, (500.0, 100.0)).is_ok());
         windows[1].workspace = Some(0);
         windows[1].hidden = true;
         assert!(check_point_on_target(&windows, 1, (500.0, 100.0)).is_ok());
+        // No focused window: the overview may be open.
+        windows[2].focused = false;
+        assert!(check_point_on_target(&windows, 1, (100.0, 100.0)).is_err());
+        // The focused window is on every workspace: which one shows is unknown.
+        windows[2].focused = true;
+        windows[2].workspace = Some(-1);
+        let sticky = check_point_on_target(&windows, 1, (100.0, 100.0)).unwrap_err();
+        assert!(sticky.contains("every workspace"), "{sticky}");
+        windows[2].workspace = Some(0);
         windows[0].hidden = true;
         assert!(check_point_on_target(&windows, 1, (100.0, 100.0)).is_err());
     }
@@ -1411,15 +1518,16 @@ mod tests {
                 ((300.0, 350.0), (300.0, 100.0)),
             ]
         );
-        // No room above the point: the strokes start at the bottom instead.
-        let strokes = pan_strokes((300.0, 120.0), (0.0, -100.0), &bounds).unwrap();
-        assert_eq!(strokes, vec![((300.0, 400.0), (300.0, 300.0))]);
-        for (from, to) in &strokes {
-            assert!(from.1 >= 100.0 && to.1 >= 100.0 && from.1 <= 400.0);
-        }
-        // Scroll right: the finger moves left; the other axis is clamped in.
-        let strokes = pan_strokes((480.0, 50.0), (-60.0, 0.0), &bounds).unwrap();
-        assert_eq!(strokes, vec![((480.0, 100.0), (420.0, 100.0))]);
+        // Too little room above the point, or a point outside the bounds: no
+        // stroke starts anywhere else.
+        assert!(pan_strokes((300.0, 120.0), (0.0, -100.0), &bounds).is_err());
+        assert!(pan_strokes((480.0, 50.0), (-60.0, 0.0), &bounds).is_err());
+        // More than MAX_STROKES strokes: refused, not cut short.
+        let refused = pan_strokes((300.0, 150.0), (0.0, -50.0 * 41.0), &bounds).unwrap_err();
+        assert!(refused.contains("more than 40"), "{refused}");
+        // Scroll right: the finger moves left.
+        let strokes = pan_strokes((480.0, 150.0), (-60.0, 0.0), &bounds).unwrap();
+        assert_eq!(strokes, vec![((480.0, 150.0), (420.0, 150.0))]);
         let tiny = Rect {
             x: 0.0,
             y: 0.0,
