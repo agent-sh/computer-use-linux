@@ -2918,7 +2918,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "drag",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
-        description = "Drag with the left button from one point to another in screenshot capture pixels. Takes no window target or relative coordinates. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+        description = "Drag with the left button from one point to another in screenshot capture pixels. Takes no relative coordinates; a window target matters only with delivery=\"background\", which on GNOME Wayland drags with a virtual pen inside that window and leaves the user's pointer where it is (elsewhere the first such call returns a one-time notice, then later calls drag through the user's pointer). Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -2931,13 +2931,66 @@ impl ComputerUseLinux {
         Parameters(params): Parameters<DragParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
-        let Json(output) = self.dispatch_drag(params).await;
-        self.finish_action_output(
+        let target = params.window_target();
+        let background = params.delivery == Some(KeyboardDelivery::Background);
+        if !background {
+            let Json(output) = self.dispatch_drag(params).await;
+            return self
+                .finish_action_output(
+                    output,
+                    &capture,
+                    None,
+                    TargetRaised::Yes,
+                    PostActionScope::default(),
+                )
+                .await;
+        }
+        let received = Some(serde_json::json!(params.clone()));
+        let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        let outcome = match crate::virtual_pen::availability() {
+            Ok(()) => {
+                self.background_pen(
+                    "drag",
+                    PenRequest::Drag {
+                        start: (params.start_x, params.start_y),
+                        end: (params.end_x, params.end_y),
+                    },
+                    target.clone(),
+                    received.clone(),
+                    input_guard,
+                )
+                .await
+            }
+            Err(reason) => {
+                drop(input_guard);
+                BackgroundOutcome::Unavailable {
+                    reason: format!(
+                        "a background drag goes through the GNOME virtual pen, and {reason}"
+                    ),
+                    fallback: FocusFallback::default(),
+                }
+            }
+        };
+        let (output, report) = match outcome {
+            BackgroundOutcome::Done(output, route) => (output, route.map(BackgroundReport::routed)),
+            BackgroundOutcome::Unavailable { reason, .. } => {
+                match self.background_notice("drag", &reason, received) {
+                    Some((output, notice)) => (output, Some(notice)),
+                    None => {
+                        let Json(output) = self.dispatch_drag(params).await;
+                        (output, Some(BackgroundReport::focused()))
+                    }
+                }
+            }
+        };
+        let raised = background_target_raised(true, report.as_ref());
+        self.finish_background_output(
             output,
             &capture,
-            None,
-            TargetRaised::Yes,
+            target.as_ref(),
+            raised,
             PostActionScope::default(),
+            report,
         )
         .await
     }
@@ -4412,6 +4465,7 @@ pub async fn serve_mcp(listen: Option<crate::http_listen::ListenConfig>) -> Resu
         server.http_transport = true;
         let served = crate::http_listen::serve_http(server, config).await;
         crate::agent_seat::shutdown();
+        crate::virtual_pen::shutdown();
         let signal = served?;
         tree_spiller.remove_current();
         std::process::exit(128 + signal);
@@ -4429,6 +4483,7 @@ pub async fn serve_mcp(listen: Option<crate::http_listen::ListenConfig>) -> Resu
         result = running.waiting() => {
             tree_spiller.remove_current();
             crate::agent_seat::shutdown();
+        crate::virtual_pen::shutdown();
             result?;
             return Ok(());
         }
@@ -4437,6 +4492,7 @@ pub async fn serve_mcp(listen: Option<crate::http_listen::ListenConfig>) -> Resu
     };
     tree_spiller.remove_current();
     crate::agent_seat::shutdown();
+    crate::virtual_pen::shutdown();
     // Exit now: returning would wait forever for the stdin reader thread.
     std::process::exit(128 + signal);
 }
@@ -5432,8 +5488,11 @@ struct ClickParams {
     /// "background" sends the input through the agent's own pointer, so the
     /// user's pointer and keyboard focus stay where they are: on X11 without
     /// a window manager (an XInput 2 master pointer) and on sway 1.10 or later
-    /// (a transient seat). Needs x and y in screenshot capture pixels over the
-    /// window the call targets, without relative or an element. Elsewhere the
+    /// (a transient seat). On GNOME Wayland a virtual pen (a touch pan for
+    /// scroll) leaves the user's pointer alone, but a click still focuses the
+    /// window, and apps without tablet support ignore it. Needs x and y in
+    /// screenshot capture pixels over the window the call targets, without
+    /// relative or an element. Elsewhere the
     /// first such call in a server session sends nothing and returns a
     /// notice; repeated, and for every later such call, it goes through the
     /// user's pointer as with "focus". Default: "focus".
@@ -5711,8 +5770,11 @@ struct ScrollParams {
     /// "background" sends the input through the agent's own pointer, so the
     /// user's pointer and keyboard focus stay where they are: on X11 without
     /// a window manager (an XInput 2 master pointer) and on sway 1.10 or later
-    /// (a transient seat). Needs x and y in screenshot capture pixels over the
-    /// window the call targets, without relative or an element. Elsewhere the
+    /// (a transient seat). On GNOME Wayland a virtual pen (a touch pan for
+    /// scroll) leaves the user's pointer alone, but a click still focuses the
+    /// window, and apps without tablet support ignore it. Needs x and y in
+    /// screenshot capture pixels over the window the call targets, without
+    /// relative or an element. Elsewhere the
     /// first such call in a server session sends nothing and returns a
     /// notice; repeated, and for every later such call, it goes through the
     /// user's pointer as with "focus". Default: "focus".
@@ -5770,8 +5832,51 @@ struct DragParams {
     end_x: i32,
     /// End y in raw screenshot capture pixels.
     end_y: i32,
+    /// Window id from a recent list_windows: the window a background drag
+    /// runs in. The first target field set decides, in this order:
+    /// window_id, pid, app_id, wm_class, window_title. A drag with
+    /// "focus" delivery ignores the target.
+    #[serde(
+        default,
+        deserialize_with = "crate::windowing::types::deserialize_window_id"
+    )]
+    #[schemars(range(max = crate::windowing::types::MAX_WINDOW_ID))]
+    window_id: Option<u64>,
+    /// Process id. It must match exactly one window.
+    #[serde(default)]
+    pid: Option<u32>,
+    /// Application id, ignoring ASCII case: the full desktop id, or its last
+    /// dot-separated segment.
+    #[serde(default)]
+    app_id: Option<String>,
+    /// Window manager class, an exact match ignoring ASCII case.
+    #[serde(default)]
+    wm_class: Option<String>,
+    /// Window title substring, ignoring ASCII case.
+    #[serde(default)]
+    window_title: Option<String>,
+    /// "background" drags with a virtual pen on GNOME Wayland, so the
+    /// user's pointer stays where it is; both points must be on the target
+    /// window, with no window stacked above them. Elsewhere the first such
+    /// call in a server session sends nothing and returns a notice;
+    /// repeated, and for every later such call, the drag goes through the
+    /// user's pointer as with "focus". Default: "focus".
+    #[serde(default)]
+    delivery: Option<KeyboardDelivery>,
     #[serde(flatten)]
     capture: PostActionCaptureParams,
+}
+
+impl DragParams {
+    fn window_target(&self) -> Option<WindowTarget> {
+        optional_window_target(
+            self.window_id,
+            self.pid,
+            &self.app_id,
+            &self.wm_class,
+            &self.window_title,
+        )
+    }
 }
 
 /// How type_text and press_key deliver input.
@@ -10577,7 +10682,8 @@ struct BackgroundReport {
     /// would go, through the user's keyboard focus and pointer.
     used: bool,
     /// The background route used: atspi-element, devtools-tab, terminal,
-    /// x11-master, sway-transient-seat or hyprland-send-key-state.
+    /// x11-master, sway-transient-seat, hyprland-send-key-state, gnome-pen
+    /// or gnome-touch.
     #[serde(skip_serializing_if = "Option::is_none")]
     route: Option<String>,
     /// False on the one-time notice: nothing was sent.
@@ -10656,6 +10762,41 @@ fn seat_refusal(error: &anyhow::Error) -> BackgroundRefusal {
         BackgroundRefusal::Failed(format!(
             "Nothing was sent through the agent seat: {error:#}"
         ))
+    }
+}
+
+/// A background pointer call for the GNOME virtual pen, in capture pixels.
+#[derive(Debug, Clone, Copy)]
+enum PenRequest {
+    Click {
+        at: (i32, i32),
+        button: crate::agent_seat::PointerButton,
+        count: u32,
+    },
+    Drag {
+        start: (i32, i32),
+        end: (i32, i32),
+    },
+    Scroll {
+        at: (i32, i32),
+        dx: i32,
+        dy: i32,
+    },
+}
+
+/// What a pen or touch action did to the user's keyboard focus: mutter
+/// focuses the window a tip press or a touch lands on.
+fn pen_focus_sentence(before: Option<u64>, after: Option<Option<u64>>) -> String {
+    match after {
+        None => "The user's keyboard focus could not be read back.".to_string(),
+        Some(after) if after == before => "The user's keyboard focus did not move.".to_string(),
+        Some(Some(after)) => format!(
+            "GNOME gave window_id {after} keyboard focus{}, so the user's typing now goes there.",
+            before
+                .map(|before| format!(" (it was on window_id {before})"))
+                .unwrap_or_default()
+        ),
+        Some(None) => "The user's keyboard focus left the window it was on.".to_string(),
     }
 }
 
@@ -11030,6 +11171,21 @@ impl ComputerUseLinux {
                 "a background {action} needs x and y in screenshot capture pixels"
             ));
         };
+        if crate::virtual_pen::availability().is_ok() {
+            let request = match input(f64::from(x), f64::from(y)) {
+                seat::PointerInput::Click { button, count, .. } => PenRequest::Click {
+                    at: (x, y),
+                    button,
+                    count,
+                },
+                seat::PointerInput::Scroll { dx, dy, .. } => {
+                    PenRequest::Scroll { at: (x, y), dx, dy }
+                }
+            };
+            return self
+                .background_pen(action, request, target, received, input_guard)
+                .await;
+        }
         let kind = match seat::availability() {
             Ok(SeatKind::HyprlandSendKeyState) => {
                 return unavailable("Hyprland has one seat and no second pointer; its background route (sendkeystate) sends keys only".to_string());
@@ -11088,6 +11244,203 @@ impl ComputerUseLinux {
                 BackgroundRefusal::NoRoute(reason) => unavailable(reason),
                 BackgroundRefusal::Failed(message) => fail(message),
             },
+        }
+    }
+
+    /// click, drag or scroll with delivery "background" on GNOME: a virtual
+    /// pen clicks and drags, a virtual touchscreen pans, and the user's mouse
+    /// pointer stays where it is. The point must be on the target window,
+    /// with no window stacked above it there.
+    async fn background_pen(
+        &self,
+        action: &'static str,
+        request: PenRequest,
+        target: Option<WindowTarget>,
+        received: Option<serde_json::Value>,
+        input_guard: impl Send + 'static,
+    ) -> BackgroundOutcome {
+        use crate::virtual_pen::{self as pen, Gesture, PenButton, PenError};
+        let fail = |message: String| {
+            BackgroundOutcome::Done(action_result(action, Err(message), received.clone()), None)
+        };
+        let unavailable = |reason: String| BackgroundOutcome::Unavailable {
+            reason,
+            fallback: FocusFallback::default(),
+        };
+        let Some(target) = target.filter(|target| target.has_target()) else {
+            return unavailable(format!("a background {action} needs a window target (window_id, pid, app_id, wm_class or window_title) for the window under the point"));
+        };
+        let windows = match crate::windowing::backends::gnome::extension_windows_stacked().await {
+            Ok(windows) => windows,
+            Err(error) => {
+                return unavailable(format!("the virtual pen checks which window is under the point through the computer-use-linux GNOME Shell extension, which did not answer ({error:#}); run setup_window_targeting"))
+            }
+        };
+        let window = match resolve_window_target(&windows, &target) {
+            Ok(window) => window.clone(),
+            Err(error) => return fail(format!("Nothing was sent: {error:#}")),
+        };
+        let cached = self.desktop_size.lock().ok().and_then(|guard| *guard);
+        let capture = match cached {
+            Some(size) => size,
+            None => match raw_capture_size().await {
+                Some((width, height)) => {
+                    self.cache_desktop_size(width, height);
+                    (width, height)
+                }
+                None => return fail(
+                    "Nothing was sent: the screenshot size is unknown; take a screenshot first."
+                        .to_string(),
+                ),
+            },
+        };
+        let monitors = match pen::current_monitors().await {
+            Ok(monitors) => monitors,
+            Err(error) => {
+                return unavailable(format!(
+                    "mutter's monitor layout could not be read: {error:#}"
+                ))
+            }
+        };
+        let layout = match pen::Layout::new(monitors, capture) {
+            Ok(layout) => layout,
+            Err(error) => return fail(format!("Nothing was sent: {}", as_sentence(&error))),
+        };
+        let on_target = |(x, y): (i32, i32)| {
+            let point = layout.logical_point(x, y);
+            pen::check_point_on_target(&windows, window.window_id, point)
+                .map(|rect| (point, rect))
+                .map_err(|error| format!("Nothing was sent: {}", as_sentence(&error)))
+        };
+        let (gesture, route, shown) = match request {
+            PenRequest::Click { at, button, count } => {
+                let (point, _) = match on_target(at) {
+                    Ok(found) => found,
+                    Err(message) => return fail(message),
+                };
+                let button = match button {
+                    crate::agent_seat::PointerButton::Left => PenButton::Tip,
+                    crate::agent_seat::PointerButton::Right => PenButton::Upper,
+                    crate::agent_seat::PointerButton::Middle => PenButton::Lower,
+                };
+                (
+                    Gesture::Click {
+                        at: point,
+                        button,
+                        count,
+                    },
+                    pen::PEN_ROUTE,
+                    format!("the {action} at ({}, {}) through a virtual pen", at.0, at.1),
+                )
+            }
+            PenRequest::Drag { start, end } => {
+                let (first, _) = match on_target(start) {
+                    Ok(found) => found,
+                    Err(message) => return fail(message),
+                };
+                if let Err(message) = on_target(end) {
+                    return fail(format!(
+                        "{message} A background drag stays inside one window."
+                    ));
+                }
+                let path = std::iter::once(first)
+                    .chain(
+                        crate::pointer_path::drag_points(start, end)
+                            .map(|(x, y)| layout.logical_point(x, y)),
+                    )
+                    .collect();
+                (
+                    Gesture::Drag { path },
+                    pen::PEN_ROUTE,
+                    format!(
+                        "the drag from ({}, {}) to ({}, {}) through a virtual pen",
+                        start.0, start.1, end.0, end.1
+                    ),
+                )
+            }
+            PenRequest::Scroll { at, dx, dy } => {
+                let (point, rect) = match on_target(at) {
+                    Ok(found) => found,
+                    Err(message) => return fail(message),
+                };
+                let Some(monitor) = layout.monitor_at(point) else {
+                    return fail("Nothing was sent: no monitor holds the point.".to_string());
+                };
+                // Scrolling down moves the content up: the finger moves up.
+                let motion = (
+                    -f64::from(dx) * pen::PAN_PER_NOTCH,
+                    -f64::from(dy) * pen::PAN_PER_NOTCH,
+                );
+                let strokes =
+                    match pen::pan_strokes(point, motion, &pen::pan_bounds(&rect, &monitor.rect)) {
+                        Ok(strokes) => strokes,
+                        Err(error) => {
+                            return fail(format!("Nothing was sent: {}", as_sentence(&error)))
+                        }
+                    };
+                let distance = motion.0.abs() + motion.1.abs();
+                let count = strokes.len();
+                (
+                    Gesture::Pan { strokes },
+                    pen::TOUCH_ROUTE,
+                    format!(
+                        "the scroll at ({}, {}) as a {distance:.0} px touch pan in {count} stroke{} through a virtual touchscreen",
+                        at.0,
+                        at.1,
+                        if count == 1 { "" } else { "s" }
+                    ),
+                )
+            }
+        };
+        self.indicator.action(action).await;
+        let focused_before = windows
+            .iter()
+            .find(|window| window.focused)
+            .map(|window| window.window_id);
+        let sent = tokio::task::spawn_blocking(move || {
+            let _hold = input_guard;
+            pen::perform(&gesture, &layout)
+        })
+        .await;
+        match sent {
+            Err(error) => fail(format!("The virtual pen task failed: {error}")),
+            Ok(Err(PenError::NoRoute(reason))) => unavailable(reason),
+            Ok(Err(PenError::NotSent(message))) => fail(format!(
+                "Nothing was sent through the virtual pen: {}",
+                as_sentence(&message)
+            )),
+            Ok(Err(PenError::Partial(message))) => fail(format!(
+                "Input through the virtual pen stopped partway and may have been partly delivered; re-observe the target before retrying: {}",
+                as_sentence(&message)
+            )),
+            Ok(Ok(())) => {
+                let focused_after = crate::windowing::backends::gnome::extension_windows_stacked()
+                    .await
+                    .ok()
+                    .map(|windows| {
+                        windows
+                            .iter()
+                            .find(|window| window.focused)
+                            .map(|window| window.window_id)
+                    });
+                let focus = pen_focus_sentence(focused_before, focused_after);
+                let limits = if route == pen::TOUCH_ROUTE {
+                    "A touch pan scrolls only where the app pans on touch; re-observe to confirm."
+                } else {
+                    "The pen hovers at its last point for up to 8 s. An app without tablet support does not see pen input; re-observe to confirm."
+                };
+                BackgroundOutcome::Done(
+                    successful_action_with_focus(
+                        action,
+                        &format!(
+                            "Sent {shown}; the user's mouse pointer did not move. {focus} {limits}"
+                        ),
+                        received,
+                        None,
+                    ),
+                    Some(route.to_string()),
+                )
+            }
         }
     }
 

@@ -30,6 +30,7 @@ mod terminal;
 mod test_sockets;
 mod tree_encoding;
 mod tree_spill;
+mod virtual_pen;
 mod windowing;
 mod windows;
 mod wlr_outputs;

@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.57";
-export const GENERATED_TOOL_CATALOG_HASH = "2bb4a324370516666dd67bc2c676007de98ebfb3c8179796578e51eaa4275728";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "dfc420c6297a2f61f92e6379083c558cab420d1fdbafccc00e7f8390adef847b";
+export const GENERATED_TOOL_CATALOG_HASH = "e447f071f2ccf6c438c5fca9c80dbbe642661b1e9afa6239aad6534b2815ebfb";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "edaac05bdf1eaca9f3ae95f7e0e7d9f41797c920ec7331c39e6864c04841fa51";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -279,7 +279,7 @@ export const GENERATED_MCP_TOOLS =
             }
           ],
           "default": null,
-          "description": "\"background\" sends the input through the agent's own pointer, so the\nuser's pointer and keyboard focus stay where they are: on X11 without\na window manager (an XInput 2 master pointer) and on sway 1.10 or later\n(a transient seat). Needs x and y in screenshot capture pixels over the\nwindow the call targets, without relative or an element. Elsewhere the\nfirst such call in a server session sends nothing and returns a\nnotice; repeated, and for every later such call, it goes through the\nuser's pointer as with \"focus\". Default: \"focus\"."
+          "description": "\"background\" sends the input through the agent's own pointer, so the\nuser's pointer and keyboard focus stay where they are: on X11 without\na window manager (an XInput 2 master pointer) and on sway 1.10 or later\n(a transient seat). On GNOME Wayland a virtual pen (a touch pan for\nscroll) leaves the user's pointer alone, but a click still focuses the\nwindow, and apps without tablet support ignore it. Needs x and y in\nscreenshot capture pixels over the window the call targets, without\nrelative or an element. Elsewhere the\nfirst such call in a server session sends nothing and returns a\nnotice; repeated, and for every later such call, it goes through the\nuser's pointer as with \"focus\". Default: \"focus\"."
         },
         "element_index": {
           "default": null,
@@ -501,9 +501,24 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Drag with the left button from one point to another in screenshot capture pixels. Takes no window target or relative coordinates. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Drag with the left button from one point to another in screenshot capture pixels. Takes no relative coordinates; a window target matters only with delivery=\"background\", which on GNOME Wayland drags with a virtual pen inside that window and leaves the user's pointer where it is (elsewhere the first such call returns a one-time notice, then later calls drag through the user's pointer). Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
+        "KeyboardDelivery": {
+          "description": "How type_text and press_key deliver input.",
+          "oneOf": [
+            {
+              "const": "focus",
+              "description": "Focus the target window, then type into it.",
+              "type": "string"
+            },
+            {
+              "const": "background",
+              "description": "Leave the user's keyboard focus alone and deliver through a route the\ncall names.",
+              "type": "string"
+            }
+          ]
+        },
         "ScreenshotOutputFormat": {
           "enum": [
             "png",
@@ -514,6 +529,26 @@ export const GENERATED_MCP_TOOLS =
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "app_id": {
+          "default": null,
+          "description": "Application id, ignoring ASCII case: the full desktop id, or its last\ndot-separated segment.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "delivery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KeyboardDelivery"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "\"background\" drags with a virtual pen on GNOME Wayland, so the\nuser's pointer stays where it is; both points must be on the target\nwindow, with no window stacked above them. Elsewhere the first such\ncall in a server session sends nothing and returns a notice;\nrepeated, and for every later such call, the drag goes through the\nuser's pointer as with \"focus\". Default: \"focus\"."
+        },
         "end_x": {
           "description": "End x in raw screenshot capture pixels.",
           "format": "int32",
@@ -560,6 +595,15 @@ export const GENERATED_MCP_TOOLS =
         },
         "max_width": {
           "description": "Maximum returned post-action screenshot width in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "pid": {
+          "default": null,
+          "description": "Process id. It must match exactly one window.",
           "minimum": 0,
           "type": [
             "integer",
@@ -617,6 +661,32 @@ export const GENERATED_MCP_TOOLS =
           "description": "Start y in raw screenshot capture pixels.",
           "format": "int32",
           "type": "integer"
+        },
+        "window_id": {
+          "default": null,
+          "description": "Window id from a recent list_windows: the window a background drag\nruns in. The first target field set decides, in this order:\nwindow_id, pid, app_id, wm_class, window_title. A drag with\n\"focus\" delivery ignores the target.",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "window_title": {
+          "default": null,
+          "description": "Window title substring, ignoring ASCII case.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wm_class": {
+          "default": null,
+          "description": "Window manager class, an exact match ignoring ASCII case.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -2024,7 +2094,7 @@ export const GENERATED_MCP_TOOLS =
             }
           ],
           "default": null,
-          "description": "\"background\" sends the input through the agent's own pointer, so the\nuser's pointer and keyboard focus stay where they are: on X11 without\na window manager (an XInput 2 master pointer) and on sway 1.10 or later\n(a transient seat). Needs x and y in screenshot capture pixels over the\nwindow the call targets, without relative or an element. Elsewhere the\nfirst such call in a server session sends nothing and returns a\nnotice; repeated, and for every later such call, it goes through the\nuser's pointer as with \"focus\". Default: \"focus\"."
+          "description": "\"background\" sends the input through the agent's own pointer, so the\nuser's pointer and keyboard focus stay where they are: on X11 without\na window manager (an XInput 2 master pointer) and on sway 1.10 or later\n(a transient seat). On GNOME Wayland a virtual pen (a touch pan for\nscroll) leaves the user's pointer alone, but a click still focuses the\nwindow, and apps without tablet support ignore it. Needs x and y in\nscreenshot capture pixels over the window the call targets, without\nrelative or an element. Elsewhere the\nfirst such call in a server session sends nothing and returns a\nnotice; repeated, and for every later such call, it goes through the\nuser's pointer as with \"focus\". Default: \"focus\"."
         },
         "direction": {
           "description": "up, down, left or right (case-insensitive).",
