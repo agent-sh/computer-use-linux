@@ -135,7 +135,7 @@ file.
 - Keep changes focused and explain the desktop/session you tested on.
 - Include `computer-use-linux doctor` output for compositor, portal, or accessibility issues.
 - Preserve the MCP safety annotations when adding or changing tools.
-- Update `README.md`, `npm/README.md`, and `skills/computer-use-linux/SKILL.md` when user-facing commands change.
+- Update `README.md` and `skills/computer-use-linux/SKILL.md` when user-facing commands change, and `npm/README.md` when install or host setup commands change. `npm/README.md` covers the npm install only and links to `README.md` for everything else.
 - After editing `skills/computer-use-linux/`, copy it into `plugins/computer-use-linux/skills/`. `scripts/check_plugins.sh` fails while the copies differ.
 - After changing a tool schema or description, rebuild and regenerate the Pi catalog: `python3 scripts/generate_pi_tool_catalog.py --binary target/debug/computer-use-linux`.
 - Use conventional commit prefixes when practical (`fix:`, `feat:`, `docs:`, `chore:`).
