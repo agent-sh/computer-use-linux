@@ -11270,6 +11270,11 @@ impl ComputerUseLinux {
         let Some(target) = target.filter(|target| target.has_target()) else {
             return unavailable(format!("a background {action} needs a window target (window_id, pid, app_id, wm_class or window_title) for the window under the point"));
         };
+        // Before the extension: GNOME Shell turns extensions off on the lock
+        // screen, and focused input must not stand in there either.
+        if pen::screen_locked().await {
+            return fail("Nothing was sent: the screen is locked.".to_string());
+        }
         let windows = match crate::windowing::backends::gnome::extension_windows_stacked().await {
             Ok(windows) => windows,
             Err(error) => {
@@ -11280,9 +11285,6 @@ impl ComputerUseLinux {
             Ok(window) => window.clone(),
             Err(error) => return fail(format!("Nothing was sent: {error:#}")),
         };
-        if pen::screen_locked().await {
-            return fail("Nothing was sent: the screen is locked.".to_string());
-        }
         let cached = self.desktop_size.lock().ok().and_then(|guard| *guard);
         let capture = match cached {
             Some(size) => size,

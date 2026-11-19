@@ -957,8 +957,11 @@ fn process_lock(wait: Duration) -> std::result::Result<ProcessLock, PenError> {
             return Ok(ProcessLock { _file: file });
         }
         if Instant::now() >= deadline {
-            return Err(PenError::NoRoute(
-                "another computer-use-linux server is using the virtual pen".to_string(),
+            // A retry works once the other server is done: nothing was
+            // sent, and normal input must not stand in for it.
+            return Err(PenError::NotSent(
+                "another computer-use-linux server is using the virtual pen; retry the call"
+                    .to_string(),
             ));
         }
         std::thread::sleep(Duration::from_millis(50));
