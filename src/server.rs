@@ -1635,6 +1635,18 @@ impl ComputerUseLinux {
                     )
                 }
                 BackgroundOutcome::Unavailable { reason, .. } => {
+                    // A stale snapshot is an error, not a missing route.
+                    if let Err(message) = self.check_element_snapshot(
+                        "click",
+                        params.snapshot_id.as_deref(),
+                        click_resolves_cached_element(&params),
+                    ) {
+                        return (
+                            Json(action_result("click", Err(message), received)),
+                            PostActionScope::default(),
+                            None,
+                        );
+                    }
                     if let Some((output, notice)) =
                         self.background_notice("click", &reason, received.clone())
                     {
@@ -2430,6 +2442,14 @@ impl ComputerUseLinux {
                     )
                 }
                 BackgroundOutcome::Unavailable { reason, .. } => {
+                    // A stale snapshot is an error, not a missing route.
+                    if let Err(message) = self.check_element_snapshot(
+                        "scroll",
+                        params.snapshot_id.as_deref(),
+                        scroll_resolves_cached_element(&params),
+                    ) {
+                        return refused(message);
+                    }
                     if let Some((output, notice)) =
                         self.background_notice("scroll", &reason, received.clone())
                     {
@@ -3146,7 +3166,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "press_key",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
-        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, kp_enter (keypad Enter), escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). With PIXELFLUX_CU and PIXELFLUX_CU_TOKEN set, chords go to pixelflux. An unreachable pixelflux falls through to the routes below; a pixelflux error does not. On X11, chords go through xdotool (XTEST), or ydotool when xdotool is missing or cannot start. On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. When ydotool is absent and the session has no RemoteDesktop portal (for example wlroots compositors), chords go through wtype instead. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. On KDE Plasma every key in a portal chord is a physical keycode. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass delivery=\"background\" (the default when an element or browser_tab is named) to leave the user's keyboard focus alone: input goes to a named element through AT-SPI, to a browser tab over a DevTools port the user opened (COMPUTER_USE_LINUX_DEVTOOLS), or to a terminal's program through tmux; when no route serves the target (the reason says which setting or desktop would open one), the first such call in a server session sends nothing and returns a notice (background.retry_to_continue=true); repeating it, and every later such call, goes through normal focused input and reports background.used=false. The result's background field names the route used. On an element, only keys that mean an action map (Enter or space on a button or menu item, space on a check box, radio button or toggle, Enter on a link or a single-line field with an activate action); others are refused. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, kp_enter (keypad Enter), escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). With PIXELFLUX_CU and PIXELFLUX_CU_TOKEN set, chords go to pixelflux. An unreachable pixelflux falls through to the routes below; a pixelflux error does not. On X11, chords go through xdotool (XTEST), or ydotool when xdotool is missing or cannot start. On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. When ydotool is absent and the session has no RemoteDesktop portal (for example wlroots compositors), chords go through wtype instead. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. On KDE Plasma every key in a portal chord is a physical keycode. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass delivery=\"background\" (the default when an element or browser_tab is named) to leave the user's keyboard focus alone: input goes to a named element through AT-SPI, to a browser tab over a DevTools port the user opened (COMPUTER_USE_LINUX_DEVTOOLS), or to a terminal's program through tmux; when no route serves the target (the reason says which setting or desktop would open one), the first such call in a server session sends nothing and returns a notice (background.retry_to_continue=true); repeating it, and every later such call, goes through normal focused input and reports background.used=false. The result's background field names the route used. On an element, only keys that mean an action map (Enter or space on a button or menu item, space on a check box, radio button or toggle, Enter on a link or a single-line field with an activate action); others have no route there. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -5777,7 +5797,7 @@ struct BackgroundKeyboardParams {
     /// a server session sends nothing and returns a notice; repeated, and
     /// for every later such call, the input goes through normal focused
     /// input (an element gets keyboard focus first, a browser_tab targets
-    /// the window titled like it). A wrong or ambiguous target is still an
+    /// the one window whose title contains it). A wrong or ambiguous target is still an
     /// error. Default: "background" when an element or browser_tab is named,
     /// else "focus".
     #[serde(default)]
@@ -10671,6 +10691,15 @@ fn as_sentence(reason: &str) -> String {
 }
 
 impl ComputerUseLinux {
+    /// A handle for a new MCP session: shared state, with its own one-time
+    /// background notice.
+    pub fn for_new_session(&self) -> Self {
+        Self {
+            background_notice_shown: Arc::default(),
+            ..self.clone()
+        }
+    }
+
     /// The first call in a server session that asked for background
     /// delivery and has no route gets a notice and sends nothing. Every later
     /// one goes through focused input (None here).
@@ -10716,9 +10745,10 @@ impl ComputerUseLinux {
     }
 
     /// Where focused input goes when a route cannot deliver: the same window
-    /// target; for a browser tab, the window whose title matches the tab;
-    /// for an element, its window, with the element focused first.
-    fn focus_fallback(
+    /// target; for a browser tab, the one window whose title contains the
+    /// tab's name; for an element, its window, with the element focused
+    /// first.
+    async fn focus_fallback(
         &self,
         route: &BackgroundRoute,
         target: &WindowTarget,
@@ -10726,17 +10756,46 @@ impl ComputerUseLinux {
     ) -> std::result::Result<FocusFallback, String> {
         match route {
             BackgroundRoute::BrowserTab(tab) => {
-                let mut target = target.clone();
-                if trimmed_nonempty(target.title.as_deref()).is_none() {
-                    target.title = Some(tab.clone());
-                }
+                let windows = list_windows()
+                    .await
+                    .map_err(|error| format!("Nothing was sent: {error:#}"))?;
+                let needle = tab.to_lowercase();
+                let shows_tab = |window: &&WindowInfo| {
+                    window
+                        .title
+                        .as_deref()
+                        .is_some_and(|title| title.to_lowercase().contains(&needle))
+                };
+                let window = if target.has_target() {
+                    let window = resolve_window_target(&windows, target)
+                        .map_err(|error| format!("Nothing was sent: {error:#}"))?;
+                    if !shows_tab(&window) {
+                        return Err(format!("Nothing was sent: no background route reaches the tab, and window_id {} does not show a tab titled like {tab:?}, so normal input could go to another tab.", window.window_id));
+                    }
+                    window
+                } else {
+                    let matches = windows.iter().filter(shows_tab).collect::<Vec<_>>();
+                    match matches.as_slice() {
+                        [window] => *window,
+                        [] => return Err(format!("Nothing was sent: no background route reaches the tab, and no window title contains {tab:?} for normal input; name the browser window or set {}.", crate::devtools::DEVTOOLS_ENV)),
+                        several => return Err(format!("Nothing was sent: no background route reaches the tab, and {} window titles contain {tab:?}; name the browser window.", several.len())),
+                    }
+                };
                 Ok(FocusFallback {
-                    target,
+                    target: WindowTarget {
+                        window_id: Some(window.window_id),
+                        ..WindowTarget::default()
+                    },
                     element: None,
                 })
             }
             BackgroundRoute::Element => {
                 let identifier = trimmed_nonempty(background.element_identifier.as_deref());
+                self.check_element_snapshot(
+                    "background fallback",
+                    background.snapshot_id.as_deref(),
+                    identifier.is_none(),
+                )?;
                 let object_ref = self.resolve_object_ref(
                     background.element_index,
                     identifier,
@@ -10887,14 +10946,9 @@ impl ComputerUseLinux {
                 (key, vec![seat::chord_stroke(&press)?])
             }
         };
-        // The user's focus is elsewhere, so whether the target's field is
-        // secret is unknown; the indicator masks what it shows.
-        if action == "press_key" {
-            self.indicator.keys(shown, true).await;
-        } else {
-            self.indicator.text(action, shown, true).await;
-        }
-        if kind == SeatKind::HyprlandSendKeyState {
+        // Hyprland's checks come before the indicator: a call they turn away
+        // sends nothing.
+        let hyprland_presses = if kind == SeatKind::HyprlandSendKeyState {
             let presses = match input {
                 BackgroundInput::Text(text) => crate::hyprland_input::text_to_key_presses(text)
                     .map_err(BackgroundRefusal::NoRoute)?,
@@ -10906,6 +10960,18 @@ impl ComputerUseLinux {
                 Ok(_) => return Err(BackgroundRefusal::NoRoute("Hyprland background input maps keys for a US layout, and the active keymap is not US".to_string())),
                 Err(error) => return Err(format!("Nothing was sent: {error:#}").into()),
             }
+            Some(presses)
+        } else {
+            None
+        };
+        // The user's focus is elsewhere, so whether the target's field is
+        // secret is unknown; the indicator masks what it shows.
+        if action == "press_key" {
+            self.indicator.keys(shown, true).await;
+        } else {
+            self.indicator.text(action, shown, true).await;
+        }
+        if let Some(presses) = hyprland_presses {
             crate::windowing::backends::hyprland::send_key_events(window.window_id, &presses)
                 .await
                 .map_err(|error| format!("{error:#}"))?;
@@ -11045,13 +11111,15 @@ impl ComputerUseLinux {
             Ok(route) => route,
             Err(BackgroundRefusal::Failed(message)) => return fail(message),
             Err(BackgroundRefusal::NoRoute(reason)) => {
-                return BackgroundOutcome::Unavailable {
+                return self.unavailable(
+                    action,
                     reason,
-                    fallback: FocusFallback {
+                    FocusFallback {
                         target: target.clone(),
                         element: None,
                     },
-                }
+                    received,
+                )
             }
         };
         let result = match (&route, input, chord) {
@@ -11096,12 +11164,43 @@ impl ComputerUseLinux {
             ),
             Err(BackgroundRefusal::Failed(message)) => fail(message),
             Err(BackgroundRefusal::NoRoute(reason)) => {
-                match self.focus_fallback(&route, target, background) {
-                    Ok(fallback) => BackgroundOutcome::Unavailable { reason, fallback },
-                    Err(message) => fail(message),
+                match self.focus_fallback(&route, target, background).await {
+                    Ok(fallback) => self.unavailable(action, reason, fallback, received),
+                    // Neither route reaches the target: say why there is no
+                    // background route too.
+                    Err(message) => fail(format!(
+                        "{message} No background route: {}",
+                        as_sentence(&reason)
+                    )),
                 }
             }
         }
+    }
+
+    /// No route serves the call. With Hyprland background mode on, focused
+    /// input to a window target is the same sendkeystate route, so the call
+    /// fails instead.
+    fn unavailable(
+        &self,
+        action: &str,
+        reason: String,
+        fallback: FocusFallback,
+        received: Option<serde_json::Value>,
+    ) -> BackgroundOutcome {
+        if hyprland_background_applies(&fallback.target) {
+            return BackgroundOutcome::Done(
+                action_result(
+                    action,
+                    Err(format!(
+                        "Nothing was sent: {} Hyprland background mode (COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND) is on, so normal input to a window goes through the same sendkeystate route.",
+                        as_sentence(&reason)
+                    )),
+                    received,
+                ),
+                None,
+            );
+        }
+        BackgroundOutcome::Unavailable { reason, fallback }
     }
 
     fn background_element_target(target: &WindowTarget) -> ElementActionTarget {
@@ -11183,6 +11282,20 @@ impl ComputerUseLinux {
             background.snapshot_id.as_deref(),
             identifier.is_none(),
         ) {
+            return Ok(fail(message));
+        }
+        // The element must belong to the window the call names, as for
+        // text: a key with no action falls back to that window.
+        if let Err(message) = self
+            .check_element_action_target(
+                &Self::background_element_target(target),
+                background.element_index,
+                identifier,
+                &background.selector(),
+                ElementResolvePurpose::Action,
+            )
+            .await
+        {
             return Ok(fail(message));
         }
         let (role, states, actions) = match identifier {

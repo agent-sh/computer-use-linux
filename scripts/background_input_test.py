@@ -21,8 +21,8 @@ terminal  A private tmux server: text and keys reach a pane by its tty and
           sent), unless the kernel allows taking the pty master.
 devtools  A headless Chrome on a loopback DevTools port named by its
           DevToolsActivePort file: text goes into the tab's focused input and
-          Enter submits its form. A server without the setting gives the
-          notice first, then tries focused input.
+          Enter submits its form. A server without the setting has no
+          route, and no window shows the headless tab, so the call fails.
 
 Missing tools skip the fixture outside CI and fail it in CI.
 """
@@ -143,6 +143,7 @@ def focused(result):
     """A call with no background route that went to normal focused input."""
     assert result.get('background') == {'requested': True, 'used': False}, result
     assert 'agent-workspace-linux' not in result['message'], result
+    assert 'giving it keyboard focus' not in result['message'], result
     return result
 
 
@@ -475,10 +476,9 @@ def devtools():
             wait_for(lambda: title() == 'CUL tab test', 'page load', 20)
 
             bare = Mcp(server_env(tmp))
-            notice(bare.tool('type_text', text='x', browser_tab='CUL tab'), 'COMPUTER_USE_LINUX_DEVTOOLS')
-            # Repeated: focused input to the window titled like the tab. A
-            # headless browser has no window here, so nothing is sent.
-            focused(bare.tool('type_text', text='x', browser_tab='CUL tab'))
+            # No DevTools route, and no window shows the tab for normal input
+            # (the browser is headless): an error that names both.
+            refused(bare.tool('type_text', text='x', browser_tab='CUL tab'), 'COMPUTER_USE_LINUX_DEVTOOLS', 'Nothing was sent')
             bare.close()
             assert title() == 'CUL tab test', title()
 

@@ -159,6 +159,16 @@ def focused_fallback(result):
             and 'agent-workspace-linux' not in result.get('message', ''))
 
 
+def scrub(env, root):
+    """No route to the host's input: a fallback to focused input must land
+    on the private display only."""
+    for key in ('PIXELFLUX_CU', 'PIXELFLUX_CU_TOKEN', 'COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND',
+                'COMPUTER_USE_LINUX_DEVTOOLS', 'KITTY_LISTEN_ON', 'WEZTERM_UNIX_SOCKET', 'TMUX', 'STY'):
+        env.pop(key, None)
+    env.update(YDOTOOL_SOCKET=str(root / 'no-ydotool.sock'), CU_DISABLE_ABS_POINTER='1')
+    return env
+
+
 def check(failures, condition, message):
     if not condition:
         failures.append(message)
@@ -197,6 +207,7 @@ def run_x11(binary, root):
                    COMPUTER_USE_LINUX_INDICATOR='0', AT_SPI_BUS_ADDRESS='unix:path=' + str(root / 'no-a11y'))
         for key in ('WAYLAND_DISPLAY', 'WAYLAND_SOCKET', 'SWAYSOCK', 'HYPRLAND_INSTANCE_SIGNATURE', 'NIRI_SOCKET'):
             env.pop(key, None)
+        scrub(env, root)
         env['DISPLAY'] = xvfb(cleanup)
         def spawn(*args):
             proc = subprocess.Popen(list(args), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -267,6 +278,8 @@ def run_x11(binary, root):
         result = server.call('press_key', dict(key='Alt+F4', delivery='background', title='closeterm'))
         check(failures, focused_fallback(result), f'the repeated call goes through focused input: {result}')
         check(failures, wait_for(lambda: out('xdotool', 'search', '--name', '^closeterm$').strip() == '', 'closeterm closed', 5), 'Alt+F4 reached closeterm')
+        for name in ('userterm', 'agentterm'):
+            check(failures, out('xdotool', 'search', '--name', f'^{name}$').strip() != '', f'Alt+F4 closed only its target; {name} is open')
         # Later calls with no route deliver without the notice: a background
         # click under a window manager raises and focuses the target, then
         # clicks with the user's pointer.
@@ -354,6 +367,7 @@ def run_sway(binary, root):
                    COMPUTER_USE_LINUX_INDICATOR='0')
         for key in ('DISPLAY', 'WAYLAND_DISPLAY', 'WAYLAND_SOCKET', 'SWAYSOCK', 'HYPRLAND_INSTANCE_SIGNATURE', 'NIRI_SOCKET'):
             env.pop(key, None)
+        scrub(env, root)
         sway = subprocess.Popen(SWAY.split() + ['-c', str(config)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         cleanup.callback(stop, sway)
         sock = wait_for(lambda: next(iter(runtime.glob('sway-ipc.*.sock')), None), 'sway IPC socket')
@@ -416,6 +430,22 @@ def run_sway(binary, root):
         check(failures, result.get('ok') is True, f'type_text line: {result}')
         result = server.call('press_key', dict(key='Enter', delivery='background', title='agentterm'))
         check(failures, result.get('ok') is True, f'press_key Enter: {result}')
+        # Bound chords, Super chords and keys outside the default binding mode
+        # have no agent-seat route. The notice comes once per session, so
+        # each case gets a fresh server to show its reason.
+        def first_call(tool, **arguments):
+            fresh = Server(binary, env)
+            try:
+                return fresh.call(tool, arguments)
+            finally:
+                fresh.close()
+        for chord, word in (('Ctrl+q', 'binds'), ('Ctrl+e', 'binds'), ('Super+Return', 'Super')):
+            result = first_call('press_key', key=chord, delivery='background', title='agentterm')
+            check(failures, notice(result) and word in result['background'].get('reason', ''), f'{chord} gets the notice: {result}')
+        msg('mode resize')
+        result = first_call('type_text', text='h', delivery='background', title='agentterm')
+        check(failures, notice(result) and 'binding mode' in result['background'].get('reason', ''), f'keys outside the default mode get the notice: {result}')
+        msg('mode default')
         current = seats()
         # The seat lives for one call, so no other client can bind it between calls.
         check(failures, list(current) == ['seat0'], f'no agent seat outlives its call: {current}')
@@ -444,15 +474,11 @@ def run_sway(binary, root):
         result = server.call('type_text', dict(text='focused\n'))
         check(failures, result.get('ok') is True, f'focused type_text after background input: {result}')
         check(failures, settled(user_file, 'user1\nfocused\n') == 'user1\nfocused\n', f'focused text reached the user foot: {read(user_file)!r}')
-        # Repeating the call delivers it through seat0, and later calls with
-        # no route (GTK again, sway-bound and Super chords) do too, without
-        # the notice.
+        # Repeating the call delivers it through seat0, and a later call with
+        # no route does too, without the notice.
         result = server.call('type_text', dict(text='gtk', delivery='background', title='CUL seat fixture'))
         check(failures, focused_fallback(result), f'the repeated call goes through focused input: {result}')
         check(failures, settled(root / 'gtk-entry', 'gtk') == 'gtk', f'the repeated call reached the GTK entry: {read(root / "gtk-entry")!r}')
-        for chord in ('Ctrl+q', 'Super+Return'):
-            result = server.call('press_key', dict(key=chord, delivery='background', title='CUL seat fixture'))
-            check(failures, focused_fallback(result), f'{chord} goes through focused input: {result}')
         result = server.call('type_text', dict(text='more', delivery='background', title='CUL seat fixture'))
         check(failures, focused_fallback(result), f'a later call with no route goes through focused input: {result}')
         check(failures, settled(root / 'gtk-entry', 'gtkmore') == 'gtkmore', f'the later call reached the GTK entry: {read(root / "gtk-entry")!r}')

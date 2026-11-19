@@ -1284,8 +1284,6 @@ pub(crate) async fn terminal_send_text(
     }
 }
 
-/// Send a chord to the program on `tty` through `channel`. Returns the name
-/// the channel took it as.
 /// Whether `channel` has a name or byte sequence for `chord`. Checked before
 /// sending: a key the channel cannot express has no background route.
 pub(crate) fn terminal_key_supported(
@@ -1299,6 +1297,8 @@ pub(crate) fn terminal_key_supported(
     }
 }
 
+/// Send a chord to the program on `tty` through `channel`. Returns the name
+/// the channel took it as.
 pub(crate) async fn terminal_send_key(
     channel: &TerminalChannel,
     tty: &Path,
