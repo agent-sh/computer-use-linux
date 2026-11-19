@@ -1,5 +1,6 @@
 mod abs_pointer;
 mod accessibility_guard;
+mod agent_seat;
 #[path = "atspi_tree.rs"]
 mod atspi_tree_impl;
 mod background_input;

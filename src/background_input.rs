@@ -306,6 +306,9 @@ pub(crate) fn available_routes(at_spi: bool) -> Vec<String> {
     if hyprland && crate::hyprland_input::background_enabled() {
         routes.push("hyprland");
     }
+    if crate::agent_seat::availability().is_ok() {
+        routes.push("seat");
+    }
     routes.into_iter().map(str::to_string).collect()
 }
 

@@ -62,6 +62,7 @@ NOT_ENVIRONMENT = {
     "KITTY_WINDOW_ID": "read from the environment of a process on the target tty, not the server's",
     "PICTURES": "xdg-user-dir argument",
     "SCREEN": "GNU screen's server process name",
+    "XK_": "X keysym name prefix",
     "SHIFT": "modifier name",
     "STY": "read from the environment of a process on the target tty, not the server's",
     "SUPER": "modifier name",

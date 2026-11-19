@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.56";
-export const GENERATED_TOOL_CATALOG_HASH = "00123a1a47131061ea77a16b764e37b877723dccb8df557506aebe51cfdf975a";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "bc5291a87b7d01c3de64ac7de5a2e1248c877c703ff7c3d6b950f7ed1bedff69";
+export const GENERATED_TOOL_CATALOG_HASH = "8efde834e8d132f5b04bd2a3739ac185098220f0a01b73e168d5274f359919c6";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "ced1a365f1af084a5b71ccb01f74e27984ff4e2bb85267cb39f875b51a72f10b";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -214,6 +214,21 @@ export const GENERATED_MCP_TOOLS =
           ],
           "type": "string"
         },
+        "KeyboardDelivery": {
+          "description": "How type_text and press_key deliver input.",
+          "oneOf": [
+            {
+              "const": "focus",
+              "description": "Focus the target window, then type into it.",
+              "type": "string"
+            },
+            {
+              "const": "background",
+              "description": "Leave the user's keyboard focus alone and deliver through a route the\ncall names.",
+              "type": "string"
+            }
+          ]
+        },
         "ScreenshotOutputFormat": {
           "enum": [
             "png",
@@ -253,6 +268,18 @@ export const GENERATED_MCP_TOOLS =
           "$ref": "#/$defs/ClickCoordinateSpace",
           "default": "capture",
           "description": "Pixel space for explicit x/y: raw screenshot capture pixels (default),\nor global AT-SPI screen coordinates mapped through the element's KWin window."
+        },
+        "delivery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KeyboardDelivery"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "\"background\" sends the input through the agent's own pointer, so the\nuser's pointer and keyboard focus stay where they are: on X11 without\na window manager (an XInput 2 master pointer) and on sway 1.10 or later\n(a transient seat). Needs x and y in screenshot capture pixels over the\nwindow the call targets, without relative or an element. Elsewhere the\ncall is refused and nothing is sent. Default: \"focus\"."
         },
         "element_index": {
           "default": null,
@@ -1954,6 +1981,21 @@ export const GENERATED_MCP_TOOLS =
     "description": "Scroll an element, window, or point in a direction by a number of pages (5 wheel notches per page). With a window target and no x/y/element_index, scrolls at the centre of the targeted window; with no point or target, at the current pointer. A window target is raised and focused first; nothing is sent when focus cannot be verified. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
+        "KeyboardDelivery": {
+          "description": "How type_text and press_key deliver input.",
+          "oneOf": [
+            {
+              "const": "focus",
+              "description": "Focus the target window, then type into it.",
+              "type": "string"
+            },
+            {
+              "const": "background",
+              "description": "Leave the user's keyboard focus alone and deliver through a route the\ncall names.",
+              "type": "string"
+            }
+          ]
+        },
         "ScreenshotOutputFormat": {
           "enum": [
             "png",
@@ -1971,6 +2013,18 @@ export const GENERATED_MCP_TOOLS =
             "string",
             "null"
           ]
+        },
+        "delivery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KeyboardDelivery"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "\"background\" sends the input through the agent's own pointer, so the\nuser's pointer and keyboard focus stay where they are: on X11 without\na window manager (an XInput 2 master pointer) and on sway 1.10 or later\n(a transient seat). Needs x and y in screenshot capture pixels over the\nwindow the call targets, without relative or an element. Elsewhere the\ncall is refused and nothing is sent. Default: \"focus\"."
         },
         "direction": {
           "description": "up, down, left or right (case-insensitive).",

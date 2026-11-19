@@ -94,8 +94,13 @@ pub struct CapabilityMap {
     /// leave the user's keyboard focus alone: at_spi (named elements),
     /// devtools (a browser tab, when COMPUTER_USE_LINUX_DEVTOOLS names a
     /// port), for terminals kitty, wezterm, tmux, screen and tiocsti, and
-    /// hyprland when Hyprland background mode is on.
+    /// hyprland when Hyprland background mode is on, and
+    /// seat (a whole window through the agent's own keyboard focus).
     pub background_input: Vec<String>,
+    /// The agent seat on this desktop: its route (x11-master,
+    /// sway-transient-seat or hyprland-send-key-state) and pointer support,
+    /// or the reason it has none.
+    pub background_seat: serde_json::Value,
     /// The backend the tool will use by default for each selectable layer.
     pub preferred: PreferredBackends,
 }
@@ -477,6 +482,7 @@ fn capability_map_with_portal_keyboard(
         accessibility: accessibility_backends,
         isolation,
         background_input,
+        background_seat: crate::agent_seat::doctor_summary(),
         preferred,
     }
 }

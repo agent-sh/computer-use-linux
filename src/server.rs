@@ -1567,14 +1567,51 @@ impl ComputerUseLinux {
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
         let target = params.window_target();
+        let raised = background_raised(params.delivery);
         let (Json(output), scope) = self.dispatch_click(params).await;
-        self.finish_action_output(output, &capture, target.as_ref(), TargetRaised::Yes, scope)
+        self.finish_action_output(output, &capture, target.as_ref(), raised, scope)
             .await
     }
 
     async fn dispatch_click(&self, params: ClickParams) -> (Json<ActionOutput>, PostActionScope) {
         let received = Some(serde_json::json!(params.clone()));
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        if params.delivery == Some(KeyboardDelivery::Background) {
+            let button = match params
+                .button
+                .as_deref()
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+            {
+                None | Some("left") => Some(crate::agent_seat::PointerButton::Left),
+                Some("right") => Some(crate::agent_seat::PointerButton::Right),
+                Some("middle") => Some(crate::agent_seat::PointerButton::Middle),
+                Some(_) => None,
+            };
+            let count = params.click_count.unwrap_or(1).clamp(1, 10);
+            let output = match button {
+                Some(button) => {
+                    self.background_pointer(
+                        "click",
+                        (params.x, params.y),
+                        params.window_target(),
+                        params.relative == Some(true)
+                            || params.coordinate_space != ClickCoordinateSpace::default()
+                            || click_resolves_cached_element(&params),
+                        move |x, y| crate::agent_seat::PointerInput::Click { x, y, button, count },
+                        received,
+                        input_guard,
+                    )
+                    .await
+                }
+                None => action_result(
+                    "click",
+                    Err("Nothing was sent: a background click uses the left, right or middle button.".to_string()),
+                    received,
+                ),
+            };
+            return (Json(output), PostActionScope::default());
+        }
         // Before the window is raised: a refused call changes nothing.
         match self.check_element_snapshot(
             "click",
@@ -2293,8 +2330,9 @@ impl ComputerUseLinux {
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
         let target = params.window_target();
+        let raised = background_raised(params.delivery);
         let (Json(output), scope) = self.dispatch_scroll(params).await;
-        self.finish_action_output(output, &capture, target.as_ref(), TargetRaised::Yes, scope)
+        self.finish_action_output(output, &capture, target.as_ref(), raised, scope)
             .await
     }
 
@@ -2317,6 +2355,27 @@ impl ComputerUseLinux {
             Err(message) => return refused(message),
         };
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        if params.delivery == Some(KeyboardDelivery::Background) {
+            let (dx, dy) = match params.direction.to_ascii_lowercase().as_str() {
+                "up" => (0, -units),
+                "down" => (0, units),
+                "left" => (-units, 0),
+                "right" => (units, 0),
+                _ => return refused("direction must be up, down, left or right".to_string()),
+            };
+            let output = self
+                .background_pointer(
+                    "scroll",
+                    (params.x, params.y),
+                    params.window_target(),
+                    params.relative == Some(true) || params.element_index.is_some(),
+                    move |x, y| crate::agent_seat::PointerInput::Scroll { x, y, dx, dy },
+                    received,
+                    input_guard,
+                )
+                .await;
+            return (Json(output), PostActionScope::default());
+        }
         match self.check_element_snapshot(
             "scroll",
             params.snapshot_id.as_deref(),
@@ -4170,7 +4229,9 @@ pub async fn serve_mcp(listen: Option<crate::http_listen::ListenConfig>) -> Resu
     if let Some(config) = listen {
         server.require_snapshot_ids = true;
         server.http_transport = true;
-        let signal = crate::http_listen::serve_http(server, config).await?;
+        let served = crate::http_listen::serve_http(server, config).await;
+        crate::agent_seat::shutdown();
+        let signal = served?;
         tree_spiller.remove_current();
         std::process::exit(128 + signal);
     }
@@ -4186,6 +4247,7 @@ pub async fn serve_mcp(listen: Option<crate::http_listen::ListenConfig>) -> Resu
     let signal = tokio::select! {
         result = running.waiting() => {
             tree_spiller.remove_current();
+            crate::agent_seat::shutdown();
             result?;
             return Ok(());
         }
@@ -4193,6 +4255,7 @@ pub async fn serve_mcp(listen: Option<crate::http_listen::ListenConfig>) -> Resu
         _ = interrupt.recv() => libc::SIGINT,
     };
     tree_spiller.remove_current();
+    crate::agent_seat::shutdown();
     // Exit now: returning would wait forever for the stdin reader thread.
     std::process::exit(128 + signal);
 }
@@ -5179,6 +5242,14 @@ struct ClickParams {
     /// Requires a window target; missing targets are rejected.
     #[serde(default)]
     relative: Option<bool>,
+    /// "background" sends the input through the agent's own pointer, so the
+    /// user's pointer and keyboard focus stay where they are: on X11 without
+    /// a window manager (an XInput 2 master pointer) and on sway 1.10 or later
+    /// (a transient seat). Needs x and y in screenshot capture pixels over the
+    /// window the call targets, without relative or an element. Elsewhere the
+    /// call is refused and nothing is sent. Default: "focus".
+    #[serde(default)]
+    delivery: Option<KeyboardDelivery>,
     #[serde(flatten)]
     capture: PostActionCaptureParams,
 }
@@ -5448,6 +5519,14 @@ struct ScrollParams {
     /// Requires a window target; missing targets are rejected.
     #[serde(default)]
     relative: Option<bool>,
+    /// "background" sends the input through the agent's own pointer, so the
+    /// user's pointer and keyboard focus stay where they are: on X11 without
+    /// a window manager (an XInput 2 master pointer) and on sway 1.10 or later
+    /// (a transient seat). Needs x and y in screenshot capture pixels over the
+    /// window the call targets, without relative or an element. Elsewhere the
+    /// call is refused and nothing is sent. Default: "focus".
+    #[serde(default)]
+    delivery: Option<KeyboardDelivery>,
     #[serde(flatten)]
     capture: PostActionCaptureParams,
 }
@@ -10190,9 +10269,53 @@ enum BackgroundRoute {
     /// must hold that tty's pty master, so a terminal whose pts belongs to
     /// another devpts instance (a container) is never mistaken for one here.
     Terminal(std::path::PathBuf, Option<u32>),
-    /// A Hyprland window, through send_key_state, when
-    /// COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND=1 opts in.
-    HyprlandWindow,
+    /// A whole window, through the agent's own keyboard focus (an X11 master
+    /// keyboard, a sway transient seat, or Hyprland sendkeystate).
+    Seat(Box<WindowInfo>, crate::agent_seat::SeatKind),
+}
+
+/// A background click or scroll does not raise its target.
+fn background_raised(delivery: Option<KeyboardDelivery>) -> TargetRaised {
+    if delivery == Some(KeyboardDelivery::Background) {
+        TargetRaised::No
+    } else {
+        TargetRaised::Yes
+    }
+}
+
+/// The window backend each seat route addresses windows through.
+fn seat_backend_matches(kind: crate::agent_seat::SeatKind, window: &WindowInfo) -> bool {
+    use crate::agent_seat::SeatKind;
+    use crate::windowing::backends::i3::{I3_BACKEND, SWAY_CONTAINER_ID_BASE};
+    let backend = window.backend.as_str();
+    match kind {
+        // i3 answers before EWMH on i3, with plain X11 window ids.
+        SeatKind::X11Master => {
+            backend == crate::windowing::backends::x11::X11_BACKEND
+                || (backend == I3_BACKEND && window.window_id < SWAY_CONTAINER_ID_BASE)
+        }
+        SeatKind::SwayTransientSeat => backend == crate::windowing::backends::i3::I3_BACKEND,
+        SeatKind::HyprlandSendKeyState => backend == registry::HYPRLAND_BACKEND,
+    }
+}
+
+/// A seat failure, saying whether input may already have gone out.
+fn seat_error_message(error: &anyhow::Error) -> String {
+    if crate::agent_seat::input_started(error) {
+        format!("Input through the agent seat stopped partway and may have been partly delivered; re-observe the target before retrying: {error:#}")
+    } else {
+        format!("Nothing was sent through the agent seat: {error:#}")
+    }
+}
+
+fn seat_focus_sentence(unchanged: Option<bool>) -> &'static str {
+    match unchanged {
+        Some(true) => "the user's keyboard focus did not move.",
+        Some(false) => {
+            "the user's keyboard focus changed during the call; check it before sending more."
+        }
+        None => "the user's keyboard focus could not be read back.",
+    }
 }
 
 /// Appended to a background refusal on GNOME, which has no second input
@@ -10259,32 +10382,177 @@ impl ComputerUseLinux {
             .map_err(|error| format!("Nothing was sent: {error:#}"))?;
         let window = resolve_window_target(&windows, target)
             .map_err(|error| format!("Nothing was sent: {error:#}"))?;
+        let seat = crate::agent_seat::availability();
         match window.terminal.as_ref() {
             Some(terminal) => {
                 let tty = crate::background_input::tty_path(&terminal.tty)
                     .map_err(|error| format!("Nothing was sent: {error}."))?;
-                // Hyprland background mode reaches any window, so a
-                // terminal no tty channel reaches still gets its keys.
-                if hyprland_background_applies(target)
-                    && window.backend == registry::HYPRLAND_BACKEND
-                    && !crate::background_input::probe_terminal(&tty)
-                        .await
-                        .is_ok_and(|probe| probe.channel.is_some())
-                {
-                    return Ok(BackgroundRoute::HyprlandWindow);
+                // A terminal no channel reaches still takes keys through the
+                // agent seat, like any other window.
+                if let Ok(kind) = seat {
+                    if seat_backend_matches(kind, window)
+                        && !crate::background_input::probe_terminal(&tty)
+                            .await
+                            .is_ok_and(|probe| probe.channel.is_some())
+                    {
+                        return Ok(BackgroundRoute::Seat(Box::new(window.clone()), kind));
+                    }
                 }
                 Ok(BackgroundRoute::Terminal(tty, window.pid))
             }
-            None if hyprland_background_applies(target)
-                && window.backend == registry::HYPRLAND_BACKEND =>
-            {
-                Ok(BackgroundRoute::HyprlandWindow)
+            None => match seat {
+                Ok(kind) if seat_backend_matches(kind, window) => {
+                    Ok(BackgroundRoute::Seat(Box::new(window.clone()), kind))
+                }
+                Ok(_) => Err(format!(
+                    "Nothing was sent and keyboard focus did not move: window_id {} comes from the {} window backend, which the agent seat cannot address. Name an element from get_app_state, a browser_tab, or a terminal running tmux.",
+                    window.window_id, window.backend
+                )),
+                Err(reason) => Err(format!(
+                    "Nothing was sent and keyboard focus did not move: window_id {} is not a terminal with a known tty. {reason}",
+                    window.window_id
+                )),
+            },
+        }
+    }
+
+    /// Keys to a whole window through the agent's own keyboard focus.
+    async fn background_seat(
+        &self,
+        window: &WindowInfo,
+        kind: crate::agent_seat::SeatKind,
+        input: BackgroundInput<'_>,
+        input_guard: InputOperationGuard,
+    ) -> std::result::Result<String, String> {
+        use crate::agent_seat::{self as seat, SeatKind};
+        let action = input.action();
+        let (shown, strokes) = match input {
+            BackgroundInput::Text(text) => (text, seat::text_strokes(text)?),
+            BackgroundInput::Key(key) => {
+                let press = crate::hyprland_input::chord_to_key_press(key)
+                    .ok_or_else(|| "Unsupported key.".to_string())?;
+                (key, vec![seat::chord_stroke(&press)?])
             }
-            None => Err(format!(
-                "Nothing was sent and keyboard focus did not move: window_id {} is not a terminal with a known tty, and this desktop has no route that types into a whole window without focusing it. Name an element from get_app_state, a browser_tab, or a terminal running tmux.{}",
-                window.window_id,
-                background_isolation_hint()
-            )),
+        };
+        // The user's focus is elsewhere, so whether the target's field is
+        // secret is unknown; the indicator masks what it shows.
+        if action == "press_key" {
+            self.indicator.keys(shown, true).await;
+        } else {
+            self.indicator.text(action, shown, true).await;
+        }
+        if kind == SeatKind::HyprlandSendKeyState {
+            let presses = match input {
+                BackgroundInput::Text(text) => crate::hyprland_input::text_to_key_presses(text)?,
+                BackgroundInput::Key(key) => vec![crate::hyprland_input::chord_to_key_press(key)
+                    .ok_or_else(|| "Unsupported key.".to_string())?],
+            };
+            match crate::windowing::backends::hyprland::devices_json().await {
+                Ok(json) if crate::hyprland_input::keymap_is_us(&json) => {}
+                Ok(_) => return Err("Nothing was sent: Hyprland background input maps keys for a US layout, and the active keymap is not US.".to_string()),
+                Err(error) => return Err(format!("Nothing was sent: {error:#}")),
+            }
+            crate::windowing::backends::hyprland::send_key_events(window.window_id, &presses)
+                .await
+                .map_err(|error| format!("{error:#}"))?;
+            return Ok(format!(
+                "Sent {} key presses to window_id {} through Hyprland sendkeystate; the user's focus, cursor and workspace did not change.",
+                presses.len(),
+                window.window_id
+            ));
+        }
+        let count = strokes.len();
+        let report = seat::send_keys(kind, seat::SeatTarget::from(window), strokes, input_guard)
+            .await
+            .map_err(|error| seat_error_message(&error))?;
+        Ok(format!(
+            "Sent {count} keys to window_id {} through the agent seat {} ({}); {}",
+            window.window_id,
+            report.seat,
+            report.route.name(),
+            seat_focus_sentence(report.user_focus_unchanged)
+        ))
+    }
+
+    /// click or scroll with delivery "background": the agent seat's own
+    /// pointer moves, never the user's.
+    #[allow(clippy::too_many_arguments)]
+    async fn background_pointer(
+        &self,
+        action: &'static str,
+        point: (Option<i32>, Option<i32>),
+        target: Option<WindowTarget>,
+        unsupported_target: bool,
+        input: impl FnOnce(f64, f64) -> crate::agent_seat::PointerInput,
+        received: Option<serde_json::Value>,
+        input_guard: impl Send + 'static,
+    ) -> ActionOutput {
+        use crate::agent_seat::{self as seat, SeatKind};
+        let fail = |message: String| action_result(action, Err(message), received.clone());
+        if unsupported_target {
+            return fail(format!("Nothing was sent: a background {action} takes x and y in screenshot capture pixels, without relative, coordinate_space or an element. An element click whose element has an AT-SPI action already leaves the pointer alone."));
+        }
+        let (Some(x), Some(y)) = point else {
+            return fail(format!(
+                "Nothing was sent: a background {action} needs x and y in screenshot capture pixels."
+            ));
+        };
+        let kind = match seat::availability() {
+            Ok(SeatKind::HyprlandSendKeyState) => {
+                return fail(format!("Nothing was sent and the pointer did not move: Hyprland has one seat and no second pointer; its background route (sendkeystate) sends keys only. {}", seat::OTHER_ROUTES));
+            }
+            Ok(kind) => kind,
+            Err(reason) => {
+                return fail(format!(
+                    "Nothing was sent and the pointer did not move: {reason}"
+                ))
+            }
+        };
+        // The point must land on a named window: the seat checks that the
+        // window is the one under the agent pointer before pressing.
+        let Some(target) = target.filter(|target| target.has_target()) else {
+            return fail(format!("Nothing was sent: a background {action} needs a window target (window_id, pid, app_id, wm_class or window_title) for the window under x and y."));
+        };
+        let window = match list_windows().await {
+            Ok(windows) => match resolve_window_target(&windows, &target) {
+                Ok(window) => window.clone(),
+                Err(error) => return fail(format!("Nothing was sent: {error:#}")),
+            },
+            // X11 without a window manager has no window list (wmctrl needs
+            // one); the seat itself checks that this window is the top-level
+            // under the agent pointer before it presses anything.
+            Err(_) if kind == SeatKind::X11Master && target.window_id.is_some() => WindowInfo {
+                window_id: target.window_id.unwrap_or_default(),
+                title: None,
+                app_id: None,
+                wm_class: None,
+                pid: None,
+                bounds: None,
+                workspace: None,
+                focused: false,
+                hidden: false,
+                client_type: None,
+                backend: crate::windowing::backends::x11::X11_BACKEND.to_string(),
+                terminal: None,
+            },
+            Err(error) => return fail(format!("Nothing was sent: {error:#}")),
+        };
+        if !seat_backend_matches(kind, &window) {
+            return fail(format!("Nothing was sent: window_id {} comes from the {} window backend, which the agent seat cannot address.", window.window_id, window.backend));
+        }
+        self.indicator.action(action).await;
+        match seat::send_pointer(kind, seat::SeatTarget::from(&window), input(f64::from(x), f64::from(y)), input_guard).await {
+            Ok(report) => successful_action_with_focus(
+                action,
+                &format!(
+                    "Sent the {action} at ({x}, {y}) through the agent seat {}'s pointer; the user's pointer did not move, and {}",
+                    report.seat,
+                    seat_focus_sentence(report.user_focus_unchanged)
+                ),
+                received,
+                None,
+            ),
+            Err(error) => fail(seat_error_message(&error)),
         }
     }
 
@@ -10329,30 +10597,12 @@ impl ComputerUseLinux {
                 self.background_terminal(&tty, owner, input, chord.as_ref())
                     .await
             }
-            (BackgroundRoute::HyprlandWindow, input, _) => {
-                let (shown, presses) = match input {
-                    BackgroundInput::Text(text) => {
-                        (text, crate::hyprland_input::text_to_key_presses(text))
-                    }
-                    BackgroundInput::Key(key) => (
-                        key,
-                        crate::hyprland_input::chord_to_key_press(key)
-                            .map(|press| vec![press])
-                            .ok_or_else(|| "Unsupported key.".to_string()),
-                    ),
-                };
-                let _input_guard = InputOperationGuard::new(
+            (BackgroundRoute::Seat(window, kind), input, _) => {
+                let input_guard = InputOperationGuard::new(
                     Arc::clone(&self.input_operation_lock).lock_owned().await,
                 );
-                return self
-                    .hyprland_background_input(action, target, shown, presses, received.clone())
+                self.background_seat(&window, kind, input, input_guard)
                     .await
-                    .unwrap_or_else(|| {
-                        fail(format!(
-                            "Nothing was sent: the target is not a Hyprland window.{}",
-                            background_isolation_hint()
-                        ))
-                    });
             }
             (BackgroundRoute::Element, BackgroundInput::Key(_), None) => {
                 Err("Unsupported key.".to_string())
@@ -12475,6 +12725,9 @@ where
         });
     }
 
+    // wtype binds the last wl_seat it sees, which is the agent seat while
+    // one exists; drop it so focused text goes to the user's seat.
+    crate::agent_seat::release_before_seat_unaware_input().await;
     let mut command = TokioCommand::new(program);
     // wtype's stdin mode uploads a new keymap every 100 characters. On
     // Hyprland/Electron those changes can turn literal text into modifier
@@ -12741,6 +12994,7 @@ fn wtype_modifier_keysym(key: &str) -> Option<&'static str> {
 const WTYPE_KEY_SETTLE_MS: u64 = 50;
 
 async fn run_wtype_key(args: &[String]) -> std::result::Result<(), String> {
+    crate::agent_seat::release_before_seat_unaware_input().await;
     let mut command = TokioCommand::new("wtype");
     command
         .args(["-s", &WTYPE_KEY_SETTLE_MS.to_string()])
