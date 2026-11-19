@@ -93,7 +93,8 @@ pub struct CapabilityMap {
     /// Routes for type_text and press_key with delivery "background", which
     /// leave the user's keyboard focus alone: at_spi (named elements),
     /// devtools (a browser tab, when COMPUTER_USE_LINUX_DEVTOOLS names a
-    /// port), and for terminals kitty, wezterm, tmux, screen and tiocsti.
+    /// port), for terminals kitty, wezterm, tmux, screen and tiocsti, and
+    /// hyprland when Hyprland background mode is on.
     pub background_input: Vec<String>,
     /// The backend the tool will use by default for each selectable layer.
     pub preferred: PreferredBackends,

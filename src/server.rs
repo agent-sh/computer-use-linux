@@ -10260,9 +10260,21 @@ impl ComputerUseLinux {
         let window = resolve_window_target(&windows, target)
             .map_err(|error| format!("Nothing was sent: {error:#}"))?;
         match window.terminal.as_ref() {
-            Some(terminal) => crate::background_input::tty_path(&terminal.tty)
-                .map(|tty| BackgroundRoute::Terminal(tty, window.pid))
-                .map_err(|error| format!("Nothing was sent: {error}.")),
+            Some(terminal) => {
+                let tty = crate::background_input::tty_path(&terminal.tty)
+                    .map_err(|error| format!("Nothing was sent: {error}."))?;
+                // Hyprland background mode reaches any window, so a
+                // terminal no tty channel reaches still gets its keys.
+                if hyprland_background_applies(target)
+                    && window.backend == registry::HYPRLAND_BACKEND
+                    && !crate::background_input::probe_terminal(&tty)
+                        .await
+                        .is_ok_and(|probe| probe.channel.is_some())
+                {
+                    return Ok(BackgroundRoute::HyprlandWindow);
+                }
+                Ok(BackgroundRoute::Terminal(tty, window.pid))
+            }
             None if hyprland_background_applies(target)
                 && window.backend == registry::HYPRLAND_BACKEND =>
             {

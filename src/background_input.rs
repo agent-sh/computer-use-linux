@@ -298,6 +298,14 @@ pub(crate) fn available_routes(at_spi: bool) -> Vec<String> {
     if legacy_tiocsti_enabled() == Some(true) && has_cap_sys_admin() {
         routes.push("tiocsti");
     }
+    let hyprland = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|desktop| {
+        desktop
+            .split(':')
+            .any(|part| part.eq_ignore_ascii_case("hyprland"))
+    });
+    if hyprland && crate::hyprland_input::background_enabled() {
+        routes.push("hyprland");
+    }
     routes.into_iter().map(str::to_string).collect()
 }
 
@@ -1106,16 +1114,60 @@ fn screen_channel(processes: &[TtyProcess]) -> Option<TerminalChannel> {
     }
     // The server a client started is its child; it names itself SCREEN in
     // its arguments (its comm stays screen).
-    all_pids().into_iter().find_map(|pid| {
+    let (server, client) = all_pids().into_iter().find_map(|pid| {
         let (ppid, _, _) = read_process(pid)?;
         let server = process_args(pid)
             .first()
             .is_some_and(|arg0| arg0 == "SCREEN");
-        (server && clients.contains(&ppid)).then(|| TerminalChannel::Screen {
-            session: pid.to_string(),
-            window: None,
-        })
+        (server && clients.contains(&ppid)).then_some((pid, ppid))
+    })?;
+    // A remote command goes to one of the session's displays, and screen
+    // does not say which. Use the session only when no other client could
+    // be attached to it.
+    let name = screen_session_name(&process_args(server));
+    let other = all_pids().into_iter().any(|pid| {
+        pid != client
+            && pid != server
+            && read_process(pid).is_some_and(|(_, _, comm)| comm == "screen")
+            && screen_client_may_attach(&process_args(pid), server, name.as_deref())
+    });
+    (!other).then(|| TerminalChannel::Screen {
+        session: server.to_string(),
+        window: None,
     })
+}
+
+/// The -S name a screen server was started with.
+fn screen_session_name(args: &[String]) -> Option<String> {
+    let index = args.iter().position(|arg| arg == "-S")?;
+    args.get(index + 1).cloned()
+}
+
+/// Whether a screen client's command line could attach it to the session
+/// of server (named name): it reattaches (-r, -R, -x, -d, -D) to that
+/// session, or to whichever one there is. A server process is not a
+/// client, and a client that started its own server names none of these.
+fn screen_client_may_attach(args: &[String], server: u32, name: Option<&str>) -> bool {
+    if args.first().is_some_and(|arg0| arg0 == "SCREEN") {
+        return false;
+    }
+    let attach = args.iter().position(|arg| {
+        arg.starts_with('-')
+            && !arg.starts_with("--")
+            && arg[1..].chars().any(|flag| "rRxdD".contains(flag))
+    });
+    let Some(index) = attach else {
+        return false;
+    };
+    match args.get(index + 1).filter(|arg| !arg.starts_with('-')) {
+        None => true,
+        Some(target) => {
+            let pid = server.to_string();
+            target == &pid
+                || target.starts_with(&format!("{pid}."))
+                || name.is_some_and(|name| target == name || target.ends_with(&format!(".{name}")))
+        }
+    }
 }
 
 fn pidfd_getfd(pid: u32, fd: i32) -> std::result::Result<std::os::fd::OwnedFd, std::io::Error> {
@@ -1225,7 +1277,7 @@ pub(crate) async fn terminal_send_text(
         TerminalChannel::Tiocsti => {
             tiocsti_send(tty, text.as_bytes()).map_err(|error| anyhow!(error))
         }
-        TerminalChannel::PtyMaster { fd, .. } => write_master(fd, text.as_bytes()),
+        TerminalChannel::PtyMaster { fd, .. } => write_master(fd, text.as_bytes()).await,
     }
 }
 
@@ -1279,7 +1331,7 @@ pub(crate) async fn terminal_send_key(
                 }
                 TerminalChannel::Tiocsti => tiocsti_send(tty, &bytes)?,
                 TerminalChannel::PtyMaster { fd, .. } => {
-                    write_master(fd, &bytes).map_err(failed)?
+                    write_master(fd, &bytes).await.map_err(failed)?
                 }
                 TerminalChannel::Kitty { .. } | TerminalChannel::Tmux(_) => unreachable!(),
             }
@@ -1288,46 +1340,66 @@ pub(crate) async fn terminal_send_key(
     }
 }
 
-/// Write to a copied pty master without blocking: a program that stops
-/// reading would otherwise hold the input lock forever. Gives up after two
-/// seconds and says how much went in.
-fn write_master(fd: &std::os::fd::OwnedFd, bytes: &[u8]) -> Result<()> {
+/// Write to a copied pty master. The copy shares the terminal's open file
+/// description, so its blocking mode is left alone: each byte waits for
+/// room with poll, and the write gives up after two seconds, so a program
+/// that stops reading cannot hold the input lock. Runs off the async
+/// workers.
+async fn write_master(fd: &std::os::fd::OwnedFd, bytes: &[u8]) -> Result<()> {
+    let fd = fd.try_clone()?;
+    let bytes = bytes.to_vec();
+    tokio::task::spawn_blocking(move || write_master_blocking(&fd, &bytes))
+        .await
+        .context("the pty master writer stopped")?
+}
+
+fn write_master_blocking(fd: &std::os::fd::OwnedFd, bytes: &[u8]) -> Result<()> {
     use std::os::fd::AsRawFd;
     let raw = fd.as_raw_fd();
-    // SAFETY: fcntl and write on an fd this process owns, with a valid buffer.
-    unsafe {
-        let flags = libc::fcntl(raw, libc::F_GETFL);
-        if flags < 0 || libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
-            return Err(anyhow!(
-                "cannot make the pty master non-blocking: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-    }
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let stopped = |sent: usize, why: String| {
+        anyhow!(
+            "writing to the pty master stopped after {sent} of {} bytes: {why}",
+            bytes.len()
+        )
+    };
     let mut sent = 0;
     while sent < bytes.len() {
-        // SAFETY: the slice is valid for its length.
-        let written =
-            unsafe { libc::write(raw, bytes[sent..].as_ptr().cast(), bytes.len() - sent) };
-        if written > 0 {
-            sent += written as usize;
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(stopped(sent, "the program is not reading".to_string()));
+        }
+        let mut poll = libc::pollfd {
+            fd: raw,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd.
+        let ready = unsafe { libc::poll(&mut poll, 1, left.as_millis().max(1) as i32) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(stopped(sent, error.to_string()));
+        }
+        if ready == 0 || poll.revents & libc::POLLOUT == 0 {
+            if poll.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
+                return Err(stopped(sent, "the terminal closed".to_string()));
+            }
+            continue;
+        }
+        // One byte per wakeup: room for at least one is what POLLOUT means.
+        // SAFETY: the byte is in bounds.
+        let written = unsafe { libc::write(raw, bytes[sent..].as_ptr().cast(), 1) };
+        if written == 1 {
+            sent += 1;
             continue;
         }
         let error = std::io::Error::last_os_error();
-        let retry = matches!(error.raw_os_error(), Some(libc::EAGAIN | libc::EINTR));
-        if !retry || std::time::Instant::now() >= deadline {
-            return Err(anyhow!(
-                "writing to the pty master stopped after {sent} of {} bytes: {}",
-                bytes.len(),
-                if retry {
-                    "the program is not reading".to_string()
-                } else {
-                    error.to_string()
-                }
-            ));
+        if !matches!(error.raw_os_error(), Some(libc::EAGAIN | libc::EINTR)) {
+            return Err(stopped(sent, error.to_string()));
         }
-        std::thread::sleep(Duration::from_millis(10));
     }
     Ok(())
 }
@@ -1566,6 +1638,93 @@ mod tests {
             Some(1 << 21)
         );
         assert_eq!(screen_quote("/run/a b/f"), "'/run/a b/f'");
+    }
+
+    #[test]
+    fn pty_master_writes_reach_the_slave_and_stop_when_it_is_full() {
+        use std::io::Read;
+        use std::os::fd::FromRawFd;
+        let (mut master, mut slave) = (0, 0);
+        // SAFETY: openpty fills two fds, owned below.
+        let result = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(result, 0);
+        // SAFETY: each fd is owned once.
+        let master = unsafe { std::os::fd::OwnedFd::from_raw_fd(master) };
+        let mut slave = unsafe { fs::File::from_raw_fd(slave) };
+        write_master_blocking(&master, b"hi\n").unwrap();
+        let mut read = [0u8; 16];
+        let count = slave.read(&mut read).unwrap();
+        assert_eq!(&read[..count], b"hi\n");
+        // SAFETY: fcntl on an owned fd.
+        let flags = unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&master), libc::F_GETFL) };
+        assert_eq!(
+            flags & libc::O_NONBLOCK,
+            0,
+            "the shared description stays blocking"
+        );
+        // Nobody reads the slave: in raw mode its buffer fills (canonical
+        // mode drops what does not fit instead), and the write stops at
+        // the deadline.
+        // SAFETY: termios calls on an owned fd with a zeroed struct.
+        unsafe {
+            let fd = std::os::fd::AsRawFd::as_raw_fd(&slave);
+            let mut termios: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(fd, &mut termios), 0);
+            libc::cfmakeraw(&mut termios);
+            assert_eq!(libc::tcsetattr(fd, libc::TCSANOW, &termios), 0);
+        }
+        let flood = vec![b'x'; 1 << 20];
+        let error = write_master_blocking(&master, &flood)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not reading"), "{error}");
+    }
+
+    #[test]
+    fn screen_clients_that_may_share_a_session_are_found() {
+        let args = |values: &[&str]| strings(values);
+        assert!(screen_client_may_attach(
+            &args(&["screen", "-x"]),
+            42,
+            Some("t")
+        ));
+        assert!(screen_client_may_attach(
+            &args(&["screen", "-x", "t"]),
+            42,
+            Some("t")
+        ));
+        assert!(screen_client_may_attach(
+            &args(&["screen", "-dr", "42.t"]),
+            42,
+            Some("t")
+        ));
+        assert!(!screen_client_may_attach(
+            &args(&["screen", "-r", "other"]),
+            42,
+            Some("t")
+        ));
+        assert!(!screen_client_may_attach(
+            &args(&["screen", "-S", "u", "sh"]),
+            42,
+            Some("t")
+        ));
+        assert!(!screen_client_may_attach(
+            &args(&["SCREEN", "-S", "t"]),
+            42,
+            Some("t")
+        ));
+        assert_eq!(
+            screen_session_name(&args(&["SCREEN", "-S", "t", "sh"])).as_deref(),
+            Some("t")
+        );
     }
 
     #[test]
