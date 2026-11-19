@@ -10753,6 +10753,7 @@ impl ComputerUseLinux {
         route: &BackgroundRoute,
         target: &WindowTarget,
         background: &BackgroundKeyboardParams,
+        input: BackgroundInput<'_>,
     ) -> std::result::Result<FocusFallback, String> {
         match route {
             BackgroundRoute::BrowserTab(tab) => {
@@ -10796,11 +10797,17 @@ impl ComputerUseLinux {
                     background.snapshot_id.as_deref(),
                     identifier.is_none(),
                 )?;
+                // The purpose the route resolved the element with, so the
+                // fallback focuses the same node.
+                let purpose = match input {
+                    BackgroundInput::Text(_) => ElementResolvePurpose::SetValue,
+                    BackgroundInput::Key(_) => ElementResolvePurpose::Action,
+                };
                 let object_ref = self.resolve_object_ref(
                     background.element_index,
                     identifier,
                     &background.selector(),
-                    ElementResolvePurpose::Action,
+                    purpose,
                 )?;
                 const NO_WINDOW: &str = "Nothing was sent: no background route reaches the element, and normal input needs the element's window; pass its window_id or pid.";
                 let window = if target.has_target() {
@@ -11164,7 +11171,7 @@ impl ComputerUseLinux {
             ),
             Err(BackgroundRefusal::Failed(message)) => fail(message),
             Err(BackgroundRefusal::NoRoute(reason)) => {
-                match self.focus_fallback(&route, target, background).await {
+                match self.focus_fallback(&route, target, background, input).await {
                     Ok(fallback) => self.unavailable(action, reason, fallback, received),
                     // Neither route reaches the target: say why there is no
                     // background route too.
