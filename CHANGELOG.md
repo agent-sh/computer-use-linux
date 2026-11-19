@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.58] - 2026-11-20
+
 ### Added
 
 - On GNOME Wayland, `click`, `drag` and `scroll` with `delivery: "background"` go through a virtual pen and touchscreen, so the user's mouse pointer stays where it is ([#480](https://github.com/agent-sh/computer-use-linux/issues/480)). The idea and the tested approach come from [@Ondra-Zik](https://github.com/Ondra-Zik). Mutter gives a tablet tool its own cursor and sends its events through the tablet protocol. Left, right and middle clicks are a pen tap and the upper and lower barrel buttons, a drag is a pen stroke inside one window, and a scroll is a one-finger touch pan (60 logical pixels per notch). The point must be on the target window, on the visible workspace, with no window above it, checked through the GNOME Shell extension before input; a locked screen or an open overview refuses the call. A tap or a touch still focuses the window, apps without tablet support never see the pen, and the pen hovers for 8 seconds after an action. `drag` takes `delivery` and a window target for this. Results name the route `gnome-pen` or `gnome-touch`, and `doctor` reports it in `capabilities.background_pointer`. When mutter maps a device elsewhere than the point needs, the server sets that device's own output setting and resets it when the device goes away. The uinput pointer stays the default: it reaches every client.
@@ -1248,7 +1250,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.57...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.58...HEAD
+[0.7.58]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.57...v0.7.58
 [0.7.57]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.56...v0.7.57
 [0.7.56]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.55...v0.7.56
 [0.7.55]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.54...v0.7.55
