@@ -22,4 +22,11 @@ ignore = [
     "RUSTSEC-2026-0370",
     "RUSTSEC-2026-0371",
     "RUSTSEC-2026-0372",
+    # RUSTSEC-2026-0543: chrono is unmaintained (informational, no CVE). It
+    # comes in only through rmcp, which depends on chrono directly and enables
+    # schemars' chrono04 feature; rmcp 3.11.0 still does. We never use chrono.
+    # Unignore when rmcp drops or gates chrono
+    # (https://github.com/modelcontextprotocol/rust-sdk/issues/1469 — check
+    # `cargo update -p rmcp && cargo tree -i chrono`).
+    "RUSTSEC-2026-0543",
 ]
