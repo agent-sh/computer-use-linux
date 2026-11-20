@@ -266,6 +266,22 @@ def guest(binary):
         check(failures, refused.get('ok') is False and 'minimized' in refused.get('message', ''),
               f'a minimized target is refused: {refused.get("message")}')
         stop(hidden)
+        # The on-screen indicator's overlay (its pill sits over the window's
+        # top rows) takes no input and must not count as cover, on the
+        # second call too, once the overlay is up.
+        if (Path(binary).parent / 'computer-use-linux-indicator').exists():
+            shown = Server(binary, {key: value for key, value in env.items() if key != 'COMPUTER_USE_LINUX_INDICATOR'})
+            cleanup.callback(shown.close)
+            under_pill = (px + 400, py + 3)
+            for attempt in (1, 2):
+                since = time.monotonic()
+                result = shown.call('click', dict(at(under_pill), window_id=wid, delivery='background'))
+                time.sleep(.6)
+                check(failures, result.get('ok') and pen_presses(since, 1, under_pill),
+                      f'click {attempt} under the indicator overlay: {result.get("message")}')
+            shown.close()
+        else:
+            print('SKIP indicator overlay: no computer-use-linux-indicator next to the server', flush=True)
         server.close()
         time.sleep(1)
         check(failures, not gnome.leftover_devices(), f'no virtual device after exit: {gnome.leftover_devices()}')

@@ -10791,20 +10791,34 @@ async fn pen_windows(
         crate::virtual_pen::Desktop::Gnome => {
             crate::windowing::backends::gnome::extension_windows_stacked().await
         }
+        // The indicator's overlay surfaces take no input (an empty input
+        // region), so they cover nothing.
         crate::virtual_pen::Desktop::Kwin => {
-            crate::windowing::backends::kwin::windows_stacked().await
+            Ok(crate::windowing::backends::kwin::windows_stacked()
+                .await?
+                .into_iter()
+                .filter(|window| !window.pid.is_some_and(is_indicator_process))
+                .collect())
         }
     }
 }
 
 /// What a pen or touch action did to the user's keyboard focus: the
 /// compositor focuses the window a tip press or a touch lands on.
+/// Whether pid runs this server's on-screen indicator.
+fn is_indicator_process(pid: u32) -> bool {
+    std::fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|exe| {
+        exe.file_name()
+            .is_some_and(|name| name == "computer-use-linux-indicator")
+    })
+}
+
 fn pen_focus_sentence(before: Option<u64>, after: Option<Option<u64>>) -> String {
     match after {
         None => "The user's keyboard focus could not be read back.".to_string(),
         Some(after) if after == before => "The user's keyboard focus did not move.".to_string(),
         Some(Some(after)) => format!(
-            "GNOME gave window_id {after} keyboard focus{}, so the user's typing now goes there.",
+            "The compositor gave window_id {after} keyboard focus{}, so the user's typing now goes there.",
             before
                 .map(|before| format!(" (it was on window_id {before})"))
                 .unwrap_or_default()
@@ -11311,7 +11325,12 @@ impl ComputerUseLinux {
                 if desktop == pen::Desktop::Kwin {
                     if let Ok(all) = crate::windowing::backends::kwin::list_windows().await {
                         if let Ok(window) = resolve_window_target(&all, &target) {
-                            return fail(format!("Nothing was sent: window_id {} is minimized, hidden, or not on the desktop and activity the user sees.", window.window_id));
+                            if !windows
+                                .iter()
+                                .any(|shown| shown.window_id == window.window_id)
+                            {
+                                return fail(format!("Nothing was sent: window_id {} is minimized, hidden, or not on the desktop and activity the user sees.", window.window_id));
+                            }
                         }
                     }
                 }
