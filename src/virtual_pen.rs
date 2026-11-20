@@ -853,9 +853,21 @@ const STYLUS_ACTIONS: [(&str, &str); 2] = [
     ("secondary-button-action", "right"),
 ];
 
+/// Writes the actions that differ, so an unchanged setting sends no change
+/// signal to every settings listener.
 fn set_stylus_actions() -> Result<()> {
     for (key, value) in STYLUS_ACTIONS {
-        gsettings_set(&stylus_settings(), key, value)?;
+        let current = std::process::Command::new("gsettings")
+            .args(["get", &stylus_settings(), key])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
+        if current.as_deref() != Some(gvariant_string(value).as_str()) {
+            gsettings_set(&stylus_settings(), key, value)?;
+        }
     }
     Ok(())
 }
@@ -962,12 +974,15 @@ fn start_reaper() {
                 };
                 let idle = devices.last_use.elapsed();
                 if idle >= crate::agent_seat::IDLE_LIFETIME {
-                    let _process = process_lock(Duration::from_secs(2));
-                    *guard = None;
-                    REAPER.store(false, std::sync::atomic::Ordering::SeqCst);
-                    return;
+                    // Removing resets settings every server's pen shares:
+                    // not while another server is using its pen.
+                    if let Ok(_process) = process_lock(Duration::from_secs(2)) {
+                        *guard = None;
+                        REAPER.store(false, std::sync::atomic::Ordering::SeqCst);
+                        return;
+                    }
                 }
-                crate::agent_seat::IDLE_LIFETIME - idle + Duration::from_millis(100)
+                crate::agent_seat::IDLE_LIFETIME.saturating_sub(idle) + Duration::from_millis(500)
             };
             std::thread::sleep(wait);
         });
@@ -978,7 +993,7 @@ fn start_reaper() {
 
 /// Removes both devices now. Called when the server exits.
 pub(crate) fn shutdown() {
-    let _process = process_lock(Duration::from_secs(2));
+    let _process = process_lock(Duration::from_secs(10));
     *lock_devices() = None;
 }
 
@@ -1124,14 +1139,6 @@ fn run_pen(
     gesture: &Gesture,
     layout: &Layout,
 ) -> std::result::Result<(), PenError> {
-    // Before the pen exists and before every action, under the process
-    // lock: mutter reads them as the pen enters proximity, and another
-    // server's pen going away resets the shared path.
-    set_stylus_actions().map_err(|error| {
-        PenError::NoRoute(format!(
-            "the pen's button actions could not be set: {error:#}"
-        ))
-    })?;
     if devices.pen.is_none() {
         reset_output(Kind::Pen);
         let (device, node) = create(Kind::Pen).map_err(|error| {
@@ -1167,6 +1174,14 @@ fn run_pen(
     // libinput lifts a tablet out of proximity 50 ms after its last event
     // until the tablet sends a proximity out of its own. One in and out at
     // the first point, once mutter has the device, shows that it does.
+    // Before every action, under the process lock and right before the pen
+    // comes near: mutter reads them as the pen enters proximity, and another
+    // server's pen going away resets the shared path.
+    set_stylus_actions().map_err(|error| {
+        PenError::NotSent(format!(
+            "the pen's button actions could not be set: {error:#}"
+        ))
+    })?;
     if !pen.primed {
         let value = device_value(first, &area);
         pen.events
@@ -1210,9 +1225,12 @@ fn run_pen(
         }
         Gesture::Pan { .. } => unreachable!("pans go through the touchscreen"),
     }
-    // A hovering pen would silence the touchscreen libinput paired it with.
+    // A hovering pen would silence the touchscreen libinput paired it with,
+    // and does for 90 ms after it leaves; hold the process lock past that,
+    // so no server's scroll starts inside it.
     std::thread::sleep(Duration::from_millis(30));
     events.leave().map_err(started)?;
+    std::thread::sleep(TOUCH_AFTER_PEN);
     Ok(())
 }
 

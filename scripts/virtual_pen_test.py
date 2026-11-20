@@ -33,6 +33,7 @@ without tablet support sees of a pen click.
 import contextlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -290,7 +291,6 @@ def run(binary, root, tty):
         x_display = None
         if xwayland:
             # mutter names the display it took: "Using public X11 display :0".
-            import re
             x_display = wait_for(lambda: (re.search(r'public X11 display (:\d+)', (root / 'shell.log').read_text())
                                           or [None, None])[1], 'the Xwayland display', 20)
             # mutter writes the X authority it gives Xwayland's clients into
@@ -356,7 +356,9 @@ def run(binary, root, tty):
                 # A second server's pen comes and goes; its reset of the
                 # shared stylus settings must not swap this server's buttons.
                 other = Server(binary, env)
-                other.call('click', dict(at((px + 40, py + 500)), window_id=wid, delivery='background'))
+                theirs = other.call('click', dict(at((px + 40, py + 500)), window_id=wid, delivery='background'))
+                check(failures, theirs.get('ok') and (theirs.get('background') or {}).get('used') is True,
+                      f'a second server clicks through its own pen: {theirs.get("message")}')
                 other.close()
                 time.sleep(.5)
         point = (px + 280, py + 120)
