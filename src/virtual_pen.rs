@@ -19,7 +19,9 @@
 //!   (GTK 3 and 4, Qt, Chromium, Firefox and Xwayland bind it);
 //! - scrolling is a one-finger touch pan, which only scrolls where the app
 //!   pans on touch;
-//! - a hovering pen leaves proximity after [HOVER_LIFETIME].
+//! - the pen leaves proximity right after each action: libinput pairs a
+//!   tablet with the first touchscreen it sees and drops that screen's
+//!   touches while the pen is in proximity, which can be the user's own.
 //!
 //! Mapping: mutter maps a tablet or touchscreen to one monitor when its
 //! "output" setting (org.gnome.desktop.peripherals.tablet or .touchscreen,
@@ -42,11 +44,13 @@
 //! button (BTN_STYLUS) and "middle" for the upper one (BTN_STYLUS2;
 //! gsettings-desktop-schemas f25d3e7c), the opposite of what GTK, Xwayland,
 //! Chromium and KWin make of the bare codes. So the pen writes both actions
-//! for its own tool (lower: middle, upper: right), which gives every client
-//! the code the pen pressed on any GNOME, and resets them when it goes away.
+//! for its own tool (lower: middle, upper: right) before every action, which
+//! gives every client the code the pen pressed, and resets them when it goes
+//! away. Every server's pen shares that path, so one server's reset must not
+//! leave another's pen on the defaults. Never write "default" for this:
+//! mutter 48 and later turn it into a left click.
 //!
-//! Lifecycle: created on first use, the pen leaves proximity after
-//! [HOVER_LIFETIME], and both devices go away after
+//! Lifecycle: created on first use, and both devices go away after
 //! [crate::agent_seat::IDLE_LIFETIME] without use, or when the server exits.
 
 use crate::agent_seat::SessionFacts;
@@ -63,8 +67,6 @@ use std::time::{Duration, Instant};
 pub(crate) const PEN_ROUTE: &str = "gnome-pen";
 /// The route name results report for touch scrolling.
 pub(crate) const TOUCH_ROUTE: &str = "gnome-touch";
-/// How long the pen hovers after an action before it leaves proximity.
-pub(crate) const HOVER_LIFETIME: Duration = Duration::from_secs(8);
 /// The pan distance of one wheel notch, in logical pixels.
 pub(crate) const PAN_PER_NOTCH: f64 = 60.0;
 /// A pan stays this far inside the window and the monitor edges: GNOME
@@ -82,8 +84,10 @@ const PRESSURE_MAX: i32 = 4095;
 const MAPPING_TIMEOUT: Duration = Duration::from_secs(3);
 const STEP: Duration = Duration::from_millis(12);
 /// libinput ignores a touchscreen paired with a pen for 90 ms after the pen
-/// leaves proximity.
-const TOUCH_AFTER_PEN: Duration = Duration::from_millis(150);
+/// leaves proximity, counted from the event's own time.
+const TOUCH_AFTER_PEN: Duration = Duration::from_millis(200);
+/// A new touchscreen's wait before its first touch.
+const TOUCH_SETTLE: Duration = Duration::from_millis(300);
 
 const PEN_NAME: &str = "computer-use-linux virtual pen";
 const TOUCH_NAME: &str = "computer-use-linux virtual touch";
@@ -125,7 +129,7 @@ pub(crate) fn doctor_summary() -> serde_json::Value {
         Ok(()) => serde_json::json!({
             "available": true,
             "routes": [PEN_ROUTE, TOUCH_ROUTE],
-            "note": "Background click and drag use a virtual pen, background scroll a one-finger touch pan; the user's mouse pointer does not move. A pen tap or a touch gives the window keyboard focus. Apps without tablet support never see the pen, scrolling needs touch panning in the app, a drag stays inside one window, and the pen hovers for up to 8 s after an action. Needs the computer-use-linux GNOME Shell extension to check the window under the point.",
+            "note": "Background click and drag use a virtual pen, background scroll a one-finger touch pan; the user's mouse pointer does not move. A pen tap or a touch gives the window keyboard focus. Apps without tablet support never see the pen, scrolling needs touch panning in the app, and a drag stays inside one window. Needs the computer-use-linux GNOME Shell extension to check the window under the point.",
         }),
         Err(reason) => serde_json::json!({ "available": false, "reason": reason }),
     }
@@ -543,6 +547,8 @@ pub(crate) struct PenEvents<E: Events> {
     events: E,
     in_proximity: bool,
     tip_down: bool,
+    /// When the pen last left proximity.
+    left_at: Option<Instant>,
 }
 
 impl<E: Events> PenEvents<E> {
@@ -551,6 +557,7 @@ impl<E: Events> PenEvents<E> {
             events,
             in_proximity: false,
             tip_down: false,
+            left_at: None,
         }
     }
 
@@ -632,6 +639,7 @@ impl<E: Events> PenEvents<E> {
         ])?;
         self.in_proximity = false;
         self.tip_down = false;
+        self.left_at = Some(Instant::now());
         Ok(())
     }
 }
@@ -940,8 +948,7 @@ fn lock_devices() -> std::sync::MutexGuard<'static, Option<Devices>> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Lifts the pen out of proximity after [HOVER_LIFETIME] and removes the
-/// devices after [crate::agent_seat::IDLE_LIFETIME]. One at a time; it exits
+/// Removes the devices after [crate::agent_seat::IDLE_LIFETIME]. One at a time; it exits
 /// once the devices are gone.
 fn start_reaper() {
     let spawned = std::thread::Builder::new()
@@ -960,13 +967,7 @@ fn start_reaper() {
                     REAPER.store(false, std::sync::atomic::Ordering::SeqCst);
                     return;
                 }
-                if idle >= HOVER_LIFETIME {
-                    if let Some(pen) = devices.pen.as_mut() {
-                        let _ = pen.events.leave();
-                    }
-                }
-                // A later action can start a new hover: look again soon.
-                Duration::from_millis(500)
+                crate::agent_seat::IDLE_LIFETIME - idle + Duration::from_millis(100)
             };
             std::thread::sleep(wait);
         });
@@ -1123,14 +1124,16 @@ fn run_pen(
     gesture: &Gesture,
     layout: &Layout,
 ) -> std::result::Result<(), PenError> {
+    // Before the pen exists and before every action, under the process
+    // lock: mutter reads them as the pen enters proximity, and another
+    // server's pen going away resets the shared path.
+    set_stylus_actions().map_err(|error| {
+        PenError::NoRoute(format!(
+            "the pen's button actions could not be set: {error:#}"
+        ))
+    })?;
     if devices.pen.is_none() {
         reset_output(Kind::Pen);
-        set_stylus_actions().map_err(|error| {
-            reset_stylus_actions();
-            PenError::NoRoute(format!(
-                "the pen's button actions could not be set: {error:#}"
-            ))
-        })?;
         let (device, node) = create(Kind::Pen).map_err(|error| {
             reset_stylus_actions();
             PenError::NoRoute(format!("the virtual pen could not be made: {error:#}"))
@@ -1163,8 +1166,7 @@ fn run_pen(
     let started = |error: anyhow::Error| PenError::Partial(format!("{error:#}"));
     // libinput lifts a tablet out of proximity 50 ms after its last event
     // until the tablet sends a proximity out of its own. One in and out at
-    // the first point, once mutter has the device, shows that it does, so
-    // the pen then hovers until HOVER_LIFETIME lifts it.
+    // the first point, once mutter has the device, shows that it does.
     if !pen.primed {
         let value = device_value(first, &area);
         pen.events
@@ -1208,6 +1210,9 @@ fn run_pen(
         }
         Gesture::Pan { .. } => unreachable!("pans go through the touchscreen"),
     }
+    // A hovering pen would silence the touchscreen libinput paired it with.
+    std::thread::sleep(Duration::from_millis(30));
+    events.leave().map_err(started)?;
     Ok(())
 }
 
@@ -1230,18 +1235,21 @@ fn run_touch(
             node,
             wrote_output: false,
         });
+        // mutter lists a new touchscreen before it has mapped it, and the
+        // first pan sent at once never reached the window.
+        std::thread::sleep(TOUCH_SETTLE);
     }
     // libinput pairs a tablet with the first touchscreen it sees and, for a
     // pen with no tilt, drops every touch while the pen is in proximity
     // (evdev-tablet.c, tablet_toggle_touch_device), and for 90 ms after it
-    // leaves (evdev-fallback.c, the arbitration timer). Lift a hovering pen
-    // first and wait that out.
+    // leaves (evdev-fallback.c, the arbitration timer). The pen leaves at the
+    // end of each action; wait out the rest of that.
     if let Some(pen) = devices.pen.as_mut() {
-        if pen.events.in_proximity {
-            pen.events
-                .leave()
-                .map_err(|error| PenError::NotSent(format!("{error:#}")))?;
-            std::thread::sleep(TOUCH_AFTER_PEN);
+        pen.events
+            .leave()
+            .map_err(|error| PenError::NotSent(format!("{error:#}")))?;
+        if let Some(left) = pen.events.left_at {
+            std::thread::sleep(TOUCH_AFTER_PEN.saturating_sub(left.elapsed()));
         }
     }
     let touch = devices.touch.as_mut().expect("touch was just made");

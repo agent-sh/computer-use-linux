@@ -11450,7 +11450,7 @@ impl ComputerUseLinux {
                 let limits = if route == pen::TOUCH_ROUTE {
                     "A touch pan scrolls only where the app pans on touch; re-observe to confirm."
                 } else {
-                    "The pen hovers at its last point for up to 8 s. An app without tablet support does not see pen input; re-observe to confirm."
+                    "An app without tablet support does not see pen input; re-observe to confirm."
                 };
                 BackgroundOutcome::Done(
                     successful_action_with_focus(

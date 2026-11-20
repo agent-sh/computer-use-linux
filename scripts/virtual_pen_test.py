@@ -18,16 +18,17 @@ pointer. Then background clicks (left, right, middle, double), a drag and a
 scroll go through the pen and the touchscreen: the window sees pen and touch
 events at the points, and no mouse event, so the user's pointer stays where
 the normal click left it. A point under another window is refused before
-input. The pen's tool carries GNOME 48's stylus defaults, which swap the
-barrel buttons, and a right click must still be a right click. A scroll right
-after a pen click must still pan (libinput drops touches while a pen hovers).
+input. The session's schemas carry GNOME 48's stylus defaults, which swap the
+barrel buttons, and a right click must still be a right click, also after a
+second server's pen came and went (they share one settings path). The pen
+leaves proximity right after each action, and a scroll right after a pen
+click must still pan (libinput drops touches while a paired pen is near).
 When Chromium or Google Chrome is installed, the same clicks, a double
 click, a drag and a scroll go to a page in it, native Wayland and under
 Xwayland, which must see pen and touch input with the buttons named. After
 the server exits no virtual device and no tablet, stylus or touchscreen
-setting is left behind. The pen's proximity ends HOVER seconds after its last
-action, and wev, which binds no tablet, shows what an app without tablet
-support sees of a pen click.
+setting is left behind. wev, which binds no tablet, shows what an app
+without tablet support sees of a pen click.
 """
 import contextlib
 import json
@@ -45,8 +46,6 @@ from agent_seat_test import Server, check, stop, wait_for
 UUID = 'computer-use-linux@avifenesh.dev'
 EXTENSION = Path(__file__).resolve().parent.parent / 'gnome-shell-extension' / UUID
 DISPLAY_NAME = 'cul-pen-0'
-STYLUS_SETTINGS = 'org.gnome.desktop.peripherals.tablet.stylus:/org/gnome/desktop/peripherals/stylus/default-6375:7065/'
-HOVER = 8
 
 
 def gtk_app(root):
@@ -249,11 +248,22 @@ def run(binary, root, tty):
         # Without --no-x11 mutter listens for X clients and starts Xwayland
         # for the first one: the Chromium check runs under it too.
         xwayland = shutil.which('Xwayland')
-        x_sockets = set(os.listdir('/tmp/.X11-unix')) if os.path.isdir('/tmp/.X11-unix') else set()
+        # GNOME 48's stylus defaults (gsettings-desktop-schemas f25d3e7c) as
+        # schema overrides: the lower button a right click, the upper one a
+        # middle click. GNOME 46 passes the codes through.
+        schemas = root / 'schemas'
+        schemas.mkdir()
+        for source in Path('/usr/share/glib-2.0/schemas').iterdir():
+            if source.suffix in ('.xml', '.override'):
+                shutil.copy(source, schemas / source.name)
+        (schemas / 'zz_cul-gnome48-stylus.gschema.override').write_text(
+            "[org.gnome.desktop.peripherals.tablet.stylus]\nbutton-action='right'\nsecondary-button-action='middle'\n")
+        subprocess.run(['glib-compile-schemas', str(schemas)], check=True)
+        env['GSETTINGS_SCHEMA_DIR'] = str(schemas)
         launcher = root / 'shell.sh'
         exports = ' '.join(f"{key}='{env[key]}'" for key in (
             'DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME',
-            'XDG_SESSION_TYPE', 'XDG_CURRENT_DESKTOP'))
+            'XDG_SESSION_TYPE', 'XDG_CURRENT_DESKTOP', 'GSETTINGS_SCHEMA_DIR'))
         launcher.write_text(f'#!/bin/bash\nexport {exports}\nexec gnome-shell --wayland --display-server '
                             f'{"" if xwayland else "--no-x11 "}--wayland-display={DISPLAY_NAME} > {root}/shell.log 2>&1\n')
         launcher.chmod(0o755)
@@ -271,18 +281,13 @@ def run(binary, root, tty):
                  'the GNOME Shell extension on the bus', 30)
         x_display = None
         if xwayland:
-            fresh = wait_for(lambda: sorted(set(os.listdir('/tmp/.X11-unix')) - x_sockets), 'the Xwayland socket', 20)
-            x_display = ':' + fresh[0].removeprefix('X')
+            # mutter names the display it took: "Using public X11 display :0".
+            import re
+            x_display = wait_for(lambda: (re.search(r'public X11 display (:\d+)', (root / 'shell.log').read_text())
+                                          or [None, None])[1], 'the Xwayland display', 20)
             # mutter writes the X authority it gives Xwayland's clients into
             # its runtime directory.
             x_authority = wait_for(lambda: sorted(runtime.glob('.mutter-Xwaylandauth.*')), 'the Xwayland authority', 20)[0]
-        # GNOME 48 and later default the lower stylus button (BTN_STYLUS) to
-        # a right click and the upper one to a middle click
-        # (gsettings-desktop-schemas f25d3e7c); GNOME 46 passed the codes
-        # through. Those defaults, set for the pen's own tool here, must not
-        # change what a right or middle click is.
-        for key, value in (('button-action', 'right'), ('secondary-button-action', 'middle')):
-            gsettings('set', STYLUS_SETTINGS, key, value)
         app = subprocess.Popen(['/usr/bin/python3', __file__, '--gtk', str(root)], env=dict(env, GTK_A11Y='none'),
                                stdout=(root / 'app.log').open('w'), stderr=subprocess.STDOUT)
         cleanup.callback(stop, app)
@@ -336,9 +341,16 @@ def run(binary, root, tty):
             presses = pen_presses(since, code, point)
             check(failures, len(presses) == 1,
                   f'{button} click: one pen press with button {code} at {point}: {events(root, since)[:8]}')
-            # libinput's 50 ms proximity timeout is off: the pen still hovers.
-            check(failures, presses and not [e for e in events(root, presses[0]['t']) if e['kind'] == 'proximity-out'],
-                  f'{button} click: the pen still hovers 0.4 s later')
+            # The pen leaves proximity after the action.
+            check(failures, presses and [e for e in events(root, presses[0]['t']) if e['kind'] == 'proximity-out'],
+                  f'{button} click: the pen left proximity after it')
+            if button == 'left':
+                # A second server's pen comes and goes; its reset of the
+                # shared stylus settings must not swap this server's buttons.
+                other = Server(binary, env)
+                other.call('click', dict(at((px + 40, py + 500)), window_id=wid, delivery='background'))
+                other.close()
+                time.sleep(.5)
         point = (px + 280, py + 120)
         since = time.monotonic()
         background('click', **at(point), click_count=2)
@@ -363,10 +375,9 @@ def run(binary, root, tty):
         check(failures, any(e['kind'] == 'touch-begin' and e['source'] == 'touch' for e in seen)
               and scrolled and max(scrolled) > 100,
               f'scroll: touch pan moved the list down: {scrolled[-3:]}')
-        # libinput drops touches while a paired pen is in proximity: a pen
-        # click leaves it hovering, and the next scroll must still pan.
+        # libinput drops touches while a paired pen is in proximity and for
+        # 90 ms after: a scroll right after a pen click must still pan.
         background('click', **at((px + 200, py + 400)))
-        time.sleep(.3)
         before = max(scrolled) if scrolled else 0
         since = time.monotonic()
         background('scroll', **at(point), direction='down', pages=1)
@@ -398,14 +409,13 @@ def run(binary, root, tty):
         stop(cover)
         time.sleep(.5)
         check(failures, not [e for e in events(root, since) if e['kind'] == 'press'], 'refused click sent no press')
-        # Hover: the pen leaves proximity HOVER seconds after its last action.
+        # The pen leaves proximity right after the release.
         last = time.monotonic()
         background('click', **at((px + 120, py + 300)))
-        press = wait_for(lambda: [e for e in events(root, last) if e['kind'] == 'press'], 'hover click press', 5)[0]['t']
-        out = wait_for(lambda: [e for e in events(root, press) if e['kind'] == 'proximity-out'], 'pen proximity out', HOVER + 6)
-        hover = out[0]['t'] - press
-        print(f'pen hovered {hover:.1f} s', flush=True)
-        check(failures, HOVER - 1 <= hover <= HOVER + 3, f'hover ended after {hover:.1f} s')
+        press = wait_for(lambda: [e for e in events(root, last) if e['kind'] == 'press'], 'click press', 5)[0]['t']
+        out = wait_for(lambda: [e for e in events(root, press) if e['kind'] == 'proximity-out'], 'pen proximity out', 3)
+        print(f'pen left proximity {out[0]["t"] - press:.2f} s after the press', flush=True)
+        check(failures, out[0]['t'] - press < .5, f'pen left proximity {out[0]["t"] - press:.2f} s after the press')
         chrome = chrome_binary()
         if chrome:
             logger = chrome_logger(root)

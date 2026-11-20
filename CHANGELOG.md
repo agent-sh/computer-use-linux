@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- A background right click on GNOME 48 and later arrived as a middle click and a middle click as a right click: GNOME 48 changed the stylus button defaults (`button-action` to `right`, `secondary-button-action` to `middle`), and mutter rewrites the pen's buttons by them. The server now sets both actions for its own pen (the settings path keyed by its vendor and product id) so every GNOME delivers the button it pressed, and resets them when the pen goes away. Measured on native Wayland and Xwayland Chromium and GTK 4.
-- A background scroll after a background click or drag sent nothing: libinput pairs the virtual pen with the virtual touchscreen and drops every touch while the pen hovers, and for 90 ms after it leaves. A scroll now lifts a hovering pen first and waits that out.
+- A background right click on GNOME 48 and later arrived as a middle click and a middle click as a right click: GNOME 48 changed the stylus button defaults (`button-action` to `right`, `secondary-button-action` to `middle`), and mutter rewrites the pen's buttons by them. The server now sets both actions for its own pen (the settings path keyed by its vendor and product id) before every action, so mutter hands clients the button the pen pressed, and resets them when the pen goes away. Measured with GNOME 48's defaults on GNOME Shell 46, with GTK 4 and with native Wayland and Xwayland Chromium; mutter 48 and later read the same explicit values (from mutter's source).
+- A background scroll within 8 seconds of a background click or drag sent nothing: libinput pairs a pen with the first touchscreen it sees and drops that screen's touches while the pen is in proximity, and for 90 ms after it leaves. The same pairing could silence the user's own touchscreen while the pen hovered. The pen now leaves proximity at the end of each action instead of hovering for 8 seconds, and a scroll waits out the 90 ms.
 
 ## [0.7.58] - 2026-11-20
 
