@@ -7,13 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.59] - 2026-11-20
+
 ### Added
 
 - KDE Plasma Wayland (KWin 6.3 and later) gets the virtual pen and touchscreen for `click`, `drag` and `scroll` with `delivery: "background"`, as routes `kwin-pen` and `kwin-touch`: the user's mouse pointer stays where it is. KWin maps the pen to the whole workspace and the touchscreen to the output under the point through `org.kde.KWin.InputDevice`, read back before input, and the server removes what KWin wrote for these devices into `kcminputrc` once they are gone. The point is checked through KWin scripting against KWin's stacking order (panels, popups and notifications included), on the current desktop and activity; Show Desktop and full-screen effects such as the Overview refuse the call. KWin's `SyncWithMouse` tablet option and `KWIN_WAYLAND_EMULATE_TABLET`, which move or click the user's pointer, leave no route. Measured on KWin 6.6.7 on a DRM output with GTK 4.
 
 ### Fixed
 
-- A background right click on GNOME 48 and later arrived as a middle click and a middle click as a right click: GNOME 48 changed the stylus button defaults (`button-action` to `right`, `secondary-button-action` to `middle`), and mutter rewrites the pen's buttons by them. The server now sets both actions for its own pen (the settings path keyed by its vendor and product id) before every action, so mutter hands clients the button the pen pressed, and resets them when the pen goes away. Measured with GNOME 48's defaults on GNOME Shell 46, with GTK 4 and with native Wayland and Xwayland Chromium; mutter 48 and later read the same explicit values (from mutter's source).
+- A background right click on GNOME 48 and later arrived as a middle click and a middle click as a right click: GNOME 48 changed the stylus button defaults (`button-action` to `right`, `secondary-button-action` to `middle`), and mutter rewrites the pen's buttons by them. The server now sets both actions for its own pen (the settings path keyed by its vendor and product id) before every action, so mutter hands clients the button the pen pressed, and resets them when the pen goes away. Measured with GNOME 48's defaults on GNOME Shell 46, with GTK 4 and with native Wayland and Xwayland Chromium; mutter 48 and later read the same explicit values (from mutter's source). Reported by [@Ondra-Zik](https://github.com/Ondra-Zik), who found the lower button gives a right click in Chromium ([#480](https://github.com/agent-sh/computer-use-linux/issues/480)).
 - A background scroll within 8 seconds of a background click or drag sent nothing: libinput pairs a pen with the first touchscreen it sees and drops that screen's touches while the pen is in proximity, and for 90 ms after it leaves. The same pairing could silence the user's own touchscreen while the pen hovered. The pen now leaves proximity at the end of each action instead of hovering for 8 seconds, and a scroll waits out the 90 ms.
 
 ## [0.7.58] - 2026-11-20
@@ -1259,7 +1261,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.58...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.59...HEAD
+[0.7.59]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.58...v0.7.59
 [0.7.58]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.57...v0.7.58
 [0.7.57]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.56...v0.7.57
 [0.7.56]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.55...v0.7.56
