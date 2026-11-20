@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- KDE Plasma Wayland (KWin 6.3 and later) gets the virtual pen and touchscreen for `click`, `drag` and `scroll` with `delivery: "background"`, as routes `kwin-pen` and `kwin-touch`: the user's mouse pointer stays where it is. KWin maps the pen to the whole workspace and the touchscreen to the output under the point through `org.kde.KWin.InputDevice`, read back before input, and the server removes what KWin wrote for these devices into `kcminputrc` once they are gone. The point is checked through KWin scripting against KWin's stacking order (panels, popups and notifications included). KWin's `SyncWithMouse` tablet option, which moves the user's pointer to the pen, leaves no route. Measured on KWin 6.6.7 on a DRM output with GTK 4.
+- KDE Plasma Wayland (KWin 6.3 and later) gets the virtual pen and touchscreen for `click`, `drag` and `scroll` with `delivery: "background"`, as routes `kwin-pen` and `kwin-touch`: the user's mouse pointer stays where it is. KWin maps the pen to the whole workspace and the touchscreen to the output under the point through `org.kde.KWin.InputDevice`, read back before input, and the server removes what KWin wrote for these devices into `kcminputrc` once they are gone. The point is checked through KWin scripting against KWin's stacking order (panels, popups and notifications included), on the current desktop and activity; Show Desktop and full-screen effects such as the Overview refuse the call. KWin's `SyncWithMouse` tablet option and `KWIN_WAYLAND_EMULATE_TABLET`, which move or click the user's pointer, leave no route. Measured on KWin 6.6.7 on a DRM output with GTK 4.
 
 ### Fixed
 

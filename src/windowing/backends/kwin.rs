@@ -56,10 +56,11 @@ pub async fn list_windows() -> Result<Vec<WindowInfo>> {
     Ok(windows)
 }
 
-/// The windows on the desktop the user sees, bottom to top in KWin's
-/// stacking order, with docks, popups and notifications: whatever can cover
-/// a point. The desktop window and minimized windows are left out, and
-/// workspace is None, since only the current desktop's windows are listed.
+/// The windows on the desktop and activity the user sees, bottom to top in
+/// KWin's stacking order, with docks, popups and notifications: whatever can
+/// cover a point. The desktop window and minimized or hidden windows are left
+/// out. workspace is None for a window KWin places on the current desktop and
+/// activity, and Some(-1) where it did not say.
 pub(crate) async fn windows_stacked() -> Result<Vec<WindowInfo>> {
     parse_kwin_windows_stacked(&call_kwin_window_script().await?)
 }
@@ -96,14 +97,20 @@ fn parse_kwin_windows_stacked(json: &str) -> Result<Vec<WindowInfo>> {
         };
         if flag(&window.desktop_window) == Some(true)
             || flag(&window.minimized) == Some(true)
+            || flag(&window.hidden) == Some(true)
             || flag(&window.on_current_desktop) == Some(false)
+            || flag(&window.on_current_activity) == Some(false)
         {
             continue;
         }
+        // A window whose desktop or activity KWin did not say still covers
+        // what is below it, but is no target.
+        let unknown = flag(&window.on_current_desktop).is_none()
+            || flag(&window.on_current_activity).is_none();
         let Ok(mut info) = WindowInfo::try_from(window) else {
             continue;
         };
-        info.workspace = None;
+        info.workspace = unknown.then_some(-1);
         windows.push(info);
     }
     Ok(windows)
@@ -766,6 +773,25 @@ fn kwin_window_script_source(
         return [];
     }}
 
+    function onCurrentActivity(window) {{
+        try {{
+            var activities = window.activities;
+            if (activities === null || activities === undefined) {{
+                return null;
+            }}
+            if (activities.length === 0) {{
+                return true;
+            }}
+            var current = workspace.currentActivity;
+            if (typeof current !== "string") {{
+                return null;
+            }}
+            return Array.prototype.indexOf.call(activities, current) >= 0;
+        }} catch (error) {{
+            return null;
+        }}
+    }}
+
     var activeWindow = null;
     try {{
         activeWindow = "activeWindow" in workspace ? workspace.activeWindow : workspace.activeClient;
@@ -791,6 +817,8 @@ fn kwin_window_script_source(
             workspace: firstDesktop(window),
             minimized: read(window, "minimized"),
             onCurrentDesktop: onCurrentDesktop(window),
+            onCurrentActivity: onCurrentActivity(window),
+            hidden: read(window, "hidden"),
             active: read(window, "active") || window === activeWindow,
             clientType: clientType(window),
             normalWindow: read(window, "normalWindow"),
@@ -1138,6 +1166,10 @@ struct KwinRawWindow {
     workspace: Option<serde_json::Value>,
     minimized: Option<serde_json::Value>,
     on_current_desktop: Option<serde_json::Value>,
+    #[serde(default)]
+    on_current_activity: Option<serde_json::Value>,
+    #[serde(default)]
+    hidden: Option<serde_json::Value>,
     active: Option<serde_json::Value>,
     client_type: Option<String>,
     normal_window: Option<serde_json::Value>,

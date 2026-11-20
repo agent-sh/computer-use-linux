@@ -60,7 +60,9 @@
 //! them back before any event, and the server removes what KWin wrote into
 //! kcminputrc for them (the groups keyed by these devices' vendor, product
 //! and name) when they go away. KWin's "SyncWithMouse" tablet option moves
-//! the user's pointer to where the pen was; with it on there is no route.
+//! the user's pointer to where the pen was, and KWIN_WAYLAND_EMULATE_TABLET
+//! sends pen input over clients without tablet support through it; with
+//! either there is no route.
 //!
 //! Lifecycle: created on first use, and both devices go away after
 //! [crate::agent_seat::IDLE_LIFETIME] without use, or when the server exits.
@@ -191,22 +193,21 @@ fn parse_kwin_version(text: &str) -> Option<(u32, u32)> {
     Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
 }
 
-fn kcminputrc_read(groups: &[&str], key: &str) -> Option<String> {
+/// A kcminputrc boolean as KConfig reads it (every spelling it accepts):
+/// kreadconfig6 --type bool answers in its exit status.
+fn kcminputrc_bool(groups: &[&str], key: &str) -> bool {
     let mut command = std::process::Command::new("kreadconfig6");
     command.args(["--file", "kcminputrc"]);
     for group in groups {
         command.args(["--group", group]);
     }
-    let output = command
-        .args(["--key", key])
+    command
+        .args(["--key", key, "--type", "bool", "--default", "false"])
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// What KWin needs for the pen route, or why it falls short.
@@ -227,10 +228,20 @@ fn kwin_ready() -> std::result::Result<(), String> {
             return Err(format!("{tool} is not installed; the virtual pen uses it to read KWin's tablet option and to remove its own devices' KWin settings afterwards"));
         }
     }
-    if kcminputrc_read(&["Tablet"], "SyncWithMouse").as_deref() == Some("true") {
+    if kcminputrc_bool(&["Tablet"], "SyncWithMouse") {
         return Err("KWin's tablet cursor follows the mouse here (kcminputrc [Tablet] SyncWithMouse), so the user's pointer would jump to where the pen was".to_string());
     }
     Ok(())
+}
+
+/// The routes the doctor offers: on KWin a scroll needs kscreen-doctor for
+/// the output's rotation.
+fn routes(desktop: Desktop) -> Vec<&'static str> {
+    if desktop == Desktop::Kwin && !on_path("kscreen-doctor") {
+        vec![desktop.pen_route()]
+    } else {
+        vec![desktop.pen_route(), desktop.touch_route()]
+    }
 }
 
 /// Doctor line for the pen route.
@@ -238,10 +249,10 @@ pub(crate) fn doctor_summary() -> serde_json::Value {
     match availability() {
         Ok(desktop) => serde_json::json!({
             "available": true,
-            "routes": [desktop.pen_route(), desktop.touch_route()],
+            "routes": routes(desktop),
             "note": format!("Background click and drag use a virtual pen, background scroll a one-finger touch pan; the user's mouse pointer does not move. A pen tap or a touch gives the window keyboard focus. Apps without tablet support never see the pen, scrolling needs touch panning in the app, and a drag stays inside one window. {}", match desktop {
                 Desktop::Gnome => "Needs the computer-use-linux GNOME Shell extension to check the window under the point.",
-                Desktop::Kwin => "KWin scripting checks the window under the point; an open Overview or other full-screen effect is not detected.",
+                Desktop::Kwin => "KWin scripting checks the window under the point; Show Desktop, an open Overview or another full-screen effect refuses the call.",
             }),
         }),
         Err(reason) => serde_json::json!({ "available": false, "reason": reason }),
@@ -400,7 +411,7 @@ impl Layout {
             .map(|monitor| monitor.rect)
             .reduce(|a, b| a.union(&b))
             .filter(|bounds| bounds.width > 0.0 && bounds.height > 0.0)
-            .ok_or_else(|| "mutter reported no monitor".to_string())?;
+            .ok_or_else(|| "the compositor reported no monitor".to_string())?;
         if capture_width == 0 || capture_height == 0 {
             return Err("the screenshot size is unknown; take a screenshot first".to_string());
         }
@@ -539,8 +550,13 @@ pub(crate) fn check_point_on_visible_target(
         .iter()
         .find(|window| window.window_id == target_id)
         .ok_or_else(|| {
-            format!("window_id {target_id} is not on the desktop the user sees, or is minimized")
+            format!("window_id {target_id} is not on the desktop the user sees, or is minimized or hidden")
         })?;
+    if target.workspace.is_some() {
+        return Err(format!(
+            "KWin did not say whether window_id {target_id} is on the desktop and activity the user sees"
+        ));
+    }
     let rect = window_rect(target)
         .ok_or_else(|| format!("window_id {target_id} has no known position"))?;
     if !rect.contains(point) {
@@ -1413,6 +1429,23 @@ fn kwin_covering_area(
     wait_kwin("list the virtual device", || {
         Ok(kwin_devices(connection)?.contains(&name))
     })?;
+    // Settings an earlier user left for a device of this name would move
+    // where the input lands.
+    for (property, default) in [
+        ("calibrationMatrix", "defaultCalibrationMatrix"),
+        ("outputArea", "defaultOutputArea"),
+        ("inputArea", "defaultInputArea"),
+        ("rotation", "defaultRotation"),
+    ] {
+        if let (Ok(current), Ok(default)) = (
+            kwin_device_get(connection, path.as_str(), property),
+            kwin_device_get(connection, path.as_str(), default),
+        ) {
+            if current != default {
+                bail!("KWin applies a {property} setting to the virtual device (kcminputrc [Libinput][{VENDOR}][..])");
+            }
+        }
+    }
     match kind {
         Kind::Pen => {
             let mapped = || -> Result<bool> {
@@ -1714,6 +1747,95 @@ pub(crate) async fn screen_locked(desktop: Desktop) -> bool {
     )
     .await;
     matches!(reply, Ok(Ok(message)) if message.body().deserialize::<bool>().unwrap_or(false))
+}
+
+/// Why KWin's state rules out pen input now, checked before every call:
+/// Show Desktop hides windows without minimizing them, a full-screen effect
+/// such as the Overview takes the input, and KWIN_WAYLAND_EMULATE_TABLET
+/// in KWin's environment sends pen input over clients without tablet
+/// support through the user's pointer. Some(reason) is a refusal; None
+/// means nothing stands in the way.
+pub(crate) async fn kwin_blocker() -> Option<String> {
+    const FULL_SCREEN: [&str; 6] = [
+        "overview",
+        "windowview",
+        "desktopgrid",
+        "expo",
+        "tileseditor",
+        "cube",
+    ];
+    let connection = zbus::Connection::session().await.ok()?;
+    let get = |path: &'static str, interface: &'static str, property: &'static str| {
+        let connection = connection.clone();
+        async move {
+            let reply = tokio::time::timeout(
+                Duration::from_secs(2),
+                connection.call_method(
+                    Some("org.kde.KWin"),
+                    path,
+                    Some("org.freedesktop.DBus.Properties"),
+                    "Get",
+                    &(interface, property),
+                ),
+            )
+            .await
+            .ok()?
+            .ok()?;
+            reply
+                .body()
+                .deserialize::<zbus::zvariant::OwnedValue>()
+                .ok()
+        }
+    };
+    match get("/KWin", "org.kde.KWin", "showingDesktop").await {
+        Some(value) if bool::try_from(&value).unwrap_or(false) => {
+            return Some(
+                "KWin is showing the desktop, which hides windows without minimizing them"
+                    .to_string(),
+            );
+        }
+        Some(_) => {}
+        None => return Some("KWin's showingDesktop did not answer".to_string()),
+    }
+    let active = get("/Effects", "org.kde.kwin.Effects", "activeEffects")
+        .await
+        .and_then(|value| Vec::<String>::try_from(value).ok());
+    match active {
+        Some(effects) => {
+            if let Some(effect) = effects
+                .iter()
+                .find(|effect| FULL_SCREEN.contains(&effect.as_str()))
+            {
+                return Some(format!(
+                    "KWin's {effect} effect is open and takes the input"
+                ));
+            }
+        }
+        None => return Some("KWin's activeEffects did not answer".to_string()),
+    }
+    let pid = tokio::time::timeout(
+        Duration::from_secs(2),
+        connection.call_method(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            Some("org.freedesktop.DBus"),
+            "GetConnectionUnixProcessID",
+            &("org.kde.KWin",),
+        ),
+    )
+    .await
+    .ok()?
+    .ok()?
+    .body()
+    .deserialize::<u32>()
+    .ok()?;
+    let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    let emulated = environ.split(|byte| *byte == 0).any(|entry| {
+        entry
+            .strip_prefix(b"KWIN_WAYLAND_EMULATE_TABLET=")
+            .is_some_and(|value| !value.is_empty() && value != b"0")
+    });
+    emulated.then(|| "KWin runs with KWIN_WAYLAND_EMULATE_TABLET, which sends pen input over clients without tablet support through the user's pointer".to_string())
 }
 
 /// The logical layout from KWin's outputs. KWin's scripting gives no

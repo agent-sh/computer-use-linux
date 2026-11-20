@@ -10783,8 +10783,6 @@ enum PenRequest {
     },
 }
 
-/// What a pen or touch action did to the user's keyboard focus: mutter
-/// focuses the window a tip press or a touch lands on.
 /// The windows the virtual pen checks a point against, bottom to top.
 async fn pen_windows(
     desktop: crate::virtual_pen::Desktop,
@@ -10799,6 +10797,8 @@ async fn pen_windows(
     }
 }
 
+/// What a pen or touch action did to the user's keyboard focus: the
+/// compositor focuses the window a tip press or a touch lands on.
 fn pen_focus_sentence(before: Option<u64>, after: Option<Option<u64>>) -> String {
     match after {
         None => "The user's keyboard focus could not be read back.".to_string(),
@@ -11289,6 +11289,11 @@ impl ComputerUseLinux {
         if pen::screen_locked(desktop).await {
             return fail("Nothing was sent: the screen is locked.".to_string());
         }
+        if desktop == pen::Desktop::Kwin {
+            if let Some(reason) = pen::kwin_blocker().await {
+                return fail(format!("Nothing was sent: {reason}."));
+            }
+        }
         let windows = match pen_windows(desktop).await {
             Ok(windows) => windows,
             Err(error) => {
@@ -11300,7 +11305,18 @@ impl ComputerUseLinux {
         };
         let window = match resolve_window_target(&windows, &target) {
             Ok(window) => window.clone(),
-            Err(error) => return fail(format!("Nothing was sent: {error:#}")),
+            Err(error) => {
+                // KWin's list holds only what the user can see; say why a
+                // window KWin has is not in it.
+                if desktop == pen::Desktop::Kwin {
+                    if let Ok(all) = crate::windowing::backends::kwin::list_windows().await {
+                        if let Ok(window) = resolve_window_target(&all, &target) {
+                            return fail(format!("Nothing was sent: window_id {} is minimized, hidden, or not on the desktop and activity the user sees.", window.window_id));
+                        }
+                    }
+                }
+                return fail(format!("Nothing was sent: {error:#}"));
+            }
         };
         let cached = self.desktop_size.lock().ok().and_then(|guard| *guard);
         let capture = match cached {

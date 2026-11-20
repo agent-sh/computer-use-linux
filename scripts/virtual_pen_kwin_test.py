@@ -15,7 +15,8 @@ A relative mouse nudge shows where the user's pointer is. Background left, right
 middle and double clicks, a drag and two scrolls go through the pen and the
 touchscreen: the window sees pen and touch input with the buttons named and
 no mouse event, and a second nudge shows the user's pointer where it was. A point under another window is refused before
-input. While the pen runs, kcminputrc holds its workspace mapping; after the
+input, and so is a call while KWin shows the desktop or on a minimized
+target. While the pen runs, kcminputrc holds its workspace mapping; after the
 server exits, no virtual device and none of its kcminputrc groups are left.
 With KWin's SyncWithMouse tablet option on, there is no route.
 """
@@ -34,6 +35,27 @@ from socket_fixture import private_bus_config
 import virtual_pen_test as gnome
 
 HERE = Path(__file__).resolve().parent
+SHOW_DESKTOP = """
+import time
+from gi.repository import Gio, GLib
+bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+bus.call_sync('org.kde.KWin', '/KWin', 'org.kde.KWin', 'showDesktop', GLib.Variant('(b)', (True,)),
+              None, Gio.DBusCallFlags.NONE, 2000)
+time.sleep(600)
+"""
+MINIMIZED = """
+import gi
+gi.require_version('Gtk', '4.0')
+from gi.repository import GLib, Gtk
+app = Gtk.Application(application_id='dev.avifenesh.CulPenMinimized')
+def activate(app):
+    window = Gtk.ApplicationWindow(application=app, title='cul-pen-minimized')
+    window.set_default_size(300, 300)
+    window.present()
+    GLib.timeout_add(1000, lambda: window.minimize() and False)
+app.connect('activate', activate)
+app.run([])
+"""
 SCREENSHOT = """
 import struct, sys, zlib
 from gi.repository import Gio, GLib
@@ -220,6 +242,30 @@ def guest(binary):
         time.sleep(.5)
         check(failures, not [e for e in events(since) if e['kind'] == 'press'], 'refused click sent no press')
         stop(cover)
+        # Show Desktop hides windows without minimizing them.
+        # KWin ends Show Desktop when the client that asked leaves the bus.
+        shower = subprocess.Popen(['/usr/bin/python3', '-c', SHOW_DESKTOP], env=env)
+        cleanup.callback(stop, shower)
+        time.sleep(1.5)
+        since = time.monotonic()
+        refused = server.call('click', dict(at((px + 100, py + 300)), window_id=wid, delivery='background'))
+        check(failures, refused.get('ok') is False and 'showing the desktop' in refused.get('message', ''),
+              f'Show Desktop is refused: {refused.get("message")}')
+        stop(shower)
+        time.sleep(1)
+        check(failures, not [e for e in events(since) if e['kind'] == 'press'], 'Show Desktop click sent no press')
+        # A minimized window is no target.
+        hidden = subprocess.Popen(['/usr/bin/python3', '-c', MINIMIZED], env=dict(env, GDK_BACKEND='wayland'),
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cleanup.callback(stop, hidden)
+        minimized = wait_for(lambda: next((w for w in server.call('list_windows', {})['windows']
+                                           if w.get('title') == 'cul-pen-minimized' and w.get('hidden')), None),
+                             'the minimized window', 20)
+        refused = server.call('click', dict(at((px + 100, py + 300)), window_id=minimized['window_id'],
+                                            delivery='background'))
+        check(failures, refused.get('ok') is False and 'minimized' in refused.get('message', ''),
+              f'a minimized target is refused: {refused.get("message")}')
+        stop(hidden)
         server.close()
         time.sleep(1)
         check(failures, not gnome.leftover_devices(), f'no virtual device after exit: {gnome.leftover_devices()}')
