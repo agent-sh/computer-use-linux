@@ -2918,7 +2918,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "drag",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
-        description = "Drag with the left button from one point to another in screenshot capture pixels. Takes no relative coordinates; a window target matters only with delivery=\"background\", which on GNOME Wayland drags with a virtual pen inside that window and leaves the user's pointer where it is (elsewhere the first such call returns a one-time notice, then later calls drag through the user's pointer). Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+        description = "Drag with the left button from one point to another in screenshot capture pixels. Takes no relative coordinates; a window target matters only with delivery=\"background\", which on GNOME and KDE Plasma Wayland drags with a virtual pen inside that window and leaves the user's pointer where it is (elsewhere the first such call returns a one-time notice, then later calls drag through the user's pointer). Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -2948,8 +2948,9 @@ impl ComputerUseLinux {
         let received = Some(serde_json::json!(params.clone()));
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let outcome = match crate::virtual_pen::availability() {
-            Ok(()) => {
+            Ok(desktop) => {
                 self.background_pen(
+                    desktop,
                     "drag",
                     PenRequest::Drag {
                         start: (params.start_x, params.start_y),
@@ -2964,9 +2965,7 @@ impl ComputerUseLinux {
             Err(reason) => {
                 drop(input_guard);
                 BackgroundOutcome::Unavailable {
-                    reason: format!(
-                        "a background drag goes through the GNOME virtual pen, and {reason}"
-                    ),
+                    reason: format!("a background drag goes through the virtual pen, and {reason}"),
                     fallback: FocusFallback::default(),
                 }
             }
@@ -5488,7 +5487,7 @@ struct ClickParams {
     /// "background" sends the input through the agent's own pointer, so the
     /// user's pointer and keyboard focus stay where they are: on X11 without
     /// a window manager (an XInput 2 master pointer) and on sway 1.10 or later
-    /// (a transient seat). On GNOME Wayland a virtual pen (a touch pan for
+    /// (a transient seat). On GNOME and KDE Plasma Wayland a virtual pen (a touch pan for
     /// scroll) leaves the user's pointer alone, but a click still focuses the
     /// window, and apps without tablet support ignore it. Needs x and y in
     /// screenshot capture pixels over the window the call targets, without
@@ -5770,7 +5769,7 @@ struct ScrollParams {
     /// "background" sends the input through the agent's own pointer, so the
     /// user's pointer and keyboard focus stay where they are: on X11 without
     /// a window manager (an XInput 2 master pointer) and on sway 1.10 or later
-    /// (a transient seat). On GNOME Wayland a virtual pen (a touch pan for
+    /// (a transient seat). On GNOME and KDE Plasma Wayland a virtual pen (a touch pan for
     /// scroll) leaves the user's pointer alone, but a click still focuses the
     /// window, and apps without tablet support ignore it. Needs x and y in
     /// screenshot capture pixels over the window the call targets, without
@@ -5855,7 +5854,7 @@ struct DragParams {
     /// Window title substring, ignoring ASCII case.
     #[serde(default)]
     window_title: Option<String>,
-    /// "background" drags with a virtual pen on GNOME Wayland, so the
+    /// "background" drags with a virtual pen on GNOME and KDE Plasma Wayland, so the
     /// user's pointer stays where it is; both points must be on the target
     /// window, with no window stacked above them. Elsewhere the first such
     /// call in a server session sends nothing and returns a notice;
@@ -10682,8 +10681,8 @@ struct BackgroundReport {
     /// would go, through the user's keyboard focus and pointer.
     used: bool,
     /// The background route used: atspi-element, devtools-tab, terminal,
-    /// x11-master, sway-transient-seat, hyprland-send-key-state, gnome-pen
-    /// or gnome-touch.
+    /// x11-master, sway-transient-seat, hyprland-send-key-state, gnome-pen,
+    /// gnome-touch, kwin-pen or kwin-touch.
     #[serde(skip_serializing_if = "Option::is_none")]
     route: Option<String>,
     /// False on the one-time notice: nothing was sent.
@@ -10786,6 +10785,20 @@ enum PenRequest {
 
 /// What a pen or touch action did to the user's keyboard focus: mutter
 /// focuses the window a tip press or a touch lands on.
+/// The windows the virtual pen checks a point against, bottom to top.
+async fn pen_windows(
+    desktop: crate::virtual_pen::Desktop,
+) -> anyhow::Result<Vec<crate::windowing::types::WindowInfo>> {
+    match desktop {
+        crate::virtual_pen::Desktop::Gnome => {
+            crate::windowing::backends::gnome::extension_windows_stacked().await
+        }
+        crate::virtual_pen::Desktop::Kwin => {
+            crate::windowing::backends::kwin::windows_stacked().await
+        }
+    }
+}
+
 fn pen_focus_sentence(before: Option<u64>, after: Option<Option<u64>>) -> String {
     match after {
         None => "The user's keyboard focus could not be read back.".to_string(),
@@ -11171,7 +11184,7 @@ impl ComputerUseLinux {
                 "a background {action} needs x and y in screenshot capture pixels"
             ));
         };
-        if crate::virtual_pen::availability().is_ok() {
+        if let Ok(desktop) = crate::virtual_pen::availability() {
             let request = match input(f64::from(x), f64::from(y)) {
                 seat::PointerInput::Click { button, count, .. } => PenRequest::Click {
                     at: (x, y),
@@ -11183,7 +11196,7 @@ impl ComputerUseLinux {
                 }
             };
             return self
-                .background_pen(action, request, target, received, input_guard)
+                .background_pen(desktop, action, request, target, received, input_guard)
                 .await;
         }
         let kind = match seat::availability() {
@@ -11253,6 +11266,7 @@ impl ComputerUseLinux {
     /// with no window stacked above it there.
     async fn background_pen(
         &self,
+        desktop: crate::virtual_pen::Desktop,
         action: &'static str,
         request: PenRequest,
         target: Option<WindowTarget>,
@@ -11272,13 +11286,16 @@ impl ComputerUseLinux {
         };
         // Before the extension: GNOME Shell turns extensions off on the lock
         // screen, and focused input must not stand in there either.
-        if pen::screen_locked().await {
+        if pen::screen_locked(desktop).await {
             return fail("Nothing was sent: the screen is locked.".to_string());
         }
-        let windows = match crate::windowing::backends::gnome::extension_windows_stacked().await {
+        let windows = match pen_windows(desktop).await {
             Ok(windows) => windows,
             Err(error) => {
-                return unavailable(format!("the virtual pen checks which window is under the point through the computer-use-linux GNOME Shell extension, which did not answer ({error:#}); run setup_window_targeting"))
+                return unavailable(match desktop {
+                    pen::Desktop::Gnome => format!("the virtual pen checks which window is under the point through the computer-use-linux GNOME Shell extension, which did not answer ({error:#}); run setup_window_targeting"),
+                    pen::Desktop::Kwin => format!("the virtual pen checks which window is under the point through KWin scripting, which did not answer ({error:#})"),
+                })
             }
         };
         let window = match resolve_window_target(&windows, &target) {
@@ -11299,12 +11316,22 @@ impl ComputerUseLinux {
                 ),
             },
         };
-        let monitors = match pen::current_monitors().await {
+        let monitors = match desktop {
+            pen::Desktop::Gnome => pen::current_monitors().await,
+            pen::Desktop::Kwin => pen::kwin_monitors().await,
+        };
+        let monitors = match monitors {
             Ok(monitors) => monitors,
             Err(error) => {
                 return unavailable(format!(
-                    "mutter's monitor layout could not be read: {error:#}"
+                    "the compositor's monitor layout could not be read: {error:#}"
                 ))
+            }
+        };
+        let check = |windows: &[crate::windowing::types::WindowInfo], point| match desktop {
+            pen::Desktop::Gnome => pen::check_point_on_target(windows, window.window_id, point),
+            pen::Desktop::Kwin => {
+                pen::check_point_on_visible_target(windows, window.window_id, point)
             }
         };
         let layout = match pen::Layout::new(monitors, capture) {
@@ -11313,7 +11340,7 @@ impl ComputerUseLinux {
         };
         let on_target = |(x, y): (i32, i32)| {
             let point = layout.logical_point(x, y);
-            pen::check_point_on_target(&windows, window.window_id, point)
+            check(&windows, point)
                 .map(|rect| (point, rect))
                 .map_err(|error| format!("Nothing was sent: {}", as_sentence(&error)))
         };
@@ -11334,7 +11361,7 @@ impl ComputerUseLinux {
                         button,
                         count,
                     },
-                    pen::PEN_ROUTE,
+                    desktop.pen_route(),
                     format!("the {action} at ({}, {}) through a virtual pen", at.0, at.1),
                 )
             }
@@ -11356,7 +11383,7 @@ impl ComputerUseLinux {
                     .collect();
                 (
                     Gesture::Drag { path },
-                    pen::PEN_ROUTE,
+                    desktop.pen_route(),
                     format!(
                         "the drag from ({}, {}) to ({}, {}) through a virtual pen",
                         start.0, start.1, end.0, end.1
@@ -11373,6 +11400,9 @@ impl ComputerUseLinux {
                 };
                 // A touchscreen maps to one monitor, through that monitor's
                 // rotation, which the device values here do not apply.
+                if monitor.transform == u32::MAX {
+                    return fail("Nothing was sent: a background scroll pans with a virtual touchscreen, and this monitor's rotation could not be read (kscreen-doctor -j).".to_string());
+                }
                 if monitor.transform != 0 {
                     return fail("Nothing was sent: a background scroll pans with a virtual touchscreen, and this monitor is rotated or flipped.".to_string());
                 }
@@ -11390,8 +11420,7 @@ impl ComputerUseLinux {
                     };
                 // Every stroke ends on the target too, with nothing above it.
                 for (_, end) in &strokes {
-                    if let Err(error) = pen::check_point_on_target(&windows, window.window_id, *end)
-                    {
+                    if let Err(error) = check(&windows, *end) {
                         return fail(format!(
                             "Nothing was sent: the pan would end off the target: {}",
                             as_sentence(&error)
@@ -11405,7 +11434,7 @@ impl ComputerUseLinux {
                 let count = strokes.len();
                 (
                     Gesture::Pan { strokes },
-                    pen::TOUCH_ROUTE,
+                    desktop.touch_route(),
                     format!(
                         "the scroll at ({}, {}) as a {distance:.0} px touch pan in {count} stroke{} through a virtual touchscreen",
                         at.0,
@@ -11422,7 +11451,7 @@ impl ComputerUseLinux {
             .map(|window| window.window_id);
         let sent = tokio::task::spawn_blocking(move || {
             let _hold = input_guard;
-            pen::perform(&gesture, &layout)
+            pen::perform(&gesture, &layout, desktop)
         })
         .await;
         match sent {
@@ -11437,7 +11466,7 @@ impl ComputerUseLinux {
                 as_sentence(&message)
             )),
             Ok(Ok(())) => {
-                let focused_after = crate::windowing::backends::gnome::extension_windows_stacked()
+                let focused_after = pen_windows(desktop)
                     .await
                     .ok()
                     .map(|windows| {
@@ -11447,7 +11476,7 @@ impl ComputerUseLinux {
                             .map(|window| window.window_id)
                     });
                 let focus = pen_focus_sentence(focused_before, focused_after);
-                let limits = if route == pen::TOUCH_ROUTE {
+                let limits = if route == desktop.touch_route() {
                     "A touch pan scrolls only where the app pans on touch; re-observe to confirm."
                 } else {
                     "An app without tablet support does not see pen input; re-observe to confirm."

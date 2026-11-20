@@ -56,6 +56,59 @@ pub async fn list_windows() -> Result<Vec<WindowInfo>> {
     Ok(windows)
 }
 
+/// The windows on the desktop the user sees, bottom to top in KWin's
+/// stacking order, with docks, popups and notifications: whatever can cover
+/// a point. The desktop window and minimized windows are left out, and
+/// workspace is None, since only the current desktop's windows are listed.
+pub(crate) async fn windows_stacked() -> Result<Vec<WindowInfo>> {
+    parse_kwin_windows_stacked(&call_kwin_window_script().await?)
+}
+
+/// Named logical outputs, in KWin's order.
+pub(crate) async fn named_outputs() -> Result<Vec<(String, LogicalMonitor)>> {
+    let json = call_kwin_window_script().await?;
+    let names = KwinElementClickSnapshot::from_json(&json)?
+        .outputs
+        .into_iter()
+        .map(|output| output.name)
+        .collect::<Vec<_>>();
+    Ok(names.into_iter().zip(kwin_output_layout(&json)?).collect())
+}
+
+fn parse_kwin_windows_stacked(json: &str) -> Result<Vec<WindowInfo>> {
+    let snapshot = parse_kwin_snapshot(json)?;
+    let order = snapshot
+        .stacking
+        .context("KWin did not expose its stacking order")?;
+    let mut raw: std::collections::HashMap<String, KwinRawWindow> = snapshot
+        .windows
+        .into_iter()
+        .filter_map(|window| Some((window.kwin_uuid()?, window)))
+        .collect();
+    let flag = |value: &Option<serde_json::Value>| json_value_as_bool(value.as_ref());
+    let mut windows = Vec::new();
+    for uuid in order
+        .iter()
+        .filter_map(|uuid| normalize_kwin_uuid(uuid.as_deref()?))
+    {
+        let Some(window) = raw.remove(&uuid) else {
+            continue;
+        };
+        if flag(&window.desktop_window) == Some(true)
+            || flag(&window.minimized) == Some(true)
+            || flag(&window.on_current_desktop) == Some(false)
+        {
+            continue;
+        }
+        let Ok(mut info) = WindowInfo::try_from(window) else {
+            continue;
+        };
+        info.workspace = None;
+        windows.push(info);
+    }
+    Ok(windows)
+}
+
 pub(crate) async fn logical_desktop_rect() -> Result<(i32, i32, i32, i32)> {
     let json = call_kwin_window_script().await?;
     parse_kwin_logical_desktop_rect(&json)
@@ -755,12 +808,25 @@ fn kwin_window_script_source(
         }};
     }});
 
+    function stackingOrder() {{
+        try {{
+            var order = workspace.stackingOrder;
+            if (order && typeof order.length === "number") {{
+                return Array.prototype.map.call(order, function(window) {{
+                    return read(window, "uuid") || read(window, "internalId");
+                }});
+            }}
+        }} catch (error) {{}}
+        return null;
+    }}
+
     callDBus(serviceName, objectPath, iface, "ReceiveWindows", JSON.stringify({{
         backend: "kwin",
         pluginName: pluginName,
         desktopGeometry: workspaceGeometry(),
         outputs: activeOutputs(),
-        windows: windows
+        windows: windows,
+        stacking: stackingOrder()
     }}));
 }})();
 "#
@@ -1010,6 +1076,9 @@ struct KwinWindowSnapshot {
     #[serde(default)]
     outputs: Vec<KwinRawOutput>,
     windows: Vec<KwinRawWindow>,
+    /// Window uuids bottom to top.
+    #[serde(default)]
+    stacking: Option<Vec<Option<String>>>,
 }
 
 impl KwinWindowSnapshot {

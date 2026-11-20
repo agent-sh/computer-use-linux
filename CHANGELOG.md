@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- KDE Plasma Wayland (KWin 6.3 and later) gets the virtual pen and touchscreen for `click`, `drag` and `scroll` with `delivery: "background"`, as routes `kwin-pen` and `kwin-touch`: the user's mouse pointer stays where it is. KWin maps the pen to the whole workspace and the touchscreen to the output under the point through `org.kde.KWin.InputDevice`, read back before input, and the server removes what KWin wrote for these devices into `kcminputrc` once they are gone. The point is checked through KWin scripting against KWin's stacking order (panels, popups and notifications included). KWin's `SyncWithMouse` tablet option, which moves the user's pointer to the pen, leaves no route. Measured on KWin 6.6.7 on a DRM output with GTK 4.
+
 ### Fixed
 
 - A background right click on GNOME 48 and later arrived as a middle click and a middle click as a right click: GNOME 48 changed the stylus button defaults (`button-action` to `right`, `secondary-button-action` to `middle`), and mutter rewrites the pen's buttons by them. The server now sets both actions for its own pen (the settings path keyed by its vendor and product id) before every action, so mutter hands clients the button the pen pressed, and resets them when the pen goes away. Measured with GNOME 48's defaults on GNOME Shell 46, with GTK 4 and with native Wayland and Xwayland Chromium; mutter 48 and later read the same explicit values (from mutter's source).

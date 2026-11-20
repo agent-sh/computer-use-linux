@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.58";
-export const GENERATED_TOOL_CATALOG_HASH = "e447f071f2ccf6c438c5fca9c80dbbe642661b1e9afa6239aad6534b2815ebfb";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "edaac05bdf1eaca9f3ae95f7e0e7d9f41797c920ec7331c39e6864c04841fa51";
+export const GENERATED_TOOL_CATALOG_HASH = "de04450abc876a3712849d85daad7b80ed6656e1ddf21e2bfd16e94712b4247c";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "26a00c32301af2704aeaf97fe3cb58f9429e255305ad4e17efd50db506cd6717";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -279,7 +279,7 @@ export const GENERATED_MCP_TOOLS =
             }
           ],
           "default": null,
-          "description": "\"background\" sends the input through the agent's own pointer, so the\nuser's pointer and keyboard focus stay where they are: on X11 without\na window manager (an XInput 2 master pointer) and on sway 1.10 or later\n(a transient seat). On GNOME Wayland a virtual pen (a touch pan for\nscroll) leaves the user's pointer alone, but a click still focuses the\nwindow, and apps without tablet support ignore it. Needs x and y in\nscreenshot capture pixels over the window the call targets, without\nrelative or an element. Elsewhere the\nfirst such call in a server session sends nothing and returns a\nnotice; repeated, and for every later such call, it goes through the\nuser's pointer as with \"focus\". Default: \"focus\"."
+          "description": "\"background\" sends the input through the agent's own pointer, so the\nuser's pointer and keyboard focus stay where they are: on X11 without\na window manager (an XInput 2 master pointer) and on sway 1.10 or later\n(a transient seat). On GNOME and KDE Plasma Wayland a virtual pen (a touch pan for\nscroll) leaves the user's pointer alone, but a click still focuses the\nwindow, and apps without tablet support ignore it. Needs x and y in\nscreenshot capture pixels over the window the call targets, without\nrelative or an element. Elsewhere the\nfirst such call in a server session sends nothing and returns a\nnotice; repeated, and for every later such call, it goes through the\nuser's pointer as with \"focus\". Default: \"focus\"."
         },
         "element_index": {
           "default": null,
@@ -501,7 +501,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Drag with the left button from one point to another in screenshot capture pixels. Takes no relative coordinates; a window target matters only with delivery=\"background\", which on GNOME Wayland drags with a virtual pen inside that window and leaves the user's pointer where it is (elsewhere the first such call returns a one-time notice, then later calls drag through the user's pointer). Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Drag with the left button from one point to another in screenshot capture pixels. Takes no relative coordinates; a window target matters only with delivery=\"background\", which on GNOME and KDE Plasma Wayland drags with a virtual pen inside that window and leaves the user's pointer where it is (elsewhere the first such call returns a one-time notice, then later calls drag through the user's pointer). Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "KeyboardDelivery": {
@@ -547,7 +547,7 @@ export const GENERATED_MCP_TOOLS =
             }
           ],
           "default": null,
-          "description": "\"background\" drags with a virtual pen on GNOME Wayland, so the\nuser's pointer stays where it is; both points must be on the target\nwindow, with no window stacked above them. Elsewhere the first such\ncall in a server session sends nothing and returns a notice;\nrepeated, and for every later such call, the drag goes through the\nuser's pointer as with \"focus\". Default: \"focus\"."
+          "description": "\"background\" drags with a virtual pen on GNOME and KDE Plasma Wayland, so the\nuser's pointer stays where it is; both points must be on the target\nwindow, with no window stacked above them. Elsewhere the first such\ncall in a server session sends nothing and returns a notice;\nrepeated, and for every later such call, the drag goes through the\nuser's pointer as with \"focus\". Default: \"focus\"."
         },
         "end_x": {
           "description": "End x in raw screenshot capture pixels.",
@@ -2094,7 +2094,7 @@ export const GENERATED_MCP_TOOLS =
             }
           ],
           "default": null,
-          "description": "\"background\" sends the input through the agent's own pointer, so the\nuser's pointer and keyboard focus stay where they are: on X11 without\na window manager (an XInput 2 master pointer) and on sway 1.10 or later\n(a transient seat). On GNOME Wayland a virtual pen (a touch pan for\nscroll) leaves the user's pointer alone, but a click still focuses the\nwindow, and apps without tablet support ignore it. Needs x and y in\nscreenshot capture pixels over the window the call targets, without\nrelative or an element. Elsewhere the\nfirst such call in a server session sends nothing and returns a\nnotice; repeated, and for every later such call, it goes through the\nuser's pointer as with \"focus\". Default: \"focus\"."
+          "description": "\"background\" sends the input through the agent's own pointer, so the\nuser's pointer and keyboard focus stay where they are: on X11 without\na window manager (an XInput 2 master pointer) and on sway 1.10 or later\n(a transient seat). On GNOME and KDE Plasma Wayland a virtual pen (a touch pan for\nscroll) leaves the user's pointer alone, but a click still focuses the\nwindow, and apps without tablet support ignore it. Needs x and y in\nscreenshot capture pixels over the window the call targets, without\nrelative or an element. Elsewhere the\nfirst such call in a server session sends nothing and returns a\nnotice; repeated, and for every later such call, it goes through the\nuser's pointer as with \"focus\". Default: \"focus\"."
         },
         "direction": {
           "description": "up, down, left or right (case-insensitive).",

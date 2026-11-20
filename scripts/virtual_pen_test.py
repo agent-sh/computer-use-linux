@@ -184,6 +184,18 @@ def nudge_mouse():
             fcntl.ioctl(uinput, 0x5502)
 
 
+def unload_vkms(timeout=10):
+    """Removes vkms, retrying while its last user lets go; whether it is gone."""
+    deadline = time.monotonic() + timeout
+    while True:
+        subprocess.run(['sudo', '-n', 'modprobe', '-r', 'vkms'], capture_output=True)
+        if not Path('/sys/module/vkms').exists():
+            return True
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(.5)
+
+
 def seat0_graphical_sessions():
     sessions = []
     listing = subprocess.run(['loginctl', 'list-sessions', '--no-legend'], capture_output=True, text=True).stdout
@@ -237,10 +249,15 @@ def run(binary, root, tty):
         rule = Path('/run/udev/rules.d/61-mutter.rules')
         subprocess.run(['sudo', '-n', 'tee', str(rule)], input=UDEV_RULE, text=True, check=True,
                        stdout=subprocess.DEVNULL)
-        subprocess.run(['sudo', '-n', 'modprobe', '-r', 'vkms'], capture_output=True)
+        # udevd notices new rules through inotify, which a bind mount of
+        # /run/udev (the KWin fixture's container) can leave deaf.
+        subprocess.run(['sudo', '-n', 'udevadm', 'control', '--reload'], check=True)
+        if not unload_vkms():
+            sys.exit('gnome pen fixture: vkms is loaded and in use, so it cannot be reloaded under the rule')
         subprocess.run(['sudo', '-n', 'modprobe', 'vkms'], check=True)
-        cleanup.callback(subprocess.run, ['sudo', '-n', 'modprobe', '-r', 'vkms'], capture_output=True)
+        cleanup.callback(unload_vkms)
         cleanup.callback(lambda: (subprocess.run(['sudo', '-n', 'rm', '-f', str(rule)]),
+                                  subprocess.run(['sudo', '-n', 'udevadm', 'control', '--reload']),
                                   subprocess.run(['sudo', '-n', 'udevadm', 'trigger', '-s', 'drm', '--settle'])))
         subprocess.run(['sudo', '-n', 'udevadm', 'trigger', '-s', 'drm', '--settle'], check=True)
         user = subprocess.run(['id', '-un'], capture_output=True, text=True, check=True).stdout.strip()
