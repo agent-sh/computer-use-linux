@@ -8,7 +8,7 @@ COMPUTER_USE_LINUX_TEST_GNOME_SEAT names (for example tty6), on a vkms
 output, with libinput reading the seat's devices: a headless mutter reads
 none, so it never sees a uinput device. The fixture needs passwordless sudo
 for that (modprobe vkms, an ACL on /dev/uinput, a login session on the
-terminal, chvt), and refuses to run while any graphical session is on seat0:
+terminal, its getty masked for the run, chvt), and refuses to run while any graphical session is on seat0:
 uinput devices are machine-wide, so this must never run on a desktop someone
 uses. Without the variable it skips.
 
@@ -267,6 +267,14 @@ def run(binary, root, tty):
         launcher.write_text(f'#!/bin/bash\nexport {exports}\nexec gnome-shell --wayland --display-server '
                             f'{"" if xwayland else "--no-x11 "}--wayland-display={DISPLAY_NAME} > {root}/shell.log 2>&1\n')
         launcher.chmod(0o755)
+        # logind starts a getty on the active terminal when no session holds
+        # it (autovt), and one left from an earlier run takes the terminal
+        # back and hangs up the shell's session. Masked until the end of the
+        # run (--runtime: nothing survives a reboot either).
+        gettys = [f'getty@{tty}.service', f'autovt@{tty}.service']
+        subprocess.run(['sudo', '-n', 'systemctl', 'mask', '--runtime', '--now', *gettys], capture_output=True)
+        cleanup.callback(subprocess.run, ['sudo', '-n', 'systemctl', 'unmask', '--runtime', *gettys],
+                         capture_output=True)
         unit = f'cul-pen-shell-{os.getpid()}'
         subprocess.run(['sudo', '-n', 'systemd-run', '--quiet', f'--unit={unit}', '--collect', '-p', 'PAMName=login',
                         '-p', f'TTYPath=/dev/{tty}', '-p', 'StandardInput=tty-force', '-p', f'User={user}',
