@@ -35,6 +35,16 @@
 //! device goes away. Those settings paths belong to this server's own
 //! vendor and product ids; no other device's setting is touched.
 //!
+//! Buttons: mutter rewrites a stylus button by the tool's button-action
+//! settings before it reaches a client (meta-seat-impl.c), at a path keyed
+//! by the device's ids for a tool with no serial. GNOME 48 changed their
+//! defaults from passing the evdev code through to "right" for the lower
+//! button (BTN_STYLUS) and "middle" for the upper one (BTN_STYLUS2;
+//! gsettings-desktop-schemas f25d3e7c), the opposite of what GTK, Xwayland,
+//! Chromium and KWin make of the bare codes. So the pen writes both actions
+//! for its own tool (lower: middle, upper: right), which gives every client
+//! the code the pen pressed on any GNOME, and resets them when it goes away.
+//!
 //! Lifecycle: created on first use, the pen leaves proximity after
 //! [HOVER_LIFETIME], and both devices go away after
 //! [crate::agent_seat::IDLE_LIFETIME] without use, or when the server exits.
@@ -71,6 +81,9 @@ const AXIS_MAX: i32 = 65535;
 const PRESSURE_MAX: i32 = 4095;
 const MAPPING_TIMEOUT: Duration = Duration::from_secs(3);
 const STEP: Duration = Duration::from_millis(12);
+/// libinput ignores a touchscreen paired with a pen for 90 ms after the pen
+/// leaves proximity.
+const TOUCH_AFTER_PEN: Duration = Duration::from_millis(150);
 
 const PEN_NAME: &str = "computer-use-linux virtual pen";
 const TOUCH_NAME: &str = "computer-use-linux virtual touch";
@@ -462,8 +475,9 @@ pub(crate) fn pan_bounds(window: &Rect, monitor: &Rect) -> Rect {
 pub(crate) enum PenButton {
     /// The tip.
     Tip,
-    /// BTN_STYLUS, the lower barrel button: a middle click (GTK and
-    /// Xwayland map it to button 2, as xf86-input-wacom does).
+    /// BTN_STYLUS, the lower barrel button: a middle click. GTK, Xwayland,
+    /// Chromium and KWin map it to button 2, as xf86-input-wacom does; the
+    /// pen's button actions keep mutter from rewriting it.
     Lower,
     /// BTN_STYLUS2, the upper barrel button: a right click (button 3).
     Upper,
@@ -814,10 +828,44 @@ fn gvariant_string(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
+/// The settings of the pen's tool: a uinput pen has no serial, so mutter
+/// keys them by the device's vendor and product id.
+fn stylus_settings() -> String {
+    format!(
+        "org.gnome.desktop.peripherals.tablet.stylus:/org/gnome/desktop/peripherals/stylus/default-{VENDOR:04x}:{PEN_PRODUCT:04x}/"
+    )
+}
+
+/// The pen's button actions, so mutter hands clients the evdev code the pen
+/// pressed (BTN_STYLUS: middle, BTN_STYLUS2: right) whatever the GNOME
+/// version's defaults are. Written before the device exists: mutter reads
+/// them when the tool first enters proximity.
+const STYLUS_ACTIONS: [(&str, &str); 2] = [
+    ("button-action", "middle"),
+    ("secondary-button-action", "right"),
+];
+
+fn set_stylus_actions() -> Result<()> {
+    for (key, value) in STYLUS_ACTIONS {
+        gsettings_set(&stylus_settings(), key, value)?;
+    }
+    Ok(())
+}
+
+fn reset_stylus_actions() {
+    for (key, _) in STYLUS_ACTIONS {
+        gsettings_reset(&stylus_settings(), key);
+    }
+}
+
 fn set_output(kind: Kind, output: [&str; 4]) -> Result<()> {
     let value = format!("[{}]", output.map(gvariant_string).join(", "));
+    gsettings_set(&kind.settings(), "output", &value)
+}
+
+fn gsettings_set(settings: &str, key: &str, value: &str) -> Result<()> {
     let status = std::process::Command::new("gsettings")
-        .args(["set", &kind.settings(), "output", &value])
+        .args(["set", settings, key, value])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -825,8 +873,7 @@ fn set_output(kind: Kind, output: [&str; 4]) -> Result<()> {
         .context("failed to run gsettings")?;
     if !status.status.success() {
         bail!(
-            "gsettings set {} output failed: {}",
-            kind.settings(),
+            "gsettings set {settings} {key} failed: {}",
             String::from_utf8_lossy(&status.stderr).trim()
         );
     }
@@ -834,8 +881,12 @@ fn set_output(kind: Kind, output: [&str; 4]) -> Result<()> {
 }
 
 fn reset_output(kind: Kind) {
+    gsettings_reset(&kind.settings(), "output");
+}
+
+fn gsettings_reset(settings: &str, key: &str) {
     let _ = std::process::Command::new("gsettings")
-        .args(["reset", &kind.settings(), "output"])
+        .args(["reset", settings, key])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -856,6 +907,7 @@ impl Drop for Pen {
         if self.wrote_output {
             reset_output(Kind::Pen);
         }
+        reset_stylus_actions();
     }
 }
 
@@ -1073,7 +1125,14 @@ fn run_pen(
 ) -> std::result::Result<(), PenError> {
     if devices.pen.is_none() {
         reset_output(Kind::Pen);
+        set_stylus_actions().map_err(|error| {
+            reset_stylus_actions();
+            PenError::NoRoute(format!(
+                "the pen's button actions could not be set: {error:#}"
+            ))
+        })?;
         let (device, node) = create(Kind::Pen).map_err(|error| {
+            reset_stylus_actions();
             PenError::NoRoute(format!("the virtual pen could not be made: {error:#}"))
         })?;
         devices.pen = Some(Pen {
@@ -1171,6 +1230,19 @@ fn run_touch(
             node,
             wrote_output: false,
         });
+    }
+    // libinput pairs a tablet with the first touchscreen it sees and, for a
+    // pen with no tilt, drops every touch while the pen is in proximity
+    // (evdev-tablet.c, tablet_toggle_touch_device), and for 90 ms after it
+    // leaves (evdev-fallback.c, the arbitration timer). Lift a hovering pen
+    // first and wait that out.
+    if let Some(pen) = devices.pen.as_mut() {
+        if pen.events.in_proximity {
+            pen.events
+                .leave()
+                .map_err(|error| PenError::NotSent(format!("{error:#}")))?;
+            std::thread::sleep(TOUCH_AFTER_PEN);
+        }
     }
     let touch = devices.touch.as_mut().expect("touch was just made");
     let area = covering_area(
