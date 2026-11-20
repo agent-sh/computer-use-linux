@@ -783,7 +783,8 @@ fn kwin_window_script_source(
                 return true;
             }}
             var current = workspace.currentActivity;
-            if (typeof current !== "string") {{
+            // "" when no activity manager runs.
+            if (typeof current !== "string" || current === "") {{
                 return null;
             }}
             return Array.prototype.indexOf.call(activities, current) >= 0;
@@ -2876,5 +2877,75 @@ mod transaction_tests {
         drop(service_connection);
         drop(client_connection);
         drop(bus);
+    }
+}
+
+#[cfg(test)]
+mod pen_stacking_tests {
+    use super::parse_kwin_windows_stacked;
+
+    fn window(uuid: &str, extra: &str) -> String {
+        let mut window = serde_json::json!({
+            "uuid": format!("{{{uuid}}}"), "caption": uuid, "x": 0, "y": 0, "width": 100,
+            "height": 100, "minimized": false, "onCurrentDesktop": true,
+            "onCurrentActivity": true, "hidden": false,
+        });
+        if !extra.is_empty() {
+            let more: serde_json::Value =
+                serde_json::from_str(&format!("{{{}}}", &extra[1..])).unwrap();
+            for (key, value) in more.as_object().unwrap() {
+                window[key] = value.clone();
+            }
+        }
+        window.to_string()
+    }
+
+    #[test]
+    fn the_stacked_list_holds_only_visible_windows_bottom_to_top() {
+        let windows = [
+            window("00000000-0000-0000-0000-000000000001", ""),
+            window("00000000-0000-0000-0000-000000000002", r#","hidden":true"#),
+            window(
+                "00000000-0000-0000-0000-000000000003",
+                r#","onCurrentActivity":false"#,
+            ),
+            window(
+                "00000000-0000-0000-0000-000000000004",
+                r#","onCurrentDesktop":false"#,
+            ),
+            window(
+                "00000000-0000-0000-0000-000000000005",
+                r#","minimized":true"#,
+            ),
+            window(
+                "00000000-0000-0000-0000-000000000006",
+                r#","onCurrentActivity":null"#,
+            ),
+            window(
+                "00000000-0000-0000-0000-000000000007",
+                r#","desktopWindow":true"#,
+            ),
+        ];
+        // Listed in reverse, stacked in order: the stacking order wins.
+        let stacking = (1..=7)
+            .map(|n| format!(r#""{{00000000-0000-0000-0000-00000000000{n}}}""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let json = format!(
+            r#"{{"windows":[{}],"stacking":[{stacking}]}}"#,
+            windows.iter().rev().cloned().collect::<Vec<_>>().join(",")
+        );
+        let stacked = parse_kwin_windows_stacked(&json).unwrap();
+        let titles: Vec<_> = stacked
+            .iter()
+            .map(|window| (window.title.clone().unwrap(), window.workspace))
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                ("00000000-0000-0000-0000-000000000001".to_string(), None),
+                ("00000000-0000-0000-0000-000000000006".to_string(), Some(-1)),
+            ]
+        );
     }
 }

@@ -552,6 +552,7 @@ pub(crate) fn check_point_on_visible_target(
         .ok_or_else(|| {
             format!("window_id {target_id} is not on the desktop the user sees, or is minimized or hidden")
         })?;
+    // workspace is Some(-1) where KWin did not say (kwin::windows_stacked).
     if target.workspace.is_some() {
         return Err(format!(
             "KWin did not say whether window_id {target_id} is on the desktop and activity the user sees"
@@ -1448,6 +1449,13 @@ fn kwin_covering_area(
     }
     match kind {
         Kind::Pen => {
+            // A relative tool moves from its last position, not to the point.
+            if let Ok(relative) = kwin_device_get(connection, path.as_str(), "tabletToolIsRelative")
+            {
+                if bool::try_from(&relative).unwrap_or(true) {
+                    bail!("KWin runs the virtual pen in relative mode");
+                }
+            }
             let mapped = || -> Result<bool> {
                 bool::try_from(kwin_device_get(
                     connection,
@@ -1764,7 +1772,9 @@ pub(crate) async fn kwin_blocker() -> Option<String> {
         "tileseditor",
         "cube",
     ];
-    let connection = zbus::Connection::session().await.ok()?;
+    let Ok(connection) = zbus::Connection::session().await else {
+        return Some("no session bus to reach KWin".to_string());
+    };
     let get = |path: &'static str, interface: &'static str, property: &'static str| {
         let connection = connection.clone();
         async move {
@@ -1813,23 +1823,32 @@ pub(crate) async fn kwin_blocker() -> Option<String> {
         }
         None => return Some("KWin's activeEffects did not answer".to_string()),
     }
-    let pid = tokio::time::timeout(
-        Duration::from_secs(2),
-        connection.call_method(
-            Some("org.freedesktop.DBus"),
-            "/org/freedesktop/DBus",
-            Some("org.freedesktop.DBus"),
-            "GetConnectionUnixProcessID",
-            &("org.kde.KWin",),
-        ),
-    )
-    .await
-    .ok()?
-    .ok()?
-    .body()
-    .deserialize::<u32>()
-    .ok()?;
-    let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    let pid = async {
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            connection.call_method(
+                Some("org.freedesktop.DBus"),
+                "/org/freedesktop/DBus",
+                Some("org.freedesktop.DBus"),
+                "GetConnectionUnixProcessID",
+                &("org.kde.KWin",),
+            ),
+        )
+        .await
+        .ok()?
+        .ok()?
+        .body()
+        .deserialize::<u32>()
+        .ok()
+    }
+    .await;
+    let Some(environ) = pid.and_then(|pid| std::fs::read(format!("/proc/{pid}/environ")).ok())
+    else {
+        return Some(
+            "KWin's environment could not be read to rule out KWIN_WAYLAND_EMULATE_TABLET"
+                .to_string(),
+        );
+    };
     let emulated = environ.split(|byte| *byte == 0).any(|entry| {
         entry
             .strip_prefix(b"KWIN_WAYLAND_EMULATE_TABLET=")
