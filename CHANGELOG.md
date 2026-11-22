@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.60] - 2026-11-22
+
 ### Fixed
 
 - Background `click`, `drag` and `scroll` on KDE Plasma Wayland were refused when `/usr/bin/kwin_wayland` carried file capabilities such as `cap_sys_nice=ep` (Fedora and other distros): a non-dumpable process leaves `/proc/<pid>/environ` root-only, so the `KWIN_WAYLAND_EMULATE_TABLET` check failed closed. When KWin's own environment is unreadable, the server now reads KWin's `kwin_wayland_wrapper` parent (or `org.kde.KWinWrapper` when `/proc/<pid>` is hidden), a direct `Xwayland` child of KWin, or KWin's systemd user `.service` unit before refusing ([#498](https://github.com/agent-sh/computer-use-linux/issues/498)).
@@ -1265,7 +1267,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.59...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.60...HEAD
+[0.7.60]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.59...v0.7.60
 [0.7.59]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.58...v0.7.59
 [0.7.58]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.57...v0.7.58
 [0.7.57]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.56...v0.7.57
