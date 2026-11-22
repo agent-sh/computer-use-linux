@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Background `click`, `drag` and `scroll` on KDE Plasma Wayland were refused when `/usr/bin/kwin_wayland` carried file capabilities such as `cap_sys_nice=ep` (Fedora and other distros): a non-dumpable process leaves `/proc/<pid>/environ` root-only, so the `KWIN_WAYLAND_EMULATE_TABLET` check failed closed. When KWin's own environment is unreadable, the server now reads KWin's `kwin_wayland_wrapper` parent (or `org.kde.KWinWrapper` when `/proc/<pid>` is hidden), a direct `Xwayland` child of KWin, or KWin's systemd user `.service` unit before refusing ([#498](https://github.com/agent-sh/computer-use-linux/issues/498)).
+
 ## [0.7.59] - 2026-11-20
 
 ### Added

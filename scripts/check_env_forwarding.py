@@ -60,6 +60,7 @@ NOT_ENVIRONMENT = {
     "IHDR": "PNG chunk type",
     "KITTY_LISTEN_ON": "read from the environment of a process on the target tty, not the server's",
     "KITTY_WINDOW_ID": "read from the environment of a process on the target tty, not the server's",
+    "KWIN_WAYLAND_EMULATE_TABLET": "read from KWin's environment, not the server's",
     "PICTURES": "xdg-user-dir argument",
     "SCREEN": "GNU screen's server process name",
     "XK_": "X keysym name prefix",
