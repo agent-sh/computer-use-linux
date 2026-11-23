@@ -68,7 +68,7 @@ The crate was extracted from [`codex-desktop-linux`](https://github.com/avifenes
 | | `setup_accessibility` | Enables and verifies GNOME's `org.gnome.desktop.interface toolkit-accessibility` setting so toolkit apps expose AT-SPI trees. |
 | | `setup_window_targeting` | Installs and enables the bundled GNOME Shell extension. GNOME Wayland needs it for exact window activation and move/resize; every GNOME session needs it for the on-screen indicator. |
 | **Discovery & observation** | `get_app_state` | Combined screenshot + compacted AT-SPI accessibility tree with stable `element_index` handles. Scope with `app_name_or_bundle_identifier` or a window target (`window_id`, `pid`, `app_id`, `wm_class`, `title`). |
-| | `get_tree_page` | Page through the latest cached tree by node offset, for trees too large to return inline when the host cannot read the spill file. Pass `snapshot_id` to refuse a page from a tree a later snapshot replaced. |
+| | `get_tree_page` | Page through the latest cached tree by node offset, for trees too large to return inline when the host cannot read the spill file. Pass `snapshot_id` to refuse a page from a tree a later snapshot replaced. Search the snapshot instead of paging all of it with `query` (text in a node's name, text or description), `role` and `within` (an `element_index` subtree). |
 | | `screenshot` | Bounded PNG or JPEG capture of the full desktop (`full_screen: true` or no target), a raised and cropped target window (`window_id`, `pid`, `app_id`, `wm_class`, `title`, `raise_window`), or one monitor (`monitor`, a 0-based index in reading order: rows of monitors top to bottom, each row left to right) at its own resolution, with its origin in the caption for click coordinates. |
 | | `list_windows` | Compositor windows with `window_id`, title, `app_id`, `wm_class`, PID, focus state, client type (`wayland`/`x11`), bounds, and terminal TTY/process metadata. |
 | | `focused_window` | The window currently holding keyboard focus. |
@@ -89,6 +89,17 @@ Every tree result carries a `snapshot_id`: `get_app_state`, an `include_tree` ob
 
 `click`, `scroll`, `perform_action`, and `set_value` take an optional app target (`pid`, `window_id`, `app_id`, `wm_class`, `window_title`). With one, an `element_index` (or a selector, where the tool takes one) from another app's `get_app_state` snapshot is refused; call `get_app_state` for the target app first. When the window backend reports no pid for a target window (i3 without `xprop`, COSMIC, other wlroots compositors), the snapshot must have been taken for that window, or the call is refused. `perform_action` and `set_value` do not focus the target window. An `element_identifier` is refused when its owner on the accessibility bus is a different pid than the target; it is not checked when either pid is unknown.
 
+### Low-token trees and searching the snapshot
+
+For long sessions, such as web research, keep the tree out of the result and ask the snapshot for what you need:
+
+- `tree_detail` on `get_app_state`, on `get_tree_page` and on post-action `include_tree` picks the node encoding: `"minimal"` (index, role, name, text that differs from the name, a value, and states other than routine ones such as `enabled`, `visible` and `showing`), `"compact"` (the default) or `"full"`. `element_index` values are the same in every encoding.
+- `max_tree_bytes` on `get_app_state` and post-action `include_tree` caps the inline tree in bytes (default and ceiling 32000). `0` returns no nodes: the call still reads the desktop, caches the whole tree under a new `snapshot_id` and writes the spill file, and errors, warnings, truncation and the readiness block are returned as usual. The message says how many nodes were kept and where the tree is.
+- `get_tree_page` takes `query`, `role` and `within` to return only matching nodes of the cached snapshot, in tree order, without reading the desktop again. `within` is applied to the whole tree first, so a plain container (a results list, an article) bounds the search even when the interactive view leaves it out.
+- `interactive_only` on `get_app_state` keeps the whole tree beside the interactive view it returns. Actions are unchanged: `element_index` values and selectors resolve against the interactive view, as before. `get_tree_page` pages that view by default; pass `interactive_only: false`, `query`, `role` or `within` to read the whole tree, including page text and containers the view leaves out. A hit on a node outside the view (a price, say) is evidence to read, not a target: act on interactive nodes such as the link next to it.
+
+A research step is then a refresh and a search, for example `get_app_state {app_name_or_bundle_identifier, include_screenshot: false, interactive_only: true, tree_detail: "minimal", max_tree_bytes: 0}` followed by `get_tree_page {snapshot_id, query: "£", interactive_only: false, tree_detail: "minimal"}`. On an eBay search and listing sequence (find the search box, search, read titles and prices, open a listing, read its title and price) this moved about 41 KB of tool results instead of about 404 KB with `get_app_state` and `get_tree_page` paging.
+
 ### Post-action observation in one round trip
 
 All mutating tools (`click`, `drag`, `scroll`, `press_key`, `type_text`, `perform_action`, `set_value`, `activate_window`, `move_window`, and `resize_window`) accept optional post-action observation parameters so an action and its verification complete in a single MCP tool call:
@@ -97,6 +108,7 @@ All mutating tools (`click`, `drag`, `scroll`, `press_key`, `type_text`, `perfor
 - `format`, `quality`, `scale`, `max_width`, `max_height`, `max_bytes`: same screenshot payload controls as `screenshot` and `get_app_state`
 - `screenshot_file_path`: save the post-action screenshot to this new file instead of returning it as image content (see [Screenshot files](#screenshot-files))
 - `include_tree: true`: include a fresh compacted AT-SPI accessibility tree and its `snapshot_id`; it replaces the cached tree, so later `element_index` values come from it
+- `tree_detail`, `max_tree_bytes`: encoding and inline byte cap of that tree; `max_tree_bytes: 0` caches it without returning nodes (see [Low-token trees](#low-token-trees-and-searching-the-snapshot))
 
 When post-action screenshot capture succeeds, the image is returned as the first MCP `image` content block alongside the JSON action summary and `screenshot` metadata. If the action succeeds (`ok: true`) and only the post-action screenshot or tree capture fails, `ok` remains `true` and the error is reported in `screenshot_error` / `accessibility_error` and appended to `message`.
 

@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.60";
-export const GENERATED_TOOL_CATALOG_HASH = "de04450abc876a3712849d85daad7b80ed6656e1ddf21e2bfd16e94712b4247c";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "26a00c32301af2704aeaf97fe3cb58f9429e255305ad4e17efd50db506cd6717";
+export const GENERATED_TOOL_CATALOG_HASH = "406daa7be37e2ee1822d209d9a1b139543c978e43633b824585e52c4912e0490";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "c38f69040644930a9df8e29a77af78a783485a27146a80a0bca261ef23eaf61a";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -22,6 +22,26 @@ export const GENERATED_MCP_TOOLS =
     "description": "Focus a Linux desktop window by window_id, pid, app_id, wm_class, title, or terminal selectors when the compositor permits it. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
+        "NodeDetail": {
+          "description": "How much of each node a result carries.",
+          "oneOf": [
+            {
+              "const": "minimal",
+              "description": "index, role, name, text that differs from the name, a value, and only\nthe states that tell nodes apart (focused, checked, expanded, ...).\nThe smallest encoding; element_index actions work on it unchanged.",
+              "type": "string"
+            },
+            {
+              "const": "compact",
+              "description": "Empty and default fields left out; actions by name.",
+              "type": "string"
+            },
+            {
+              "const": "full",
+              "description": "Every field, with action descriptions and keybindings.",
+              "type": "string"
+            }
+          ]
+        },
         "ScreenshotOutputFormat": {
           "enum": [
             "png",
@@ -68,6 +88,14 @@ export const GENERATED_MCP_TOOLS =
         },
         "max_height": {
           "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_tree_bytes": {
+          "description": "Most bytes of include_tree nodes to return inline. 0 returns none: the\nwhole tree is still cached, so get_tree_page searches it and\nelement_index actions work on it. The action's own result is unchanged.",
           "minimum": 0,
           "type": [
             "integer",
@@ -166,6 +194,17 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "tree_detail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeDetail"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Node encoding of the include_tree tree: \"minimal\", \"compact\" (the\ndefault) or \"full\". get_tree_page pages it in the same encoding."
+        },
         "tty": {
           "default": null,
           "description": "Terminal tty: /dev/pts/N, pts/N or N.",
@@ -225,6 +264,26 @@ export const GENERATED_MCP_TOOLS =
             {
               "const": "background",
               "description": "Leave the user's keyboard focus alone and deliver through a route the\ncall names.",
+              "type": "string"
+            }
+          ]
+        },
+        "NodeDetail": {
+          "description": "How much of each node a result carries.",
+          "oneOf": [
+            {
+              "const": "minimal",
+              "description": "index, role, name, text that differs from the name, a value, and only\nthe states that tell nodes apart (focused, checked, expanded, ...).\nThe smallest encoding; element_index actions work on it unchanged.",
+              "type": "string"
+            },
+            {
+              "const": "compact",
+              "description": "Empty and default fields left out; actions by name.",
+              "type": "string"
+            },
+            {
+              "const": "full",
+              "description": "Every field, with action descriptions and keybindings.",
               "type": "string"
             }
           ]
@@ -318,6 +377,14 @@ export const GENERATED_MCP_TOOLS =
         },
         "max_height": {
           "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_tree_bytes": {
+          "description": "Most bytes of include_tree nodes to return inline. 0 returns none: the\nwhole tree is still cached, so get_tree_page searches it and\nelement_index actions work on it. The action's own result is unchanged.",
           "minimum": 0,
           "type": [
             "integer",
@@ -431,6 +498,17 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "tree_detail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeDetail"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Node encoding of the include_tree tree: \"minimal\", \"compact\" (the\ndefault) or \"full\". get_tree_page pages it in the same encoding."
+        },
         "window_id": {
           "default": null,
           "description": "Window id from a recent list_windows. The first target field set\ndecides, in this order: window_id, pid, app_id, wm_class, window_title.",
@@ -519,6 +597,26 @@ export const GENERATED_MCP_TOOLS =
             }
           ]
         },
+        "NodeDetail": {
+          "description": "How much of each node a result carries.",
+          "oneOf": [
+            {
+              "const": "minimal",
+              "description": "index, role, name, text that differs from the name, a value, and only\nthe states that tell nodes apart (focused, checked, expanded, ...).\nThe smallest encoding; element_index actions work on it unchanged.",
+              "type": "string"
+            },
+            {
+              "const": "compact",
+              "description": "Empty and default fields left out; actions by name.",
+              "type": "string"
+            },
+            {
+              "const": "full",
+              "description": "Every field, with action descriptions and keybindings.",
+              "type": "string"
+            }
+          ]
+        },
         "ScreenshotOutputFormat": {
           "enum": [
             "png",
@@ -587,6 +685,14 @@ export const GENERATED_MCP_TOOLS =
         },
         "max_height": {
           "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_tree_bytes": {
+          "description": "Most bytes of include_tree nodes to return inline. 0 returns none: the\nwhole tree is still cached, so get_tree_page searches it and\nelement_index actions work on it. The action's own result is unchanged.",
           "minimum": 0,
           "type": [
             "integer",
@@ -662,6 +768,17 @@ export const GENERATED_MCP_TOOLS =
           "format": "int32",
           "type": "integer"
         },
+        "tree_detail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeDetail"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Node encoding of the include_tree tree: \"minimal\", \"compact\" (the\ndefault) or \"full\". get_tree_page pages it in the same encoding."
+        },
         "window_id": {
           "default": null,
           "description": "Window id from a recent list_windows: the window a background drag\nruns in. The first target field set decides, in this order:\nwindow_id, pid, app_id, wm_class, window_title. A drag with\n\"focus\" delivery ignores the target.",
@@ -720,9 +837,29 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "Get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Nodes are compact (empty fields left out, actions by name; verbose=true returns every field). Pass interactive_only=true for only actionable nodes, headings and status regions, with the same element_index values. A title or window_id target narrows an app with several windows under one AT-SPI root (Chromium) to that window, keeping the app's popups and dialogs. A window-targeted screenshot needs that window visible and already focused (outside Hyprland background mode); otherwise screenshot_error is set and the tree still returns, so use the screenshot tool to raise and capture it. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. The result's snapshot_id names the tree: element_index and selector actions that pass it are refused once a later tree replaced it. Screenshot results always include coordinate_width, coordinate_height, scale, and format, plus quality for jpeg; callers can request jpeg/quality for compression before resizing. Pass screenshot_file_path (an absolute path to a new file, stdio only; an existing path is refused) to save the screenshot there instead of returning image content; screenshot.file_path then names it.",
+    "description": "Get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Nodes are compact (empty fields left out, actions by name; verbose=true returns every field). Pass interactive_only=true for only actionable nodes, headings and status regions, with the same element_index values. A title or window_id target narrows an app with several windows under one AT-SPI root (Chromium) to that window, keeping the app's popups and dialogs. A window-targeted screenshot needs that window visible and already focused (outside Hyprland background mode); otherwise screenshot_error is set and the tree still returns, so use the screenshot tool to raise and capture it. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. The result's snapshot_id names the tree: element_index and selector actions that pass it are refused once a later tree replaced it. Screenshot results always include coordinate_width, coordinate_height, scale, and format, plus quality for jpeg; callers can request jpeg/quality for compression before resizing. Pass screenshot_file_path (an absolute path to a new file, stdio only; an existing path is refused) to save the screenshot there instead of returning image content; screenshot.file_path then names it. For low-token use pass tree_detail=\"minimal\" and max_tree_bytes (0 returns no nodes yet still caches the whole tree under the snapshot_id), then search the snapshot with get_tree_page query, role or within.",
     "inputSchema": {
       "$defs": {
+        "NodeDetail": {
+          "description": "How much of each node a result carries.",
+          "oneOf": [
+            {
+              "const": "minimal",
+              "description": "index, role, name, text that differs from the name, a value, and only\nthe states that tell nodes apart (focused, checked, expanded, ...).\nThe smallest encoding; element_index actions work on it unchanged.",
+              "type": "string"
+            },
+            {
+              "const": "compact",
+              "description": "Empty and default fields left out; actions by name.",
+              "type": "string"
+            },
+            {
+              "const": "full",
+              "description": "Every field, with action descriptions and keybindings.",
+              "type": "string"
+            }
+          ]
+        },
         "ScreenshotOutputFormat": {
           "enum": [
             "png",
@@ -771,7 +908,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "interactive_only": {
           "default": null,
-          "description": "Return only nodes that can be acted on (an action, editable text, or a\nvalue), plus headings, status/live regions, windows and dialogs.\nContainers are collapsed: each node's parent_index points at its\nnearest kept ancestor. element_index values are the same as in the full\ntree, so they work with click, perform_action and set_value.",
+          "description": "Return only nodes that can be acted on (an action, editable text, or a\nvalue), plus headings, status/live regions, windows and dialogs.\nContainers are collapsed: each node's parent_index points at its\nnearest kept ancestor. element_index values are the same as in the full\ntree, so they work with click, perform_action and set_value.\nThe full tree is still cached: get_tree_page with\ninteractive_only=false (or a query) reads text this view leaves out.",
           "type": [
             "boolean",
             "null"
@@ -807,6 +944,15 @@ export const GENERATED_MCP_TOOLS =
         "max_nodes": {
           "default": null,
           "description": "Maximum raw AT-SPI nodes to inspect before compaction (default 1000, hard max 10000).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_tree_bytes": {
+          "default": null,
+          "description": "Most bytes of tree nodes to return inline (default and cap 32000).\n0 returns no nodes: the call still reads and caches the whole tree\nunder a new snapshot_id, so get_tree_page searches it (query, role,\nwithin) and element_index actions work on it. Errors, warnings and the\nreadiness block are returned as usual.",
           "minimum": 0,
           "type": [
             "integer",
@@ -891,6 +1037,18 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "tree_detail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeDetail"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Node encoding: \"minimal\" (index, role, name, text, value and\ndistinguishing states only; the smallest), \"compact\" (the default), or\n\"full\". Overrides the node encoding verbose would choose; verbose still\nadds the diagnostics report."
+        },
         "tty": {
           "default": null,
           "description": "Terminal tty device (for example /dev/pts/3). Resolves a window target\nand scopes the tree when possible.",
@@ -937,10 +1095,40 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "Return a page of the accessibility tree from the latest get_app_state or include_tree snapshot, starting at node offset (default 0). Use it when a tree was too large to return inline (accessibility_tree_spill is set) and the host cannot read the spill file; page with next_offset until it is null. Element indices match the snapshot, so element_index actions work on these nodes. Pass the snapshot's snapshot_id to refuse a page from a tree a later snapshot replaced. It does not read the desktop again.",
+    "description": "Return a page of the accessibility tree from the latest get_app_state or include_tree snapshot, starting at node offset (default 0). Use it when a tree was too large to return inline (accessibility_tree_spill is set) and the host cannot read the spill file; page with next_offset until it is null. Element indices match the snapshot, so element_index actions work on these nodes. Pass the snapshot's snapshot_id to refuse a page from a tree a later snapshot replaced. It does not read the desktop again. To search instead of paging everything, pass query (text in a node's name, text or description), role, or within (an element_index whose subtree to read); with tree_detail=\"minimal\" a search returns only the matching text. The cache holds the whole tree even after get_app_state interactive_only, so interactive_only=false reads page text that view left out.",
     "inputSchema": {
+      "$defs": {
+        "NodeDetail": {
+          "description": "How much of each node a result carries.",
+          "oneOf": [
+            {
+              "const": "minimal",
+              "description": "index, role, name, text that differs from the name, a value, and only\nthe states that tell nodes apart (focused, checked, expanded, ...).\nThe smallest encoding; element_index actions work on it unchanged.",
+              "type": "string"
+            },
+            {
+              "const": "compact",
+              "description": "Empty and default fields left out; actions by name.",
+              "type": "string"
+            },
+            {
+              "const": "full",
+              "description": "Every field, with action descriptions and keybindings.",
+              "type": "string"
+            }
+          ]
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "interactive_only": {
+          "default": null,
+          "description": "Page only interactive nodes (true) or the whole cached tree (false).\nDefaults to how the snapshot was returned, so a get_app_state\ninteractive_only result pages the same way; pass false to read text\nthat view left out.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "offset": {
           "default": null,
           "description": "First node to return, counted from the start of the cached tree (default 0).",
@@ -950,11 +1138,48 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "query": {
+          "default": null,
+          "description": "Return only nodes whose name, text or description contains this,\nignoring case (for example a price symbol, a product word, or a\nheading). The offset counts matching nodes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "default": null,
+          "description": "Return only nodes whose role contains this, ignoring case (for example\nheading, link, or entry).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "snapshot_id": {
           "default": null,
           "description": "snapshot_id of the get_app_state or include_tree result being paged.\nIf a later snapshot replaced it, no nodes are returned.",
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "tree_detail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeDetail"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Node encoding for this page: \"minimal\", \"compact\" or \"full\". Defaults\nto the encoding of the snapshot."
+        },
+        "within": {
+          "default": null,
+          "description": "Return only this element_index and the nodes below it, such as one\nresult list or article.",
+          "minimum": 0,
+          "type": [
+            "integer",
             "null"
           ]
         }
@@ -1001,6 +1226,26 @@ export const GENERATED_MCP_TOOLS =
     "description": "Move a window to a new desktop position (frame top-left in desktop coordinates). Useful to recover windows that are partially off-screen. Works only through the computer-use-linux GNOME Shell extension or a generic X11/EWMH window manager (wmctrl); other window backends refuse it. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
+        "NodeDetail": {
+          "description": "How much of each node a result carries.",
+          "oneOf": [
+            {
+              "const": "minimal",
+              "description": "index, role, name, text that differs from the name, a value, and only\nthe states that tell nodes apart (focused, checked, expanded, ...).\nThe smallest encoding; element_index actions work on it unchanged.",
+              "type": "string"
+            },
+            {
+              "const": "compact",
+              "description": "Empty and default fields left out; actions by name.",
+              "type": "string"
+            },
+            {
+              "const": "full",
+              "description": "Every field, with action descriptions and keybindings.",
+              "type": "string"
+            }
+          ]
+        },
         "ScreenshotOutputFormat": {
           "enum": [
             "png",
@@ -1047,6 +1292,14 @@ export const GENERATED_MCP_TOOLS =
         },
         "max_height": {
           "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_tree_bytes": {
+          "description": "Most bytes of include_tree nodes to return inline. 0 returns none: the\nwhole tree is still cached, so get_tree_page searches it and\nelement_index actions work on it. The action's own result is unchanged.",
           "minimum": 0,
           "type": [
             "integer",
@@ -1145,6 +1398,17 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "tree_detail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeDetail"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Node encoding of the include_tree tree: \"minimal\", \"compact\" (the\ndefault) or \"full\". get_tree_page pages it in the same encoding."
+        },
         "tty": {
           "default": null,
           "description": "Terminal tty: /dev/pts/N, pts/N or N.",
@@ -1200,6 +1464,26 @@ export const GENERATED_MCP_TOOLS =
     "description": "Invoke an accessibility action exposed by an element selected by index, identifier, or semantic selector. Defaults to the primary action unless action is provided. A stale semantic target can recover once with verified process/window ownership. Recovery invalidates cached indices; call get_app_state before further element_index actions. Pass the target app (pid, window_id, app_id, wm_class, or window_title, as for click) to refuse an element_index or selector from another app's or window's get_app_state snapshot, and an element_identifier owned by another pid; the window is not focused. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
+        "NodeDetail": {
+          "description": "How much of each node a result carries.",
+          "oneOf": [
+            {
+              "const": "minimal",
+              "description": "index, role, name, text that differs from the name, a value, and only\nthe states that tell nodes apart (focused, checked, expanded, ...).\nThe smallest encoding; element_index actions work on it unchanged.",
+              "type": "string"
+            },
+            {
+              "const": "compact",
+              "description": "Empty and default fields left out; actions by name.",
+              "type": "string"
+            },
+            {
+              "const": "full",
+              "description": "Every field, with action descriptions and keybindings.",
+              "type": "string"
+            }
+          ]
+        },
         "ScreenshotOutputFormat": {
           "enum": [
             "png",
@@ -1271,6 +1555,14 @@ export const GENERATED_MCP_TOOLS =
         },
         "max_height": {
           "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_tree_bytes": {
+          "description": "Most bytes of include_tree nodes to return inline. 0 returns none: the\nwhole tree is still cached, so get_tree_page searches it and\nelement_index actions work on it. The action's own result is unchanged.",
           "minimum": 0,
           "type": [
             "integer",
@@ -1376,6 +1668,17 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "tree_detail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeDetail"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Node encoding of the include_tree tree: \"minimal\", \"compact\" (the\ndefault) or \"full\". get_tree_page pages it in the same encoding."
+        },
         "window_id": {
           "default": null,
           "description": "Window id from a recent list_windows. The first target field set\ndecides, in this order: window_id, pid, app_id, wm_class, window_title.",
@@ -1428,6 +1731,26 @@ export const GENERATED_MCP_TOOLS =
             {
               "const": "background",
               "description": "Leave the user's keyboard focus alone and deliver through a route the\ncall names.",
+              "type": "string"
+            }
+          ]
+        },
+        "NodeDetail": {
+          "description": "How much of each node a result carries.",
+          "oneOf": [
+            {
+              "const": "minimal",
+              "description": "index, role, name, text that differs from the name, a value, and only\nthe states that tell nodes apart (focused, checked, expanded, ...).\nThe smallest encoding; element_index actions work on it unchanged.",
+              "type": "string"
+            },
+            {
+              "const": "compact",
+              "description": "Empty and default fields left out; actions by name.",
+              "type": "string"
+            },
+            {
+              "const": "full",
+              "description": "Every field, with action descriptions and keybindings.",
               "type": "string"
             }
           ]
@@ -1519,6 +1842,14 @@ export const GENERATED_MCP_TOOLS =
         },
         "max_height": {
           "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_tree_bytes": {
+          "description": "Most bytes of include_tree nodes to return inline. 0 returns none: the\nwhole tree is still cached, so get_tree_page searches it and\nelement_index actions work on it. The action's own result is unchanged.",
           "minimum": 0,
           "type": [
             "integer",
@@ -1649,6 +1980,17 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "tree_detail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeDetail"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Node encoding of the include_tree tree: \"minimal\", \"compact\" (the\ndefault) or \"full\". get_tree_page pages it in the same encoding."
+        },
         "tty": {
           "default": null,
           "description": "Terminal tty: /dev/pts/N, pts/N or N.",
@@ -1693,6 +2035,26 @@ export const GENERATED_MCP_TOOLS =
     "description": "Resize a window in desktop pixels, unmaximizing it first if needed. Useful to fit a window fully on-screen. Through the computer-use-linux GNOME Shell extension, width and height set the frame; through a generic X11/EWMH window manager (wmctrl), they set the client area, and decorations add to it. Other window backends refuse it. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
+        "NodeDetail": {
+          "description": "How much of each node a result carries.",
+          "oneOf": [
+            {
+              "const": "minimal",
+              "description": "index, role, name, text that differs from the name, a value, and only\nthe states that tell nodes apart (focused, checked, expanded, ...).\nThe smallest encoding; element_index actions work on it unchanged.",
+              "type": "string"
+            },
+            {
+              "const": "compact",
+              "description": "Empty and default fields left out; actions by name.",
+              "type": "string"
+            },
+            {
+              "const": "full",
+              "description": "Every field, with action descriptions and keybindings.",
+              "type": "string"
+            }
+          ]
+        },
         "ScreenshotOutputFormat": {
           "enum": [
             "png",
@@ -1744,6 +2106,14 @@ export const GENERATED_MCP_TOOLS =
         },
         "max_height": {
           "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_tree_bytes": {
+          "description": "Most bytes of include_tree nodes to return inline. 0 returns none: the\nwhole tree is still cached, so get_tree_page searches it and\nelement_index actions work on it. The action's own result is unchanged.",
           "minimum": 0,
           "type": [
             "integer",
@@ -1841,6 +2211,17 @@ export const GENERATED_MCP_TOOLS =
             "string",
             "null"
           ]
+        },
+        "tree_detail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeDetail"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Node encoding of the include_tree tree: \"minimal\", \"compact\" (the\ndefault) or \"full\". get_tree_page pages it in the same encoding."
         },
         "tty": {
           "default": null,
@@ -2066,6 +2447,26 @@ export const GENERATED_MCP_TOOLS =
             }
           ]
         },
+        "NodeDetail": {
+          "description": "How much of each node a result carries.",
+          "oneOf": [
+            {
+              "const": "minimal",
+              "description": "index, role, name, text that differs from the name, a value, and only\nthe states that tell nodes apart (focused, checked, expanded, ...).\nThe smallest encoding; element_index actions work on it unchanged.",
+              "type": "string"
+            },
+            {
+              "const": "compact",
+              "description": "Empty and default fields left out; actions by name.",
+              "type": "string"
+            },
+            {
+              "const": "full",
+              "description": "Every field, with action descriptions and keybindings.",
+              "type": "string"
+            }
+          ]
+        },
         "ScreenshotOutputFormat": {
           "enum": [
             "png",
@@ -2137,6 +2538,14 @@ export const GENERATED_MCP_TOOLS =
         },
         "max_height": {
           "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_tree_bytes": {
+          "description": "Most bytes of include_tree nodes to return inline. 0 returns none: the\nwhole tree is still cached, so get_tree_page searches it and\nelement_index actions work on it. The action's own result is unchanged.",
           "minimum": 0,
           "type": [
             "integer",
@@ -2229,6 +2638,17 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "tree_detail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeDetail"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Node encoding of the include_tree tree: \"minimal\", \"compact\" (the\ndefault) or \"full\". get_tree_page pages it in the same encoding."
+        },
         "window_id": {
           "default": null,
           "description": "Window id from a recent list_windows. The first target field set\ndecides, in this order: window_id, pid, app_id, wm_class, window_title.",
@@ -2291,6 +2711,26 @@ export const GENERATED_MCP_TOOLS =
     "description": "Set the value of a settable accessibility element selected by index, identifier, or semantic selector. Editable-text writes are verified by exact readback; password fields are explicitly unverifiable. Pass the target app (pid, window_id, app_id, wm_class, or window_title, as for click) to refuse an element_index or selector from another app's or window's get_app_state snapshot, and an element_identifier owned by another pid; the window is not focused. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
+        "NodeDetail": {
+          "description": "How much of each node a result carries.",
+          "oneOf": [
+            {
+              "const": "minimal",
+              "description": "index, role, name, text that differs from the name, a value, and only\nthe states that tell nodes apart (focused, checked, expanded, ...).\nThe smallest encoding; element_index actions work on it unchanged.",
+              "type": "string"
+            },
+            {
+              "const": "compact",
+              "description": "Empty and default fields left out; actions by name.",
+              "type": "string"
+            },
+            {
+              "const": "full",
+              "description": "Every field, with action descriptions and keybindings.",
+              "type": "string"
+            }
+          ]
+        },
         "ScreenshotOutputFormat": {
           "enum": [
             "png",
@@ -2354,6 +2794,14 @@ export const GENERATED_MCP_TOOLS =
         },
         "max_height": {
           "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_tree_bytes": {
+          "description": "Most bytes of include_tree nodes to return inline. 0 returns none: the\nwhole tree is still cached, so get_tree_page searches it and\nelement_index actions work on it. The action's own result is unchanged.",
           "minimum": 0,
           "type": [
             "integer",
@@ -2459,6 +2907,17 @@ export const GENERATED_MCP_TOOLS =
             "null"
           ]
         },
+        "tree_detail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeDetail"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Node encoding of the include_tree tree: \"minimal\", \"compact\" (the\ndefault) or \"full\". get_tree_page pages it in the same encoding."
+        },
         "value": {
           "description": "A value that parses as a floating-point number (such as 5, -2.5, 1e3,\ninf or NaN, with no surrounding spaces) sets an element with the\nAT-SPI Value interface (slider, spin button). Otherwise the text\nreplaces an editable text element's contents. Text on a Value-only\nelement is refused.",
           "type": "string"
@@ -2550,6 +3009,26 @@ export const GENERATED_MCP_TOOLS =
             }
           ]
         },
+        "NodeDetail": {
+          "description": "How much of each node a result carries.",
+          "oneOf": [
+            {
+              "const": "minimal",
+              "description": "index, role, name, text that differs from the name, a value, and only\nthe states that tell nodes apart (focused, checked, expanded, ...).\nThe smallest encoding; element_index actions work on it unchanged.",
+              "type": "string"
+            },
+            {
+              "const": "compact",
+              "description": "Empty and default fields left out; actions by name.",
+              "type": "string"
+            },
+            {
+              "const": "full",
+              "description": "Every field, with action descriptions and keybindings.",
+              "type": "string"
+            }
+          ]
+        },
         "ScreenshotOutputFormat": {
           "enum": [
             "png",
@@ -2633,6 +3112,14 @@ export const GENERATED_MCP_TOOLS =
         },
         "max_height": {
           "description": "Maximum returned post-action screenshot height in pixels (default 1920, hard-capped).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_tree_bytes": {
+          "description": "Most bytes of include_tree nodes to return inline. 0 returns none: the\nwhole tree is still cached, so get_tree_page searches it and\nelement_index actions work on it. The action's own result is unchanged.",
           "minimum": 0,
           "type": [
             "integer",
@@ -2766,6 +3253,17 @@ export const GENERATED_MCP_TOOLS =
             "string",
             "null"
           ]
+        },
+        "tree_detail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeDetail"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Node encoding of the include_tree tree: \"minimal\", \"compact\" (the\ndefault) or \"full\". get_tree_page pages it in the same encoding."
         },
         "tty": {
           "default": null,

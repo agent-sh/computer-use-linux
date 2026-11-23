@@ -99,6 +99,10 @@ struct CachedAccessibilitySnapshot {
     /// Encoding of the result the nodes were returned in; get_tree_page pages
     /// them in the same one.
     detail: NodeDetail,
+    /// The whole compacted tree, when `nodes` is the interactive_only view
+    /// of it. Only get_tree_page reads it: actions resolve against `nodes`,
+    /// exactly as before this field existed.
+    search_nodes: Option<Vec<AccessibilityNode>>,
     /// The AT-SPI window the tree was narrowed to, when the app exposes
     /// several windows under one root. A post-action tree with no window
     /// target of its own keeps the same scope.
@@ -198,6 +202,9 @@ impl ElementObservationTarget {
 struct TreeShape {
     detail: NodeDetail,
     window_scope: Option<String>,
+    /// The whole compacted tree when the stored nodes are its interactive_only
+    /// view, kept for get_tree_page searches only.
+    search_tree: Option<Vec<AccessibilityNode>>,
 }
 
 /// Whether an action brought its target window to the front, so a
@@ -526,7 +533,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "get_tree_page",
-        description = "Return a page of the accessibility tree from the latest get_app_state or include_tree snapshot, starting at node offset (default 0). Use it when a tree was too large to return inline (accessibility_tree_spill is set) and the host cannot read the spill file; page with next_offset until it is null. Element indices match the snapshot, so element_index actions work on these nodes. Pass the snapshot's snapshot_id to refuse a page from a tree a later snapshot replaced. It does not read the desktop again.",
+        description = "Return a page of the accessibility tree from the latest get_app_state or include_tree snapshot, starting at node offset (default 0). Use it when a tree was too large to return inline (accessibility_tree_spill is set) and the host cannot read the spill file; page with next_offset until it is null. Element indices match the snapshot, so element_index actions work on these nodes. Pass the snapshot's snapshot_id to refuse a page from a tree a later snapshot replaced. It does not read the desktop again. To search instead of paging everything, pass query (text in a node's name, text or description), role, or within (an element_index whose subtree to read); with tree_detail=\"minimal\" a search returns only the matching text. The cache holds the whole tree even after get_app_state interactive_only, so interactive_only=false reads page text that view left out.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -538,11 +545,21 @@ impl ComputerUseLinux {
         &self,
         Parameters(params): Parameters<GetTreePageParams>,
     ) -> Json<GetTreePageOutput> {
-        let (id, nodes, detail) = self
+        let (id, nodes, search_nodes, cached_detail) = self
             .last_snapshot
             .lock()
-            .map(|snapshot| (snapshot.id.clone(), snapshot.nodes.clone(), snapshot.detail))
+            .map(|snapshot| {
+                (
+                    snapshot.id.clone(),
+                    snapshot.nodes.clone(),
+                    snapshot.search_nodes.clone(),
+                    snapshot.detail,
+                )
+            })
             .unwrap_or_default();
+        let detail = params.tree_detail.unwrap_or(cached_detail);
+        let cached_interactive = search_nodes.is_some();
+        let interactive_only = params.interactive_only.unwrap_or(cached_interactive);
         let offset = params.offset.unwrap_or(0);
         let checked = self
             .require_snapshot_id("get_tree_page", params.snapshot_id.as_deref())
@@ -563,7 +580,33 @@ impl ComputerUseLinux {
                 message,
             });
         }
+        // Without a filter, and in the view the snapshot was returned in, page
+        // the cached nodes exactly as before. Anything else is read from the
+        // whole tree, so non-interactive text and containers stay searchable.
+        let filtered = params.has_filter() || interactive_only != cached_interactive;
+        let whole = search_nodes.unwrap_or(nodes.clone());
+        let cached_count = whole.len();
+        let nodes = if filtered {
+            tree_page_view(whole, interactive_only, &params)
+        } else {
+            nodes
+        };
         let mut page = tree_page(&nodes, detail, offset);
+        if filtered && cached_count > 0 && nodes.is_empty() {
+            page.message = format!(
+                "None of the {cached_count} cached nodes match; widen the query, role or within, or pass interactive_only=false."
+            );
+        } else if filtered && cached_count > 0 {
+            page.message.push_str(&format!(
+                " {} of the {cached_count} cached nodes match{}.",
+                nodes.len(),
+                if params.has_filter() {
+                    " the filters"
+                } else {
+                    " the interactive view"
+                }
+            ));
+        }
         page.snapshot_id = (!id.is_empty()).then_some(id);
         Json(page)
     }
@@ -683,7 +726,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "get_app_state",
         output_schema = rmcp::handler::server::tool::schema_for_output::<GetAppStateOutput>(),
-        description = "Get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Nodes are compact (empty fields left out, actions by name; verbose=true returns every field). Pass interactive_only=true for only actionable nodes, headings and status regions, with the same element_index values. A title or window_id target narrows an app with several windows under one AT-SPI root (Chromium) to that window, keeping the app's popups and dialogs. A window-targeted screenshot needs that window visible and already focused (outside Hyprland background mode); otherwise screenshot_error is set and the tree still returns, so use the screenshot tool to raise and capture it. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. The result's snapshot_id names the tree: element_index and selector actions that pass it are refused once a later tree replaced it. Screenshot results always include coordinate_width, coordinate_height, scale, and format, plus quality for jpeg; callers can request jpeg/quality for compression before resizing. Pass screenshot_file_path (an absolute path to a new file, stdio only; an existing path is refused) to save the screenshot there instead of returning image content; screenshot.file_path then names it.",
+        description = "Get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Nodes are compact (empty fields left out, actions by name; verbose=true returns every field). Pass interactive_only=true for only actionable nodes, headings and status regions, with the same element_index values. A title or window_id target narrows an app with several windows under one AT-SPI root (Chromium) to that window, keeping the app's popups and dialogs. A window-targeted screenshot needs that window visible and already focused (outside Hyprland background mode); otherwise screenshot_error is set and the tree still returns, so use the screenshot tool to raise and capture it. A tree too large to return inline is written whole to the private file in accessibility_tree_spill. The result's snapshot_id names the tree: element_index and selector actions that pass it are refused once a later tree replaced it. Screenshot results always include coordinate_width, coordinate_height, scale, and format, plus quality for jpeg; callers can request jpeg/quality for compression before resizing. Pass screenshot_file_path (an absolute path to a new file, stdio only; an existing path is refused) to save the screenshot there instead of returning image content; screenshot.file_path then names it. For low-token use pass tree_detail=\"minimal\" and max_tree_bytes (0 returns no nodes yet still caches the whole tree under the snapshot_id), then search the snapshot with get_tree_page query, role or within.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -830,7 +873,15 @@ impl ComputerUseLinux {
         let mut unmatched_pid_note = None;
         let mut window_scope = None;
         let mut interactive_note = None;
-        let detail = NodeDetail::from_verbose(verbose);
+        let detail = params
+            .tree_detail
+            .unwrap_or_else(|| NodeDetail::from_verbose(verbose));
+        let interactive_only = params.interactive_only.unwrap_or(false);
+        let max_tree_bytes = params.max_tree_bytes;
+        // interactive_only trims the result and the nodes actions resolve
+        // against, as before; the whole tree is kept beside them so
+        // get_tree_page can still search the page's text.
+        let mut search_tree: Option<Vec<AccessibilityNode>> = None;
         let (accessibility_tree, accessibility_tree_raw_count, accessibility_error, tree_read) =
             if diagnostics.readiness.can_build_accessibility_tree {
                 let target_pid = accessibility_snapshot_target_pid(
@@ -875,9 +926,10 @@ impl ComputerUseLinux {
                             accessibility_tree_truncated,
                         );
                         shell_only_note = note;
-                        let nodes = if params.interactive_only.unwrap_or(false) {
+                        let nodes = if interactive_only {
                             let compacted = nodes.len();
-                            let nodes = interactive_accessibility_tree(nodes);
+                            let (nodes, whole) = interactive_view_and_search_tree(nodes);
+                            search_tree = Some(whole);
                             interactive_note = Some(format!(
                                 "interactive_only kept {} of {compacted} compacted nodes; element_index values match the full tree.",
                                 nodes.len()
@@ -949,6 +1001,7 @@ impl ComputerUseLinux {
                     TreeShape {
                         detail,
                         window_scope: window_scope.clone(),
+                        search_tree: search_tree.take(),
                     },
                 )
                 .await;
@@ -1067,10 +1120,11 @@ impl ComputerUseLinux {
         // The tree gets whatever the rest of the result leaves of the budget.
         let rest = serde_json::to_string(&output).map_or(0, |json| json.len());
         let mut accessibility_tree = TreeNodes::new(accessibility_tree, detail);
-        let (spill, note) = fit_tree(
+        let (spill, note) = fit_tree_capped(
             &self.tree_spiller,
             &mut accessibility_tree,
             tree_budget(rest),
+            max_tree_bytes,
         );
         output.accessibility_tree = accessibility_tree;
         output.accessibility_tree_spill = spill;
@@ -4598,6 +4652,15 @@ struct PostActionCaptureParams {
     /// is true, call get_app_state with a higher max_nodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     include_tree: Option<bool>,
+    /// Node encoding of the include_tree tree: "minimal", "compact" (the
+    /// default) or "full". get_tree_page pages it in the same encoding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tree_detail: Option<NodeDetail>,
+    /// Most bytes of include_tree nodes to return inline. 0 returns none: the
+    /// whole tree is still cached, so get_tree_page searches it and
+    /// element_index actions work on it. The action's own result is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_tree_bytes: Option<usize>,
 }
 
 /// The fields of a tool call that decide whether its screenshot_file_path
@@ -4978,8 +5041,23 @@ struct GetAppStateParams {
     /// Containers are collapsed: each node's parent_index points at its
     /// nearest kept ancestor. element_index values are the same as in the full
     /// tree, so they work with click, perform_action and set_value.
+    /// The full tree is still cached: get_tree_page with
+    /// interactive_only=false (or a query) reads text this view leaves out.
     #[serde(default)]
     interactive_only: Option<bool>,
+    /// Node encoding: "minimal" (index, role, name, text, value and
+    /// distinguishing states only; the smallest), "compact" (the default), or
+    /// "full". Overrides the node encoding verbose would choose; verbose still
+    /// adds the diagnostics report.
+    #[serde(default)]
+    tree_detail: Option<NodeDetail>,
+    /// Most bytes of tree nodes to return inline (default and cap 32000).
+    /// 0 returns no nodes: the call still reads and caches the whole tree
+    /// under a new snapshot_id, so get_tree_page searches it (query, role,
+    /// within) and element_index actions work on it. Errors, warnings and the
+    /// readiness block are returned as usual.
+    #[serde(default)]
+    max_tree_bytes: Option<usize>,
 }
 
 impl GetAppStateParams {
@@ -5220,6 +5298,102 @@ struct GetTreePageParams {
     /// If a later snapshot replaced it, no nodes are returned.
     #[serde(default)]
     snapshot_id: Option<String>,
+    /// Return only nodes whose name, text or description contains this,
+    /// ignoring case (for example a price symbol, a product word, or a
+    /// heading). The offset counts matching nodes.
+    #[serde(default)]
+    query: Option<String>,
+    /// Return only nodes whose role contains this, ignoring case (for example
+    /// heading, link, or entry).
+    #[serde(default)]
+    role: Option<String>,
+    /// Return only this element_index and the nodes below it, such as one
+    /// result list or article.
+    #[serde(default)]
+    within: Option<u32>,
+    /// Page only interactive nodes (true) or the whole cached tree (false).
+    /// Defaults to how the snapshot was returned, so a get_app_state
+    /// interactive_only result pages the same way; pass false to read text
+    /// that view left out.
+    #[serde(default)]
+    interactive_only: Option<bool>,
+    /// Node encoding for this page: "minimal", "compact" or "full". Defaults
+    /// to the encoding of the snapshot.
+    #[serde(default)]
+    tree_detail: Option<NodeDetail>,
+}
+
+impl GetTreePageParams {
+    fn has_filter(&self) -> bool {
+        self.query.as_deref().is_some_and(|query| !query.is_empty())
+            || self.role.as_deref().is_some_and(|role| !role.is_empty())
+            || self.within.is_some()
+    }
+}
+
+/// The view of a cached (whole) tree that get_tree_page pages, in tree order:
+/// the `within` subtree, read on the whole tree so a container the
+/// interactive view drops still bounds it; then the interactive view when
+/// asked; then the role and query matches.
+fn tree_page_view(
+    nodes: Vec<AccessibilityNode>,
+    interactive_only: bool,
+    params: &GetTreePageParams,
+) -> Vec<AccessibilityNode> {
+    let nodes = match params.within {
+        // Nodes come in traversal order, so a parent is seen before its children.
+        Some(within) => {
+            let mut inside = std::collections::HashSet::new();
+            nodes
+                .into_iter()
+                .filter(|node| {
+                    let below = node.index == within
+                        || node
+                            .parent_index
+                            .is_some_and(|parent| inside.contains(&parent));
+                    if below {
+                        inside.insert(node.index);
+                    }
+                    below
+                })
+                .collect()
+        }
+        None => nodes,
+    };
+    let nodes = if interactive_only {
+        interactive_accessibility_tree(nodes)
+    } else {
+        nodes
+    };
+    let query = params
+        .query
+        .as_deref()
+        .filter(|query| !query.is_empty())
+        .map(str::to_lowercase);
+    let role = params
+        .role
+        .as_deref()
+        .filter(|role| !role.is_empty())
+        .map(str::to_lowercase);
+    nodes
+        .into_iter()
+        .filter(|node| {
+            let role_matches = role
+                .as_deref()
+                .is_none_or(|role| node.role.to_lowercase().contains(role));
+            let query_matches = query.as_deref().is_none_or(|query| {
+                [
+                    node.name.as_deref(),
+                    node.description.as_deref(),
+                    node.text.as_ref().and_then(|text| text.content.as_deref()),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|field| field.to_lowercase().contains(query))
+            });
+            role_matches && query_matches
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -6755,6 +6929,7 @@ impl ComputerUseLinux {
     ) {
         let screenshot_scope = capture.screenshot_scope();
         let include_tree = capture.include_tree.unwrap_or(false);
+        let tree_detail = capture.tree_detail.unwrap_or_default();
         if screenshot_scope.is_none() && !include_tree {
             return (PostActionObservation::default(), None, Vec::new());
         }
@@ -7034,6 +7209,7 @@ impl ComputerUseLinux {
                             snapshot.root_pid,
                             tree_window,
                             snapshot.window_scope.clone(),
+                            tree_detail,
                         )
                         .await,
                     );
@@ -7057,11 +7233,12 @@ impl ComputerUseLinux {
                     if let Some(note) = shell_only_note {
                         notes.push(note.to_string());
                     }
-                    let mut nodes = TreeNodes::from(nodes);
-                    let (spill, spill_note) = fit_tree(
+                    let mut nodes = TreeNodes::new(nodes, tree_detail);
+                    let (spill, spill_note) = fit_tree_capped(
                         &self.tree_spiller,
                         &mut nodes,
                         tree_budget(POST_ACTION_RESULT_RESERVE),
+                        capture.max_tree_bytes,
                     );
                     notes.extend(spill_note);
                     observation.accessibility_tree_spill = spill;
@@ -8513,6 +8690,7 @@ impl ComputerUseLinux {
         target_pid: Option<u32>,
         window: Option<(u64, String)>,
         window_scope: Option<String>,
+        detail: NodeDetail,
     ) -> String {
         let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         self.store_snapshot_for(
@@ -8521,7 +8699,8 @@ impl ComputerUseLinux {
             None,
             window,
             TreeShape {
-                detail: NodeDetail::Compact,
+                detail,
+                search_tree: None,
                 window_scope,
             },
         )
@@ -8617,6 +8796,7 @@ impl ComputerUseLinux {
                 window_backend: window.map(|(_, backend)| backend),
                 recovery_scope,
                 detail: shape.detail,
+                search_nodes: shape.search_tree,
                 window_scope: shape.window_scope,
             };
         }
@@ -10097,6 +10277,36 @@ fn tree_budget(rest: usize) -> usize {
     crate::tree_spill::INLINE_RESULT_BYTES.saturating_sub(rest + SPILL_NOTE_RESERVE)
 }
 
+/// fit_tree under a caller's max_tree_bytes cap. The cap only trims what the
+/// result carries: the snapshot was already cached whole, so get_tree_page
+/// searches it, and its element_index values stay valid for actions. Without
+/// a cap this is fit_tree.
+fn fit_tree_capped(
+    spiller: &crate::tree_spill::TreeSpiller,
+    tree: &mut TreeNodes,
+    budget: usize,
+    max_tree_bytes: Option<usize>,
+) -> (Option<crate::tree_spill::TreeSpill>, Option<String>) {
+    let Some(cap) = max_tree_bytes.filter(|&cap| cap < budget) else {
+        return fit_tree(spiller, tree, budget);
+    };
+    let total = tree.len();
+    match fit_tree(spiller, tree, cap) {
+        (None, None) => (None, None),
+        (spill, _) => {
+            let file = spill
+                .as_ref()
+                .map(|spill| format!(" and in {}", spill.path))
+                .unwrap_or_default();
+            let note = format!(
+                "max_tree_bytes={cap} kept {} of {total} nodes inline. The whole tree is cached under this snapshot_id{file}: search it with get_tree_page (query, role, within), and act on its element_index values as usual.",
+                tree.len()
+            );
+            (spill, Some(note))
+        }
+    }
+}
+
 /// Keep `nodes` within the inline budget, spilling the whole tree to a private
 /// file when it does not fit. Returns the spill and a note for the message.
 fn fit_tree(
@@ -10204,6 +10414,14 @@ fn nearest_kept_parent(
 /// collapsed: a kept node's parent_index names its nearest kept ancestor and
 /// child_count counts kept children. Indices are not renumbered, so an
 /// element_index means the same node as in the full compacted tree.
+/// The interactive_only view get_app_state returns and actions resolve
+/// against, and the whole compacted tree kept beside it for get_tree_page.
+fn interactive_view_and_search_tree(
+    nodes: Vec<AccessibilityNode>,
+) -> (Vec<AccessibilityNode>, Vec<AccessibilityNode>) {
+    (interactive_accessibility_tree(nodes.clone()), nodes)
+}
+
 fn interactive_accessibility_tree(nodes: Vec<AccessibilityNode>) -> Vec<AccessibilityNode> {
     let position: std::collections::HashMap<u32, usize> = nodes
         .iter()
@@ -21508,6 +21726,7 @@ printf '0x00000007 0 %s 0 0 100 100 first.First host Target 7\n0x00000008 0 %s 0
                 None,
                 TreeShape {
                     detail: NodeDetail::Compact,
+                    search_tree: None,
                     window_scope: Some("Window 3".to_string()),
                 },
             );
@@ -23269,6 +23488,7 @@ mod node_target_scope_tests {
             Some(&window),
             TreeShape {
                 detail: NodeDetail::Compact,
+                search_tree: None,
                 window_scope: Some("Window 20".to_string()),
             },
         );
@@ -23325,6 +23545,7 @@ mod node_target_scope_tests {
             Some(&pidless_window(20)),
             TreeShape {
                 detail: NodeDetail::Compact,
+                search_tree: None,
                 window_scope: Some("Window 20".to_string()),
             },
         );
@@ -23497,6 +23718,7 @@ mod node_target_scope_tests {
                 Some(&window),
                 TreeShape {
                     detail: NodeDetail::Compact,
+                    search_tree: None,
                     window_scope: Some("Window 10".to_string()),
                 },
             );
@@ -23736,6 +23958,7 @@ mod node_target_scope_tests {
             Some(&window_20),
             TreeShape {
                 detail: NodeDetail::Compact,
+                search_tree: None,
                 window_scope: Some("Window 20".to_string()),
             },
         );
@@ -23785,6 +24008,7 @@ mod node_target_scope_tests {
             None,
             TreeShape {
                 detail: NodeDetail::Compact,
+                search_tree: None,
                 window_scope: Some("Window 20".to_string()),
             },
         );
@@ -23817,6 +24041,7 @@ mod node_target_scope_tests {
             Some(&window_10_other_backend),
             TreeShape {
                 detail: NodeDetail::Compact,
+                search_tree: None,
                 window_scope: Some("Window 10".to_string()),
             },
         );
@@ -23850,6 +24075,7 @@ mod node_target_scope_tests {
             Some(&windows[1]),
             TreeShape {
                 detail: NodeDetail::Compact,
+                search_tree: None,
                 window_scope: Some("PlanetScale".to_string()),
             },
         );
@@ -23937,6 +24163,7 @@ mod node_target_scope_tests {
                 None,
                 Some((20, "i3".to_string())),
                 Some("Window 20".to_string()),
+                NodeDetail::Compact,
             )
             .await;
 
@@ -25649,6 +25876,74 @@ mod tree_spill_server_tests {
         assert_eq!(page.nodes.len(), 1);
         assert_eq!(page.next_offset, Some(1));
     }
+
+    #[test]
+    fn max_tree_bytes_zero_returns_no_nodes_but_names_the_cached_tree() {
+        let (backend, root) = backend("cap-zero");
+        let tree: Vec<_> = (0..5).map(node).collect();
+        let mut inline = TreeNodes::new(tree.clone(), NodeDetail::Minimal);
+        let (spill, note) = fit_tree_capped(
+            &backend.tree_spiller,
+            &mut inline,
+            tree_budget(2_000),
+            Some(0),
+        );
+        assert!(inline.is_empty());
+        let spill = spill.expect("the capped tree is written to a file");
+        assert_eq!(spill.node_count, 5);
+        let note = note.unwrap();
+        assert!(
+            note.starts_with("max_tree_bytes=0 kept 0 of 5 nodes inline."),
+            "{note}"
+        );
+        assert!(note.contains("get_tree_page"), "{note}");
+        assert!(note.contains(&spill.path), "{note}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn max_tree_bytes_keeps_the_prefix_that_fits() {
+        let (backend, root) = backend("cap-prefix");
+        let tree: Vec<_> = (0..5).map(node).collect();
+        // Brackets, the first two nodes and the comma between them.
+        let two = 2
+            + crate::tree_encoding::node_json_len(&tree[0], NodeDetail::Compact)
+            + 1
+            + crate::tree_encoding::node_json_len(&tree[1], NodeDetail::Compact);
+        let mut inline = TreeNodes::new(tree, NodeDetail::Compact);
+        let (spill, note) = fit_tree_capped(
+            &backend.tree_spiller,
+            &mut inline,
+            tree_budget(2_000),
+            Some(two),
+        );
+        assert_eq!(inline.len(), 2);
+        assert!(spill.is_some());
+        assert!(note.unwrap().contains("kept 2 of 5 nodes inline"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn max_tree_bytes_omitted_or_above_the_budget_is_fit_tree() {
+        let small: Vec<_> = (0..3).map(node).collect();
+        for cap in [None, Some(usize::MAX)] {
+            let (backend, root) = backend("cap-none");
+            let mut inline = TreeNodes::new(small.clone(), NodeDetail::Compact);
+            let (spill, note) =
+                fit_tree_capped(&backend.tree_spiller, &mut inline, tree_budget(2_000), cap);
+            assert!(spill.is_none() && note.is_none());
+            assert_eq!(inline.len(), 3);
+
+            // A tree over the inline budget spills with fit_tree's own note.
+            let big: Vec<_> = (0..300).map(node).collect();
+            let mut inline = TreeNodes::new(big, NodeDetail::Compact);
+            let (spill, note) =
+                fit_tree_capped(&backend.tree_spiller, &mut inline, tree_budget(2_000), cap);
+            assert!(spill.is_some());
+            assert!(note.unwrap().contains("too large to return inline"));
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -26222,6 +26517,7 @@ mod snapshot_handle_tests {
                     .get_tree_page(Parameters(GetTreePageParams {
                         offset: None,
                         snapshot_id,
+                        ..Default::default()
                     }))
                     .await
                     .0
@@ -26330,6 +26626,7 @@ mod snapshot_handle_tests {
                 .get_tree_page(Parameters(GetTreePageParams {
                     offset: None,
                     snapshot_id: missing,
+                    ..Default::default()
                 }))
                 .await
                 .0;
@@ -26345,6 +26642,7 @@ mod snapshot_handle_tests {
             .get_tree_page(Parameters(GetTreePageParams {
                 offset: None,
                 snapshot_id: Some(id.clone()),
+                ..Default::default()
             }))
             .await
             .0;
@@ -26616,5 +26914,361 @@ mod type_text_atspi_fallback_tests {
             assert!(error.contains(code), "{error}");
             assert!(error.contains("press_key"), "{error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tree_page_search_tests {
+    use super::*;
+    use crate::atspi_tree::{AccessibilityAction, AccessibilityText};
+
+    fn node(
+        index: u32,
+        parent: Option<u32>,
+        depth: u32,
+        role: &str,
+        name: &str,
+    ) -> AccessibilityNode {
+        AccessibilityNode {
+            index,
+            parent_index: parent,
+            depth,
+            object_ref: format!(":1.{index}/node"),
+            role: role.to_string(),
+            name: (!name.is_empty()).then(|| name.to_string()),
+            description: None,
+            child_count: 0,
+            bounds: None,
+            states: vec!["enabled".into(), "visible".into(), "showing".into()],
+            actions: Vec::new(),
+            value: None,
+            text: None,
+            supports_editable_text: false,
+        }
+    }
+
+    fn link(index: u32, parent: u32, depth: u32, name: &str) -> AccessibilityNode {
+        AccessibilityNode {
+            actions: vec![AccessibilityAction {
+                index: 0,
+                name: "click".to_string(),
+                description: String::new(),
+                keybinding: String::new(),
+            }],
+            ..node(index, Some(parent), depth, "link", name)
+        }
+    }
+
+    fn static_text(index: u32, parent: u32, depth: u32, content: &str) -> AccessibilityNode {
+        AccessibilityNode {
+            text: Some(AccessibilityText {
+                character_count: content.chars().count() as i32,
+                caret_offset: None,
+                content: Some(content.to_string()),
+                truncated: false,
+                selections: Vec::new(),
+            }),
+            ..node(index, Some(parent), depth, "static", "")
+        }
+    }
+
+    /// A results page: a plain section holding one listing, and one more
+    /// listing outside it.
+    fn results_page() -> Vec<AccessibilityNode> {
+        vec![
+            node(0, None, 0, "application", "Google Chrome"),
+            node(1, Some(0), 1, "frame", "Results"),
+            node(2, Some(1), 2, "section", ""),
+            link(3, 2, 3, "Handmade biscuits"),
+            static_text(4, 2, 3, "£7.49"),
+            link(5, 1, 2, "Dog treats"),
+            static_text(6, 1, 2, "£3.30"),
+        ]
+    }
+
+    /// A backend whose cache holds `results_page` as get_app_state stores it
+    /// with interactive_only=`interactive_only`: the action view in `nodes`,
+    /// and the whole tree beside it when that view is filtered.
+    fn backend(interactive_only: bool) -> (ComputerUseLinux, String) {
+        let (nodes, search_tree) = if interactive_only {
+            let (view, whole) = interactive_view_and_search_tree(results_page());
+            (view, Some(whole))
+        } else {
+            (results_page(), None)
+        };
+        let backend = ComputerUseLinux::default();
+        let id = backend.store_snapshot(
+            &nodes,
+            None,
+            None,
+            None,
+            TreeShape {
+                detail: NodeDetail::Compact,
+                window_scope: None,
+                search_tree,
+            },
+        );
+        (backend, id)
+    }
+
+    /// The cache v0.7.60 kept for an interactive_only get_app_state: the
+    /// interactive view alone.
+    fn v0_7_60_interactive_backend() -> ComputerUseLinux {
+        let backend = ComputerUseLinux::default();
+        backend.cache_snapshot(&interactive_accessibility_tree(results_page()), None);
+        backend
+    }
+
+    fn click_target(
+        backend: &ComputerUseLinux,
+        element_index: Option<u32>,
+        selector: ElementSelector<'_>,
+    ) -> std::result::Result<AccessibilityNode, String> {
+        backend.resolve_cached_node(element_index, &selector, ElementResolvePurpose::Click)
+    }
+
+    /// Resolution results compared field by field that matter to an action.
+    fn outcome(
+        result: std::result::Result<AccessibilityNode, String>,
+    ) -> std::result::Result<(u32, String, Option<u32>), String> {
+        result.map(|node| (node.index, node.object_ref, node.parent_index))
+    }
+
+    #[test]
+    fn interactive_snapshot_resolves_element_index_exactly_as_v0_7_60() {
+        let (current, _) = backend(true);
+        let legacy = v0_7_60_interactive_backend();
+        for index in 0..=7 {
+            assert_eq!(
+                outcome(click_target(
+                    &current,
+                    Some(index),
+                    ElementSelector::default()
+                )),
+                outcome(click_target(
+                    &legacy,
+                    Some(index),
+                    ElementSelector::default()
+                )),
+                "element_index {index}"
+            );
+        }
+        // Non-interactive nodes (the section and the prices) stay refused.
+        for index in [2, 4, 6] {
+            assert!(click_target(&current, Some(index), ElementSelector::default()).is_err());
+        }
+        assert!(click_target(&current, Some(3), ElementSelector::default()).is_ok());
+    }
+
+    #[test]
+    fn interactive_snapshot_resolves_selectors_exactly_as_v0_7_60() {
+        let (current, _) = backend(true);
+        let legacy = v0_7_60_interactive_backend();
+        let selectors = [
+            ElementSelector {
+                role: Some("link"),
+                name: Some("dog"),
+                ..Default::default()
+            },
+            ElementSelector {
+                role: Some("link"),
+                ..Default::default()
+            },
+            ElementSelector {
+                text: Some("£7.49"),
+                ..Default::default()
+            },
+            ElementSelector {
+                role: Some("static"),
+                ..Default::default()
+            },
+            ElementSelector {
+                role: Some("section"),
+                ..Default::default()
+            },
+        ];
+        for selector in selectors {
+            assert_eq!(
+                outcome(click_target(&current, None, selector)),
+                outcome(click_target(&legacy, None, selector)),
+                "{selector:?}"
+            );
+        }
+        // Price text is not a target in the interactive snapshot ...
+        assert!(click_target(&current, None, selectors[2]).is_err());
+        // ... but is one in a whole-tree snapshot, as it always was.
+        let (whole, _) = backend(false);
+        assert_eq!(click_target(&whole, None, selectors[2]).unwrap().index, 4);
+    }
+
+    #[tokio::test]
+    async fn research_hit_on_a_link_is_clickable_in_the_interactive_snapshot() {
+        let (backend, id) = backend(true);
+        let links = page(
+            &backend,
+            GetTreePageParams {
+                snapshot_id: Some(id),
+                query: Some("biscuits".to_string()),
+                interactive_only: Some(false),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(indices(&links), [3]);
+        assert!(click_target(&backend, Some(3), ElementSelector::default()).is_ok());
+    }
+
+    async fn page(backend: &ComputerUseLinux, params: GetTreePageParams) -> GetTreePageOutput {
+        backend.get_tree_page(Parameters(params)).await.0
+    }
+
+    fn indices(page: &GetTreePageOutput) -> Vec<u32> {
+        page.nodes.iter().map(|node| node.index).collect()
+    }
+
+    #[tokio::test]
+    async fn interactive_snapshot_pages_its_view_but_caches_the_whole_tree() {
+        let (backend, _) = backend(true);
+        let default = page(&backend, GetTreePageParams::default()).await;
+        assert_eq!(indices(&default), [0, 1, 3, 5]);
+
+        // The default page is v0.7.60's, nodes and message alike.
+        let legacy = page(&v0_7_60_interactive_backend(), GetTreePageParams::default()).await;
+        assert_eq!(
+            serde_json::to_value(&default.nodes).unwrap(),
+            serde_json::to_value(&legacy.nodes).unwrap()
+        );
+        assert_eq!(default.message, legacy.message);
+        assert_eq!(default.node_count, legacy.node_count);
+
+        let whole = page(
+            &backend,
+            GetTreePageParams {
+                interactive_only: Some(false),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(indices(&whole), [0, 1, 2, 3, 4, 5, 6]);
+    }
+
+    #[tokio::test]
+    async fn unfiltered_page_is_unchanged() {
+        let (backend, id) = backend(false);
+        let whole = page(&backend, GetTreePageParams::default()).await;
+        assert_eq!(indices(&whole), [0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            whole.message,
+            "Nodes 0-6 of 7; this is the end of the tree."
+        );
+        assert_eq!(whole.snapshot_id, Some(id));
+    }
+
+    #[tokio::test]
+    async fn query_finds_page_text_an_interactive_view_left_out() {
+        let (backend, _) = backend(true);
+        let prices = page(
+            &backend,
+            GetTreePageParams {
+                query: Some("£".to_string()),
+                interactive_only: Some(false),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(indices(&prices), [4, 6]);
+
+        // In the interactive view the prices are not there to match.
+        let none = page(
+            &backend,
+            GetTreePageParams {
+                query: Some("£".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(none.nodes.is_empty());
+        assert!(
+            none.message.starts_with("None of the 7 cached nodes match"),
+            "{}",
+            none.message
+        );
+    }
+
+    #[tokio::test]
+    async fn query_ignores_case_and_reads_names() {
+        let (backend, _) = backend(false);
+        let found = page(
+            &backend,
+            GetTreePageParams {
+                query: Some("HANDMADE".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(indices(&found), [3]);
+    }
+
+    #[tokio::test]
+    async fn within_is_bounded_by_a_container_the_interactive_view_drops() {
+        let (backend, _) = backend(true);
+        let listing = page(
+            &backend,
+            GetTreePageParams {
+                within: Some(2),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(indices(&listing), [3]);
+
+        let whole_listing = page(
+            &backend,
+            GetTreePageParams {
+                within: Some(2),
+                interactive_only: Some(false),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(indices(&whole_listing), [2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn role_filter_and_minimal_detail() {
+        let (backend, _) = backend(false);
+        let links = page(
+            &backend,
+            GetTreePageParams {
+                role: Some("LINK".to_string()),
+                tree_detail: Some(NodeDetail::Minimal),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(
+            serde_json::to_value(&links.nodes).unwrap(),
+            serde_json::json!([
+                {"index": 3, "role": "link", "name": "Handmade biscuits"},
+                {"index": 5, "role": "link", "name": "Dog treats"},
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn filters_respect_a_replaced_snapshot_id() {
+        let (backend, id) = backend(false);
+        backend.cache_snapshot(&results_page(), None);
+        let stale = page(
+            &backend,
+            GetTreePageParams {
+                snapshot_id: Some(id),
+                query: Some("£".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(stale.nodes.is_empty());
+        assert_eq!(stale.snapshot_id, None);
     }
 }

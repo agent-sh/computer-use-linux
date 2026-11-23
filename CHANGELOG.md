@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `tree_detail` on `get_app_state`, `get_tree_page` and post-action `include_tree`: `"minimal"` returns each node as its index, role, name, text that differs from the name, value and distinguishing states only, beside `"compact"` (the default) and `"full"`. On an eBay results page it fit 328 interactive nodes in the inline budget where compact fit 112.
+- `max_tree_bytes` on `get_app_state` and post-action `include_tree` caps the inline tree; `0` returns no nodes while the whole tree is still read, cached under the new `snapshot_id` and written to the spill file. Errors, warnings, truncation and the readiness block are unchanged.
+- `get_app_state` with `interactive_only: true` also keeps the whole compacted tree beside the interactive view, for `get_tree_page` only: actions still resolve against the interactive view exactly as before.
+- `get_tree_page` searches the cached snapshot with `query` (case-insensitive text in a node's name, text or description), `role` and `within` (an `element_index` subtree, bounded on the whole tree), and takes `interactive_only` and `tree_detail`. Measured over an eBay search and listing sequence, tool results fell from about 404 KB (20 calls) to about 41 KB (15 calls).
+
 ## [0.7.60] - 2026-11-22
 
 ### Fixed
