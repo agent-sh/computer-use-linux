@@ -545,20 +545,34 @@ impl ComputerUseLinux {
         &self,
         Parameters(params): Parameters<GetTreePageParams>,
     ) -> Json<GetTreePageOutput> {
-        let (id, nodes, search_nodes, cached_detail) = self
+        // Copy only what this request reads: the cached nodes for an unfiltered
+        // page in the snapshot's own view (as before), the whole tree for a
+        // filter or the other view.
+        let (id, cached_detail, cached_interactive, nodes, whole) = self
             .last_snapshot
             .lock()
             .map(|snapshot| {
+                let cached_interactive = snapshot.search_nodes.is_some();
+                let interactive_only = params.interactive_only.unwrap_or(cached_interactive);
+                let filtered = params.has_filter() || interactive_only != cached_interactive;
+                let nodes = (!filtered || (interactive_only && cached_interactive))
+                    .then(|| snapshot.nodes.clone());
+                let whole = filtered.then(|| {
+                    snapshot
+                        .search_nodes
+                        .clone()
+                        .unwrap_or_else(|| snapshot.nodes.clone())
+                });
                 (
                     snapshot.id.clone(),
-                    snapshot.nodes.clone(),
-                    snapshot.search_nodes.clone(),
                     snapshot.detail,
+                    cached_interactive,
+                    nodes,
+                    whole,
                 )
             })
             .unwrap_or_default();
         let detail = params.tree_detail.unwrap_or(cached_detail);
-        let cached_interactive = search_nodes.is_some();
         let interactive_only = params.interactive_only.unwrap_or(cached_interactive);
         let offset = params.offset.unwrap_or(0);
         let checked = self
@@ -583,13 +597,22 @@ impl ComputerUseLinux {
         // Without a filter, and in the view the snapshot was returned in, page
         // the cached nodes exactly as before. Anything else is read from the
         // whole tree, so non-interactive text and containers stay searchable.
-        let filtered = params.has_filter() || interactive_only != cached_interactive;
-        let whole = search_nodes.unwrap_or(nodes.clone());
-        let cached_count = whole.len();
-        let nodes = if filtered {
-            tree_page_view(whole, interactive_only, &params)
-        } else {
-            nodes
+        let filtered = whole.is_some();
+        let (cached_count, nodes) = match whole {
+            Some(whole) => {
+                // The snapshot's own interactive view, when it was taken with
+                // interactive_only; otherwise the view is computed on the
+                // whole tree.
+                let interactive_view = nodes.filter(|_| interactive_only && cached_interactive);
+                (
+                    whole.len(),
+                    tree_page_view(whole, interactive_view, interactive_only, &params),
+                )
+            }
+            None => {
+                let nodes = nodes.unwrap_or_default();
+                (nodes.len(), nodes)
+            }
         };
         let mut page = tree_page(&nodes, detail, offset);
         if filtered && cached_count > 0 && nodes.is_empty() {
@@ -602,8 +625,10 @@ impl ComputerUseLinux {
                 nodes.len(),
                 if params.has_filter() {
                     " the filters"
-                } else {
+                } else if interactive_only {
                     " the interactive view"
+                } else {
+                    ": the whole tree"
                 }
             ));
         }
@@ -4663,6 +4688,18 @@ struct PostActionCaptureParams {
     max_tree_bytes: Option<usize>,
 }
 
+/// The tree-only capture perform_action and set_value take after their own
+/// screenshot: no screenshot fields, but the caller's tree encoding and
+/// inline byte cap.
+fn element_tree_capture(capture: &PostActionCaptureParams) -> PostActionCaptureParams {
+    PostActionCaptureParams {
+        include_tree: Some(true),
+        tree_detail: capture.tree_detail,
+        max_tree_bytes: capture.max_tree_bytes,
+        ..Default::default()
+    }
+}
+
 /// The fields of a tool call that decide whether its screenshot_file_path
 /// can be used.
 #[derive(Deserialize)]
@@ -5042,7 +5079,8 @@ struct GetAppStateParams {
     /// nearest kept ancestor. element_index values are the same as in the full
     /// tree, so they work with click, perform_action and set_value.
     /// The full tree is still cached: get_tree_page with
-    /// interactive_only=false (or a query) reads text this view leaves out.
+    /// interactive_only=false reads text this view leaves out; query, role
+    /// and within search the same view unless interactive_only=false is passed.
     #[serde(default)]
     interactive_only: Option<bool>,
     /// Node encoding: "minimal" (index, role, name, text, value and
@@ -5331,39 +5369,44 @@ impl GetTreePageParams {
     }
 }
 
-/// The view of a cached (whole) tree that get_tree_page pages, in tree order:
-/// the `within` subtree, read on the whole tree so a container the
-/// interactive view drops still bounds it; then the interactive view when
-/// asked; then the role and query matches.
+/// The nodes of a cached tree that get_tree_page pages, in tree order. The
+/// view is the interactive one when `interactive_only` (the snapshot's own,
+/// `interactive_view`, when it has one; otherwise computed on the whole tree)
+/// and the whole tree otherwise. `within` is resolved on the whole tree and
+/// then applied to that view, so a container the interactive view drops
+/// still bounds it, and interactive membership (live regions included) and
+/// parent_index values are those of the whole-tree view. Then role and query.
 fn tree_page_view(
-    nodes: Vec<AccessibilityNode>,
+    whole: Vec<AccessibilityNode>,
+    interactive_view: Option<Vec<AccessibilityNode>>,
     interactive_only: bool,
     params: &GetTreePageParams,
 ) -> Vec<AccessibilityNode> {
-    let nodes = match params.within {
-        // Nodes come in traversal order, so a parent is seen before its children.
-        Some(within) => {
-            let mut inside = std::collections::HashSet::new();
-            nodes
-                .into_iter()
-                .filter(|node| {
-                    let below = node.index == within
-                        || node
-                            .parent_index
-                            .is_some_and(|parent| inside.contains(&parent));
-                    if below {
-                        inside.insert(node.index);
-                    }
-                    below
-                })
-                .collect()
+    // Nodes come in traversal order, so a parent is seen before its children.
+    let inside: Option<std::collections::HashSet<u32>> = params.within.map(|within| {
+        let mut inside = std::collections::HashSet::new();
+        for node in &whole {
+            if node.index == within
+                || node
+                    .parent_index
+                    .is_some_and(|parent| inside.contains(&parent))
+            {
+                inside.insert(node.index);
+            }
         }
-        None => nodes,
-    };
+        inside
+    });
     let nodes = if interactive_only {
-        interactive_accessibility_tree(nodes)
+        interactive_view.unwrap_or_else(|| interactive_accessibility_tree(whole))
     } else {
-        nodes
+        whole
+    };
+    let nodes: Vec<AccessibilityNode> = match &inside {
+        Some(inside) => nodes
+            .into_iter()
+            .filter(|node| inside.contains(&node.index))
+            .collect(),
+        None => nodes,
     };
     let query = params
         .query
@@ -7302,10 +7345,7 @@ impl ComputerUseLinux {
             Ok(target) => {
                 // The dispatched element's scope was bound before the action.
                 // A later snapshot must not narrow its process to another window.
-                let tree_params = PostActionCaptureParams {
-                    include_tree: Some(true),
-                    ..Default::default()
-                };
+                let tree_params = element_tree_capture(capture);
                 // A screenshot of this action already waited the settle delay.
                 self.capture_post_action_observation_with(
                     &tree_params,
@@ -10291,20 +10331,22 @@ fn fit_tree_capped(
         return fit_tree(spiller, tree, budget);
     };
     let total = tree.len();
-    match fit_tree(spiller, tree, cap) {
-        (None, None) => (None, None),
-        (spill, _) => {
-            let file = spill
-                .as_ref()
-                .map(|spill| format!(" and in {}", spill.path))
-                .unwrap_or_default();
-            let note = format!(
-                "max_tree_bytes={cap} kept {} of {total} nodes inline. The whole tree is cached under this snapshot_id{file}: search it with get_tree_page (query, role, within), and act on its element_index values as usual.",
-                tree.len()
-            );
-            (spill, Some(note))
+    let detail = tree.detail;
+    let (spill, file) = match spiller.fit(&mut tree.nodes, detail, cap) {
+        Ok(None) => return (None, None),
+        Ok(Some(spill)) => {
+            let file = format!(" and in {}", spill.path);
+            (Some(spill), file)
         }
-    }
+        // The tree is still cached, so get_tree_page reaches it; say why the
+        // file the note would otherwise name is missing.
+        Err((_, error)) => (None, format!(" (writing it to a file failed: {error})")),
+    };
+    let note = format!(
+        "max_tree_bytes={cap} kept {} of {total} nodes inline. The whole tree is cached under this snapshot_id{file}: search it with get_tree_page (query, role, within), and act on its element_index values as usual.",
+        tree.len()
+    );
+    (spill, Some(note))
 }
 
 /// Keep `nodes` within the inline budget, spilling the whole tree to a private
@@ -27253,6 +27295,118 @@ mod tree_page_search_tests {
                 {"index": 5, "role": "link", "name": "Dog treats"},
             ])
         );
+    }
+
+    /// A status bar whose message sits in a plain section, as in Chromium:
+    /// the interactive view keeps the message because it is in a live region.
+    fn status_page() -> Vec<AccessibilityNode> {
+        vec![
+            node(0, None, 0, "application", "Google Chrome"),
+            node(1, Some(0), 1, "frame", "Editor"),
+            AccessibilityNode {
+                child_count: 1,
+                ..node(2, Some(1), 2, "status bar", "")
+            },
+            AccessibilityNode {
+                child_count: 1,
+                ..node(3, Some(2), 3, "section", "")
+            },
+            static_text(4, 3, 4, "Saved"),
+            link(5, 1, 2, "Next"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn within_keeps_the_snapshots_interactive_view_and_its_parents() {
+        let (view, whole) = interactive_view_and_search_tree(status_page());
+        let saved = view
+            .iter()
+            .find(|node| node.index == 4)
+            .expect("live-region text is in the view");
+        assert_eq!(saved.parent_index, Some(2));
+        let backend = ComputerUseLinux::default();
+        backend.store_snapshot(
+            &view,
+            None,
+            None,
+            None,
+            TreeShape {
+                detail: NodeDetail::Compact,
+                window_scope: None,
+                search_tree: Some(whole),
+            },
+        );
+        // The section is not in the interactive view, but it bounds the search,
+        // and the message keeps its place in that view.
+        let inside = page(
+            &backend,
+            GetTreePageParams {
+                within: Some(3),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(indices(&inside), [4]);
+        assert_eq!(inside.nodes[0].parent_index, Some(2));
+    }
+
+    #[tokio::test]
+    async fn paging_the_whole_tree_of_an_interactive_snapshot_says_so() {
+        let (backend, _) = backend(true);
+        let whole = page(
+            &backend,
+            GetTreePageParams {
+                interactive_only: Some(false),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(indices(&whole), [0, 1, 2, 3, 4, 5, 6]);
+        assert!(
+            whole
+                .message
+                .ends_with("7 of the 7 cached nodes match: the whole tree."),
+            "{}",
+            whole.message
+        );
+        assert!(
+            !whole.message.contains("interactive view"),
+            "{}",
+            whole.message
+        );
+    }
+
+    #[test]
+    fn element_observation_keeps_the_callers_tree_options() {
+        let capture = PostActionCaptureParams {
+            include_tree: Some(true),
+            tree_detail: Some(NodeDetail::Minimal),
+            max_tree_bytes: Some(0),
+            screenshot_after: Some(ScreenshotAfter::Enabled(true)),
+            ..Default::default()
+        };
+        let tree = element_tree_capture(&capture);
+        assert_eq!(tree.include_tree, Some(true));
+        assert_eq!(tree.tree_detail, Some(NodeDetail::Minimal));
+        assert_eq!(tree.max_tree_bytes, Some(0));
+        // The element's own screenshot was taken already.
+        assert!(tree.screenshot_scope().is_none());
+    }
+
+    #[test]
+    fn max_tree_bytes_reports_a_failed_spill_write() {
+        let spiller = crate::tree_spill::TreeSpiller::new(None);
+        let mut inline = TreeNodes::new(results_page(), NodeDetail::Minimal);
+        let (spill, note) = fit_tree_capped(&spiller, &mut inline, tree_budget(2_000), Some(0));
+        assert!(spill.is_none());
+        assert!(inline.is_empty());
+        let note = note.expect("a note explains the capped tree");
+        assert!(
+            note.starts_with("max_tree_bytes=0 kept 0 of 7 nodes inline."),
+            "{note}"
+        );
+        assert!(note.contains("writing it to a file failed"), "{note}");
+        assert!(note.contains("get_tree_page"), "{note}");
     }
 
     #[tokio::test]

@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.60";
-export const GENERATED_TOOL_CATALOG_HASH = "406daa7be37e2ee1822d209d9a1b139543c978e43633b824585e52c4912e0490";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "c38f69040644930a9df8e29a77af78a783485a27146a80a0bca261ef23eaf61a";
+export const GENERATED_TOOL_CATALOG_HASH = "1858f8172ef4e0aaf8586959650219446647f85d75d337d800443e71b177b48c";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "93538e829c770425f1ee9635506c86bf538bd807a69cb1fe5149696d3756c3f7";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -908,7 +908,7 @@ export const GENERATED_MCP_TOOLS =
         },
         "interactive_only": {
           "default": null,
-          "description": "Return only nodes that can be acted on (an action, editable text, or a\nvalue), plus headings, status/live regions, windows and dialogs.\nContainers are collapsed: each node's parent_index points at its\nnearest kept ancestor. element_index values are the same as in the full\ntree, so they work with click, perform_action and set_value.\nThe full tree is still cached: get_tree_page with\ninteractive_only=false (or a query) reads text this view leaves out.",
+          "description": "Return only nodes that can be acted on (an action, editable text, or a\nvalue), plus headings, status/live regions, windows and dialogs.\nContainers are collapsed: each node's parent_index points at its\nnearest kept ancestor. element_index values are the same as in the full\ntree, so they work with click, perform_action and set_value.\nThe full tree is still cached: get_tree_page with\ninteractive_only=false reads text this view leaves out; query, role\nand within search the same view unless interactive_only=false is passed.",
           "type": [
             "boolean",
             "null"
