@@ -24,6 +24,15 @@ let lastTreeSnapshotId = null;
 const activeTimeouts = new Set();
 const activeIntervals = new Set();
 
+// Cut text to at most n UTF-16 units without leaving half of a surrogate pair, which
+// JSON.stringify would emit as a lone \ud83d escape that serde_json refuses.
+function cut(text, n) {
+  const s = String(text);
+  if (s.length <= n) return s;
+  const code = s.charCodeAt(n - 1);
+  return s.slice(0, code >= 0xd800 && code <= 0xdbff ? n - 1 : n);
+}
+
 function writeMessage(msg) {
   process.stdout.write(JSON.stringify(msg) + "\n");
 }
@@ -50,11 +59,11 @@ function appendLogLine(line) {
   }
   let text = line;
   if (text.length > MAX_LOG_LINE_CHARS) {
-    text = `${text.slice(0, MAX_LOG_LINE_CHARS)} [line truncated from ${line.length} chars]`;
+    text = `${cut(text, MAX_LOG_LINE_CHARS)} [line truncated from ${line.length} chars]`;
   }
   const room = MAX_LOG_TOTAL_CHARS - currentLogChars;
   if (text.length > room) {
-    text = `${text.slice(0, room)} [logs truncated]`;
+    text = `${cut(text, room)} [logs truncated]`;
     currentLogsDropped = true;
   }
   currentLogChars += text.length;
@@ -71,7 +80,7 @@ function recordUnhandled(kind, err) {
   if (evalActive) {
     appendLogLine(line);
   } else if (pendingUnhandledLogs.length < 50) {
-    pendingUnhandledLogs.push(line.slice(0, MAX_LOG_LINE_CHARS));
+    pendingUnhandledLogs.push(cut(line, MAX_LOG_LINE_CHARS));
   }
 }
 
@@ -830,7 +839,9 @@ function buildDesktopApi() {
         const seen = new Set(merged.map((n) => n?.index).filter((idx) => typeof idx === "number"));
         let offset = merged.length;
         let complete = false;
-        for (let pageNum = 0; pageNum < 64; pageNum += 1) {
+        // Every page holds at least one node and a tree has at most 10000, so paging until
+        // next_offset is null ends; the bound only guards against a broken server.
+        for (let pageNum = 0; pageNum <= 10000; pageNum += 1) {
           let page;
           try {
             page = await api.getTreePage({ snapshot_id: result.snapshot_id, offset });
@@ -1229,11 +1240,11 @@ vm.runInContext("globalThis.state = {};", context);
 // Handles strings, template literals (including nested `${...}`), comments, numbers, and regex
 // literals so rewriting never touches non-declaration tokens or loses depth tracking.
 function isIdentStart(ch) {
-  return /[A-Za-z_$]/.test(ch);
+  return /[\p{ID_Start}$_]/u.test(ch);
 }
 
 function isIdentPart(ch) {
-  return /[A-Za-z0-9_$]/.test(ch);
+  return /[\p{ID_Continue}$\u200c\u200d]/u.test(ch);
 }
 
 const REGEX_PRECEDING_KEYWORDS = new Set([
@@ -1715,6 +1726,34 @@ function extractTopLevelBindings(tokens) {
   return { varNames: [...varNames], fnNames: [...fnNames] };
 }
 
+// Index of the `}` closing the class body that starts at or after idx (skipping an
+// `extends` expression), or null when the source is cut off.
+function findClassBodyEnd(tokens, idx) {
+  let paren = 0;
+  let bracket = 0;
+  let k = idx;
+  for (; k < tokens.length; k += 1) {
+    const t = tokens[k];
+    if (t.type !== "punct") continue;
+    if (t.value === "(") paren += 1;
+    else if (t.value === ")") paren = Math.max(0, paren - 1);
+    else if (t.value === "[") bracket += 1;
+    else if (t.value === "]") bracket = Math.max(0, bracket - 1);
+    else if (t.value === "{" && paren === 0 && bracket === 0) break;
+  }
+  let depth = 0;
+  for (; k < tokens.length; k += 1) {
+    const t = tokens[k];
+    if (t.type !== "punct") continue;
+    if (t.value === "{") depth += 1;
+    else if (t.value === "}") {
+      depth -= 1;
+      if (depth === 0) return k;
+    }
+  }
+  return null;
+}
+
 function rewriteDepthZeroDeclarations(source, tokens) {
   const edits = [];
   let braceDepth = 0;
@@ -1753,10 +1792,17 @@ function rewriteDepthZeroDeclarations(source, tokens) {
         end: nameTok.end,
         replacement: `var ${nameTok.value} = class ${nameTok.value}`,
       });
+      // The rewrite turns the declaration into an expression, so a next line that starts with
+      // `(`, `[` or a template would attach to it. End the statement after the class body.
+      const close = findClassBodyEnd(tokens, i + 2);
+      if (close !== null) {
+        edits.push({ start: tokens[close].end, end: tokens[close].end, replacement: ";" });
+      }
     }
   }
 
   if (edits.length === 0) return source;
+  edits.sort((a, b) => a.start - b.start);
   let out = "";
   let cursor = 0;
   for (const edit of edits) {
@@ -1842,7 +1888,7 @@ function serializeResultValue(value) {
     return {
       truncated: true,
       original_chars: json.length,
-      preview: json.slice(0, MAX_VALUE_CHARS),
+      preview: cut(json, MAX_VALUE_CHARS),
     };
   }
   try {
@@ -1891,7 +1937,7 @@ async function handleEval(msg) {
       id: evalId,
       ok: false,
       timed_out: timedOut,
-      error: String(err instanceof Error ? (err.stack || `${err.name}: ${err.message}`) : err).slice(0, MAX_VALUE_CHARS),
+      error: cut(err instanceof Error ? (err.stack || `${err.name}: ${err.message}`) : err, MAX_VALUE_CHARS),
       logs: currentLogs,
       attached_images: currentAttachedImages,
       calls: currentCallCount,

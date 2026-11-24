@@ -1841,6 +1841,76 @@ return await desktop.fillForm([
     }
 
     #[tokio::test]
+    async fn js_repl_truncation_keeps_emoji_whole() {
+        let server = ComputerUseLinux::default();
+        let session = ReplSession::default();
+        // Odd prefixes put a cap inside a surrogate pair. A lone half would make serde_json
+        // reject the line and reset the worker.
+        for code in [
+            r#"console.log("a" + "\u{1F600}".repeat(40000)); return 1;"#,
+            r#"return "ab" + "\u{1F600}".repeat(40000);"#,
+            r#"throw new Error("ab" + "\u{1F600}".repeat(40000));"#,
+        ] {
+            let res = session
+                .eval(
+                    &server,
+                    JsEvalParams {
+                        code: code.to_string(),
+                        timeout_ms: Some(5_000),
+                    },
+                )
+                .await;
+            let (_, data, _, _) = unpack_tool_result(res);
+            assert!(
+                data.get("worker_restarted").is_some(),
+                "{code}: worker failed instead of returning a result: {data}"
+            );
+        }
+        let after = session
+            .eval(
+                &server,
+                JsEvalParams {
+                    code: "return 1".to_string(),
+                    timeout_ms: Some(5_000),
+                },
+            )
+            .await;
+        let (ok, data, _, _) = unpack_tool_result(after);
+        assert!(ok);
+        assert_eq!(data["worker_restarted"], false, "worker was reset: {data}");
+    }
+
+    #[tokio::test]
+    async fn js_repl_class_rewrite_keeps_statement_break_and_unicode_names_persist() {
+        let server = ComputerUseLinux::default();
+        let session = ReplSession::default();
+        let define = session
+            .eval(
+                &server,
+                JsEvalParams {
+                    code: "class A5 { m() { return 1 } }\n[1, 2].forEach((x) => x)\nclass B5 extends Object {}\n(function () {})()\nconst café = 1\nconst π = 3"
+                        .to_string(),
+                    timeout_ms: Some(5_000),
+                },
+            )
+            .await;
+        let (ok, data, _, _) = unpack_tool_result(define);
+        assert!(ok, "class rewrite broke the next statement: {data}");
+        let read = session
+            .eval(
+                &server,
+                JsEvalParams {
+                    code: "return [new A5().m(), typeof B5, café, π];".to_string(),
+                    timeout_ms: Some(5_000),
+                },
+            )
+            .await;
+        let (ok, data, _, _) = unpack_tool_result(read);
+        assert!(ok, "bindings did not persist: {data}");
+        assert_eq!(data["value"], json!([1, "function", 1, 3]));
+    }
+
+    #[tokio::test]
     async fn read_worker_line_refuses_an_oversized_line() {
         let mut child = Command::new(resolve_node_binary())
             .arg("-e")
