@@ -41,8 +41,29 @@ function wellFormed(value) {
   return typeof value.toWellFormed === "function" ? value.toWellFormed() : value.replace(LONE_SURROGATE, "\uFFFD");
 }
 
+// Property names need it too: the replacer sees values only, so an object is rebuilt with
+// well-formed keys before JSON.stringify walks into it.
+function wellFormedReplacer(_, value) {
+  if (typeof value === "string") return wellFormed(value);
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    let changed = false;
+    const keys = Object.keys(value);
+    for (const key of keys) {
+      if (wellFormed(key) !== key) {
+        changed = true;
+        break;
+      }
+    }
+    if (!changed) return value;
+    const out = {};
+    for (const key of keys) out[wellFormed(key)] = value[key];
+    return out;
+  }
+  return value;
+}
+
 function writeMessage(msg) {
-  process.stdout.write(JSON.stringify(msg, (_, value) => wellFormed(value)) + "\n");
+  process.stdout.write(JSON.stringify(msg, wellFormedReplacer) + "\n");
 }
 
 function formatLogArg(arg) {

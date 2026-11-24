@@ -2131,7 +2131,7 @@ return true;
 let windowErr = null;
 try { await desktop.window("Firefox"); } catch (e) { windowErr = String(e.message || e); }
 const state = await desktop.getState();
-return { windowErr, errors: state.errors, hint: state.permissions_hint, cut: "a\u{1F600}".slice(0, 2) };
+return { windowErr, errors: state.errors, hint: state.permissions_hint, cut: "a\u{1F600}".slice(0, 2), keys: { ["\u{1F600}".slice(0, 1)]: 1 } };
 "#,
             |tool, _| match tool {
                 "list_windows" => failed.clone(),
@@ -2158,6 +2158,7 @@ return { windowErr, errors: state.errors, hint: state.permissions_hint, cut: "a\
         assert_eq!(value["hint"], "install the GNOME Shell extension");
         // The lone high surrogate became U+FFFD instead of breaking the protocol line.
         assert_eq!(value["cut"], "a\u{FFFD}");
+        assert_eq!(value["keys"]["\u{FFFD}"], 1);
     }
 
     #[tokio::test]
