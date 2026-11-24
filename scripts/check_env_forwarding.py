@@ -84,7 +84,9 @@ NOT_PASSED = {
 
 # Variables one host leaves out on purpose.
 PI_NOT_PASSED = {
+    "COMPUTER_USE_LINUX_ENABLE_REPL": "adds js/js_reset to tools/list, and the Pi client refuses a catalog that differs from its generated one",
     "COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE": "adds complete_interaction to tools/list, and the Pi client refuses a catalog that differs from its generated one",
+    "COMPUTER_USE_LINUX_REPL_ONLY": "restricts tools/list to js/js_reset, and the Pi client refuses a catalog that differs from its generated one",
 }
 CODEX_NOT_PASSED = {
     "LC_": "prefix for run_shell's inherited locale; Codex passes LANG and LC_ALL only",

@@ -322,6 +322,8 @@ pub struct ComputerUseLinux {
     /// Set for HTTP: a remote client gets no file writes on the host, so
     /// screenshot_file_path is refused.
     http_transport: bool,
+    /// Persistent sandboxed JS REPL session for stacked/scripted desktop automation.
+    repl: Arc<crate::repl::ReplSession>,
 }
 
 /// The monitor layout of the cached capture. `generation` counts captures,
@@ -400,19 +402,53 @@ fn sanitize_unsigned_integer_formats(value: &mut serde_json::Value) {
 
 impl ComputerUseLinux {
     fn mcp_tool_router(&self) -> rmcp::handler::server::router::tool::ToolRouter<Self> {
-        self.router_with_completion(env::var(COMPLETION_ENABLE_ENV).as_deref() == Ok("1"))
+        self.router_with_options(
+            env::var(COMPLETION_ENABLE_ENV).as_deref() == Ok("1"),
+            crate::repl::repl_enabled_for_transport(self.http_transport),
+            crate::repl::repl_only_enabled(self.http_transport),
+        )
     }
 
+    #[cfg(test)]
     fn router_with_completion(
         &self,
         enabled: bool,
     ) -> rmcp::handler::server::router::tool::ToolRouter<Self> {
+        self.router_with_options(enabled, false, false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn router_for_test(
+        &self,
+        completion_enabled: bool,
+        repl_enabled: bool,
+        repl_only: bool,
+    ) -> rmcp::handler::server::router::tool::ToolRouter<Self> {
+        self.router_with_options(completion_enabled, repl_enabled, repl_only)
+    }
+
+    fn router_with_options(
+        &self,
+        completion_enabled: bool,
+        repl_enabled: bool,
+        repl_only: bool,
+    ) -> rmcp::handler::server::router::tool::ToolRouter<Self> {
         let mut router = Self::tool_router();
-        if !enabled {
-            router.map.remove("complete_interaction");
-        }
-        if !shell_execution_enabled() {
-            router.map.remove("run_shell");
+        if repl_only && repl_enabled {
+            router
+                .map
+                .retain(|name, _| matches!(name.as_ref(), "js" | "js_reset"));
+        } else {
+            if !completion_enabled {
+                router.map.remove("complete_interaction");
+            }
+            if !shell_execution_enabled() {
+                router.map.remove("run_shell");
+            }
+            if !repl_enabled {
+                router.map.remove("js");
+                router.map.remove("js_reset");
+            }
         }
         for route in router.map.values_mut() {
             let input_schema = Arc::make_mut(&mut route.attr.input_schema);
@@ -426,6 +462,144 @@ impl ComputerUseLinux {
             }
         }
         router
+    }
+
+    pub(crate) fn is_http_transport(&self) -> bool {
+        self.http_transport
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_http_transport_for_test(&mut self, value: bool) {
+        self.http_transport = value;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mcp_tool_router_for_test(
+        &self,
+    ) -> rmcp::handler::server::router::tool::ToolRouter<Self> {
+        self.mcp_tool_router()
+    }
+
+    pub(crate) async fn dispatch_internal_tool(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> CallToolResult {
+        let accepts_file = matches!(
+            name,
+            "screenshot"
+                | "get_app_state"
+                | "activate_window"
+                | "move_window"
+                | "resize_window"
+                | "click"
+                | "perform_action"
+                | "set_value"
+                | "scroll"
+                | "drag"
+                | "press_key"
+                | "type_text"
+        );
+        if let Some(obj) = args.as_object() {
+            if let Some(refusal) =
+                screenshot_file_refusal(name, Some(obj), accepts_file, self.http_transport)
+            {
+                return CallToolResult::error(vec![ContentBlock::text(refusal)]);
+            }
+        }
+
+        fn parse_args<T: serde::de::DeserializeOwned>(
+            name: &str,
+            args: serde_json::Value,
+        ) -> std::result::Result<T, CallToolResult> {
+            serde_json::from_value(args).map_err(|error| {
+                CallToolResult::error(vec![ContentBlock::text(format!(
+                    "invalid arguments for {name}: {error}"
+                ))])
+            })
+        }
+
+        fn json_to_call_result<T: Serialize>(value: Json<T>) -> CallToolResult {
+            match serde_json::to_value(&value.0) {
+                Ok(v) => CallToolResult::structured(v),
+                Err(error) => CallToolResult::error(vec![ContentBlock::text(format!(
+                    "failed to serialize tool result: {error}"
+                ))]),
+            }
+        }
+
+        fn finish_result(res: Result<CallToolResult, ErrorData>) -> CallToolResult {
+            match res {
+                Ok(r) => r,
+                Err(error) => {
+                    CallToolResult::error(vec![ContentBlock::text(error.message.to_string())])
+                }
+            }
+        }
+
+        match name {
+            "doctor" => json_to_call_result(self.doctor().await),
+            "setup_accessibility" => json_to_call_result(self.setup_accessibility().await),
+            "setup_window_targeting" => json_to_call_result(self.setup_window_targeting().await),
+            "list_apps" => json_to_call_result(self.list_apps().await),
+            "list_windows" => json_to_call_result(self.list_windows().await),
+            "focused_window" => json_to_call_result(self.focused_window().await),
+            "get_tree_page" => match parse_args::<GetTreePageParams>(name, args) {
+                Ok(p) => json_to_call_result(self.get_tree_page(Parameters(p)).await),
+                Err(err) => err,
+            },
+            "activate_window" => match parse_args::<ActivateWindowParams>(name, args) {
+                Ok(p) => finish_result(self.activate_window(Parameters(p)).await),
+                Err(err) => err,
+            },
+            "get_app_state" => match parse_args::<GetAppStateParams>(name, args) {
+                Ok(p) => finish_result(self.get_app_state(Parameters(p)).await),
+                Err(err) => err,
+            },
+            "screenshot" => match parse_args::<ScreenshotParams>(name, args) {
+                Ok(p) => self.screenshot(Parameters(p)).await,
+                Err(err) => err,
+            },
+            "click" => match parse_args::<ClickParams>(name, args) {
+                Ok(p) => finish_result(self.click(Parameters(p)).await),
+                Err(err) => err,
+            },
+            "perform_action" => match parse_args::<ActionParams>(name, args) {
+                Ok(p) => finish_result(self.perform_action(Parameters(p)).await),
+                Err(err) => err,
+            },
+            "set_value" => match parse_args::<SetValueParams>(name, args) {
+                Ok(p) => finish_result(self.set_value(Parameters(p)).await),
+                Err(err) => err,
+            },
+            "scroll" => match parse_args::<ScrollParams>(name, args) {
+                Ok(p) => finish_result(self.scroll(Parameters(p)).await),
+                Err(err) => err,
+            },
+            "drag" => match parse_args::<DragParams>(name, args) {
+                Ok(p) => finish_result(self.drag(Parameters(p)).await),
+                Err(err) => err,
+            },
+            "press_key" => match parse_args::<PressKeyParams>(name, args) {
+                Ok(p) => finish_result(self.press_key(Parameters(p)).await),
+                Err(err) => err,
+            },
+            "type_text" => match parse_args::<TypeTextParams>(name, args) {
+                Ok(p) => finish_result(self.type_text(Parameters(p)).await),
+                Err(err) => err,
+            },
+            "move_window" => match parse_args::<MoveWindowParams>(name, args) {
+                Ok(p) => finish_result(self.move_window(Parameters(p)).await),
+                Err(err) => err,
+            },
+            "resize_window" => match parse_args::<ResizeWindowParams>(name, args) {
+                Ok(p) => finish_result(self.resize_window(Parameters(p)).await),
+                Err(err) => err,
+            },
+            _ => CallToolResult::error(vec![ContentBlock::text(format!(
+                "tool {name:?} is not callable from run_batch or js"
+            ))]),
+        }
     }
 }
 
@@ -4177,19 +4351,91 @@ impl ComputerUseLinux {
         self.finish_window_geometry_output(output, &capture, &target)
             .await
     }
+
+    #[tool(
+        name = "run_batch",
+        description = "Execute an ordered sequence of desktop actions (click, type_text, press_key, set_value, scroll, drag, activate_window, get_app_state, screenshot, or sleep_ms) strictly sequentially in a single tool call. Keeps the AT-SPI snapshot_id cache warm and propagates snapshot_id across steps by default. Stops on the first error unless stop_on_error=false, and returns compact step results plus up to the last 2 captured screenshots.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn run_batch(
+        &self,
+        Parameters(params): Parameters<crate::repl::RunBatchParams>,
+    ) -> CallToolResult {
+        crate::repl::execute_batch(self, params).await
+    }
+
+    #[tool(
+        name = "js",
+        description = "Run JavaScript in a persistent desktop REPL worker (opt-in on stdio via COMPUTER_USE_LINUX_ENABLE_REPL=1 or COMPUTER_USE_LINUX_REPL_ONLY=1; disabled over HTTP). Executes multi-step workflows, AT-SPI tree filtering, waitFor loops, form filling, and post-action verification in a single turn. Runs in a dedicated Node.js worker with cleared environment and Node's --permission flag when supported (not an OS sandbox; equivalent trust level to run_shell). Supports top-level await, return, console.log, sleep(ms), viewImage(shot), persistent bindings across turns, and the `desktop` (alias `cua`) handle DSL: `const win = await desktop.window(titleOrApp)` returns a WindowHandle with `win.focus()`, `win.state()`, `win.summary()`, `win.find(matcher)` (returns ElementHandle with `.click()`, `.doubleClick()`, `.rightClick()`, `.setValue(v)`, `.type(t)`, `.press(k)`), `win.findAll(matcher)`, `win.waitFor(matcher)`, `win.click(targetOrX, y?)` (explicit x/y default to relative=true window coordinates; divide image pixels by shot.scale if scaled), `win.clickAll(targets, opts?)`, `win.fillForm(fields)`, `win.type(text)`, `win.press(key)`, `win.hotkey(['Ctrl','L'])`, `win.scroll(dir, pages)`, `win.drag(x1,y1,x2,y2)` (full-capture coordinates), `win.screenshot()`. Top-level `desktop.getState()`, `desktop.windows()`, `desktop.focused()`, `desktop.setupAccessibility()`, `desktop.setupWindowTargeting()`, `desktop.click(x, y)` (full-capture coordinates), `desktop.doubleClick(...)`, `desktop.rightClick(...)`, `desktop.hotkey(...)`, `desktop.screenshot()`, `desktop.help()`, and `desktop.clearImages()` are also available. Captured screenshots (up to the last 2) return natively as MCP image blocks.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn js(
+        &self,
+        Parameters(params): Parameters<crate::repl::JsEvalParams>,
+    ) -> CallToolResult {
+        self.repl.eval(self, params).await
+    }
+
+    #[tool(
+        name = "js_reset",
+        description = "Reset the persistent desktop JavaScript REPL session (opt-in via COMPUTER_USE_LINUX_ENABLE_REPL=1 or COMPUTER_USE_LINUX_REPL_ONLY=1), clearing all in-memory JS variables and restarting the worker on the next `js` call.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn js_reset(&self) -> Json<crate::repl::JsResetOutput> {
+        let restarted = self.repl.reset().await;
+        Json(crate::repl::JsResetOutput {
+            ok: true,
+            reset: true,
+            worker_was_running: restarted,
+        })
+    }
 }
 
-#[tool_handler(
-    router = self.mcp_tool_router(),
-    name = "computer-use-linux",
-    // NOTE: keep in lockstep with Cargo.toml + package.json on every release.
-    // The rmcp tool_handler macro only accepts a string literal here, so this
-    // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
-    // build if it drifts from the Cargo version.
-    version = "0.7.60",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If readiness reports can_query_windows or can_focus_windows false on GNOME, call setup_window_targeting to install the GNOME Shell extension, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend captures size-bounded screenshots (pixelflux when configured, GNOME Shell, the XDG portal, native X11, gnome-screenshot; grim in Hyprland background mode), reads AT-SPI trees with action/value metadata, invokes native AT-SPI actions, sets AT-SPI values or editable text, lists and focuses compositor windows through registered Linux window backends when the session permits it, and attaches best-effort terminal tty/process metadata to terminal windows. Click, scroll and drag try pixelflux when configured, xdotool on native X11, the uinput pointer, the RemoteDesktop portal (an open portal session, or when ydotool is absent, on COSMIC, or when forced), then ydotool outside Wayland. On Wayland a point never goes through ydotool: without uinput or the portal a coordinate action is refused; a coordinate scroll sends the move and the wheel through the uinput pointer, and an untargeted scroll sends the wheel through ydotool, or the portal without its daemon. The uinput pointer is sized to the latest full screenshot; take a new one after the desktop size changes. type_text sends literal text through pixelflux when configured (an unreachable pixelflux falls through), KDE clipboard paste on Plasma Wayland (raw ydotool when Klipper cannot be read), wtype on compatible Wayland compositors, portal keysyms on other Wayland sessions, or xdotool on X11. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text goes into the target's focused editable field through AT-SPI EditableText and must read back, and otherwise can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Mutating tools (click, type_text, press_key, scroll, drag, perform_action, set_value, activate_window, move_window, resize_window) accept optional screenshot_after (true, \"screen\", or \"window\") with format/quality/scale/max_width/max_height/max_bytes, optional screenshot_file_path (an absolute path to a new file, stdio only, refused over HTTP) to save the screenshot there instead of returning image content, and optional include_tree=true to return post-action observation in the same tool call. A failed action returns no observation, except set_value with verified=false. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. Pass that result's snapshot_id with the index or selector: each get_app_state or include_tree tree replaces the cached one, and a call naming a replaced snapshot is refused before any input. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable); type_text also warns when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype passes classified nonsecret text as one literal argument after -- to avoid stdin keymap-refresh corruption; that text is visible in process arguments, so confirmed password fields are rejected (use set_value), and terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call (split larger input or expose accessibility). Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. X11 xdotool can silently substitute symbols under non-US XKB layouts (reported with br/ABNT2) or changing keymap state; inspect the text before pressing Enter or submitting it. A successful type_text result through a keyboard backend confirms dispatch only and leaves field contents unverified; only the GNOME AT-SPI fallback reads the field back. Re-observe the target before retrying. Screenshot, keyboard and move/resize results warn when the target window is partly or fully off-screen; click, scroll and drag results warn when a coordinate is off the screenshot or between monitors (not through pixelflux, and not for KWin element clicks, which KWin maps onto an output). move_window and resize_window, which bring a window back on-screen, work only through the GNOME Shell extension or X11/EWMH (wmctrl). scroll accepts the same window targeting and relative coordinates as click; on both, a window target is raised and focused first, and nothing is sent when focus cannot be verified. get_app_state returns a compact readiness block and compact tree nodes (null, empty and default fields left out, actions listed by name) by default; pass verbose=true for the full diagnostics dump and full nodes. Pass interactive_only=true to get only nodes with an action, editable text or a value, plus headings, status/live regions, windows and dialogs; containers are collapsed and element_index values match the full tree. A title or window_id target narrows an app that exposes several windows under one AT-SPI application root (Chromium) to that window's subtree, keeping the app's popups and dialogs. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, read, or time budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 10000 and 64), not by lowering max_nodes. A compacted tree too large to return inline comes back as its leading nodes plus accessibility_tree_spill.path, a private JSON file with the whole tree and the same element_index values; search that file instead of requesting the tree again, or page through it with get_tree_page when files are not readable. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content."
-)]
+const DEFAULT_SERVER_INSTRUCTIONS_BODY: &str = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If readiness reports can_query_windows or can_focus_windows false on GNOME, call setup_window_targeting to install the GNOME Shell extension, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend captures size-bounded screenshots (pixelflux when configured, GNOME Shell, the XDG portal, native X11, gnome-screenshot; grim in Hyprland background mode), reads AT-SPI trees with action/value metadata, invokes native AT-SPI actions, sets AT-SPI values or editable text, lists and focuses compositor windows through registered Linux window backends when the session permits it, and attaches best-effort terminal tty/process metadata to terminal windows. Click, scroll and drag try pixelflux when configured, xdotool on native X11, the uinput pointer, the RemoteDesktop portal (an open portal session, or when ydotool is absent, on COSMIC, or when forced), then ydotool outside Wayland. On Wayland a point never goes through ydotool: without uinput or the portal a coordinate action is refused; a coordinate scroll sends the move and the wheel through the uinput pointer, and an untargeted scroll sends the wheel through ydotool, or the portal without its daemon. The uinput pointer is sized to the latest full screenshot; take a new one after the desktop size changes. type_text sends literal text through pixelflux when configured (an unreachable pixelflux falls through), KDE clipboard paste on Plasma Wayland (raw ydotool when Klipper cannot be read), wtype on compatible Wayland compositors, portal keysyms on other Wayland sessions, or xdotool on X11. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text goes into the target's focused editable field through AT-SPI EditableText and must read back, and otherwise can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Mutating tools (click, type_text, press_key, scroll, drag, perform_action, set_value, activate_window, move_window, resize_window) accept optional screenshot_after (true, \"screen\", or \"window\") with format/quality/scale/max_width/max_height/max_bytes, optional screenshot_file_path (an absolute path to a new file, stdio only, refused over HTTP) to save the screenshot there instead of returning image content, and optional include_tree=true to return post-action observation in the same tool call. A failed action returns no observation, except set_value with verified=false. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. Pass that result's snapshot_id with the index or selector: each get_app_state or include_tree tree replaces the cached one, and a call naming a replaced snapshot is refused before any input. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable); type_text also warns when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype passes classified nonsecret text as one literal argument after -- to avoid stdin keymap-refresh corruption; that text is visible in process arguments, so confirmed password fields are rejected (use set_value), and terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call (split larger input or expose accessibility). Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. X11 xdotool can silently substitute symbols under non-US XKB layouts (reported with br/ABNT2) or changing keymap state; inspect the text before pressing Enter or submitting it. A successful type_text result through a keyboard backend confirms dispatch only and leaves field contents unverified; only the GNOME AT-SPI fallback reads the field back. Re-observe the target before retrying. Screenshot, keyboard and move/resize results warn when the target window is partly or fully off-screen; click, scroll and drag results warn when a coordinate is off the screenshot or between monitors (not through pixelflux, and not for KWin element clicks, which KWin maps onto an output). move_window and resize_window, which bring a window back on-screen, work only through the GNOME Shell extension or X11/EWMH (wmctrl). scroll accepts the same window targeting and relative coordinates as click; on both, a window target is raised and focused first, and nothing is sent when focus cannot be verified. get_app_state returns a compact readiness block and compact tree nodes (null, empty and default fields left out, actions listed by name) by default; pass verbose=true for the full diagnostics dump and full nodes. Pass interactive_only=true to get only nodes with an action, editable text or a value, plus headings, status/live regions, windows and dialogs; containers are collapsed and element_index values match the full tree. A title or window_id target narrows an app that exposes several windows under one AT-SPI application root (Chromium) to that window's subtree, keeping the app's popups and dialogs. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, read, or time budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 10000 and 64), not by lowering max_nodes. A compacted tree too large to return inline comes back as its leading nodes plus accessibility_tree_spill.path, a private JSON file with the whole tree and the same element_index values; search that file instead of requesting the tree again, or page through it with get_tree_page when files are not readable. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content.";
+
+const REPL_ONLY_SERVER_INSTRUCTIONS: &str = "Control Linux desktop apps through the persistent desktop JavaScript REPL (`js` / `js_reset`). Start with `await desktop.getState()` or `const win = await desktop.window(titleOrApp)`. Use `win.summary()` for a compact interactive AT-SPI listing, `win.find(matcher)` / `win.clickAll(...)` / `win.waitFor(...)` / `win.type(...)` / `win.hotkey(...)` / `win.screenshot()` for multi-step workflows, `desktop.setupAccessibility()` / `desktop.setupWindowTargeting()` if diagnostics report missing setup, and `desktop.help()` for the full handle API. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data.";
+
+#[tool_handler(router = self.mcp_tool_router())]
 impl ServerHandler for ComputerUseLinux {
+    fn get_info(&self) -> rmcp::model::ServerConfig {
+        let instructions = if crate::repl::repl_only_enabled(self.http_transport) {
+            REPL_ONLY_SERVER_INSTRUCTIONS.to_string()
+        } else if crate::repl::repl_enabled_for_transport(self.http_transport) {
+            format!(
+                "For multi-step desktop workflows, prefer `js` (persistent desktop JavaScript REPL with `desktop`/`cua` window and element handles) or `run_batch` to complete chains in a single turn. {DEFAULT_SERVER_INSTRUCTIONS_BODY}"
+            )
+        } else {
+            format!(
+                "For multi-step desktop sequences (multiple clicks, keys, or form actions on known targets), prefer `run_batch` to execute ordered steps in a single turn. {DEFAULT_SERVER_INSTRUCTIONS_BODY}"
+            )
+        };
+        rmcp::model::ServerConfig::new(
+            rmcp::model::ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+        )
+        .with_server_info(rmcp::model::Implementation::new(
+            "computer-use-linux",
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .with_instructions(instructions)
+    }
+
     async fn call_tool(
         &self,
         request: rmcp::model::CallToolRequestParams,

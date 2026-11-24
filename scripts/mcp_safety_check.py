@@ -39,9 +39,11 @@ EXPECTED_TOOLS = {
     "type_text",
     "perform_action",
     "set_value",
+    "run_batch",
 }
 SHELL_TOOL = "run_shell"
 COMPLETION_TOOL = "complete_interaction"
+REPL_TOOLS = {"js", "js_reset"}
 
 INJECTION_PATTERNS = [
     re.compile(pattern, re.IGNORECASE)
@@ -145,6 +147,8 @@ DESTRUCTIVE_MUTATING_TOOLS = {
     "type_text",
     "perform_action",
     "set_value",
+    "run_batch",
+    "js",
     SHELL_TOOL,
 }
 
@@ -156,12 +160,14 @@ IDEMPOTENT_TOOLS = READ_ONLY_TOOLS | {
     "activate_window",
     "move_window",
     "resize_window",
+    "js_reset",
 }
 
-OPEN_WORLD_TOOLS = (EXPECTED_TOOLS | {SHELL_TOOL, COMPLETION_TOOL}) - {
+OPEN_WORLD_TOOLS = (EXPECTED_TOOLS | REPL_TOOLS | {SHELL_TOOL, COMPLETION_TOOL}) - {
     "doctor",
     "setup_accessibility",
     "setup_window_targeting",
+    "js_reset",
 }
 
 
@@ -169,6 +175,8 @@ class McpClient:
     def __init__(self, binary: pathlib.Path, extra_env: dict[str, str] | None = None):
         child_env = os.environ.copy()
         child_env["COMPUTER_USE_LINUX_ENABLE_SHELL"] = "0"
+        child_env["COMPUTER_USE_LINUX_ENABLE_REPL"] = "0"
+        child_env["COMPUTER_USE_LINUX_REPL_ONLY"] = "0"
         child_env["COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE"] = "0"
         if extra_env:
             child_env.update(extra_env)
@@ -414,7 +422,7 @@ def main() -> int:
     version = package_version(repo)
     annotation_partition = (
         READ_ONLY_TOOLS | NON_DESTRUCTIVE_MUTATING_TOOLS | DESTRUCTIVE_MUTATING_TOOLS
-    ) - {SHELL_TOOL}
+    ) - ({SHELL_TOOL} | REPL_TOOLS)
     if annotation_partition != EXPECTED_TOOLS:
         raise AssertionError(
             "tool annotation classes do not cover the expected MCP tool set: "
@@ -492,10 +500,62 @@ def main() -> int:
         for section in ["platform", "accessibility", "windowing", "input", "portals", "readiness"]:
             if section not in report:
                 raise AssertionError(f"doctor report missing {section!r}: {report.keys()}")
+
+        batch = client.request(
+            "tools/call",
+            {
+                "name": "run_batch",
+                "arguments": {
+                    "steps": [
+                        {"tool": "run_shell", "args": {"command": "echo nope"}},
+                    ]
+                },
+            },
+        )["result"]
+        if batch.get("isError") is not True:
+            raise AssertionError(f"run_batch failed to reject run_shell: {batch!r}")
     finally:
         client.close()
 
     assert_screenshot_error_contract(binary)
+
+    repl_client = McpClient(binary, {"COMPUTER_USE_LINUX_ENABLE_REPL": "1"})
+    try:
+        repl_client.request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "repl-opt-in-contract", "version": "0"},
+            },
+        )
+        repl_client.notify("notifications/initialized", {})
+        tools = repl_client.request("tools/list", {})["result"]["tools"]
+        if {tool["name"] for tool in tools} != EXPECTED_TOOLS | REPL_TOOLS:
+            raise AssertionError(f"repl opt-in changed the wrong tool set: {[t['name'] for t in tools]}")
+        for tool in tools:
+            assert_tool_annotations(tool)
+        js_eval = repl_client.request(
+            "tools/call",
+            {
+                "name": "js",
+                "arguments": {
+                    "code": "const v = 6 * 7; return { v };",
+                    "timeout_ms": 5000,
+                },
+            },
+        )["result"]
+        js_content = js_eval.get("content") or []
+        if js_eval.get("isError") is True or not js_content:
+            raise AssertionError(f"js smoke failed: {js_eval!r}")
+        js_report = json.loads(js_content[0].get("text") or "{}")
+        if js_report.get("value") != {"v": 42}:
+            raise AssertionError(f"unexpected js smoke value: {js_report!r}")
+        js_reset = repl_client.request("tools/call", {"name": "js_reset", "arguments": {}})["result"]
+        if js_reset.get("isError") is True:
+            raise AssertionError(f"js_reset smoke failed: {js_reset!r}")
+    finally:
+        repl_client.close()
 
     notification_client = McpClient(binary, {"COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE": "1"})
     try:
@@ -513,6 +573,44 @@ def main() -> int:
             raise AssertionError("completion notification must not accept process parameters")
     finally:
         notification_client.close()
+
+    repl_only_client = McpClient(binary, {"COMPUTER_USE_LINUX_REPL_ONLY": "1"})
+    try:
+        init = repl_only_client.request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "repl-only-contract", "version": "0"},
+            },
+        )["result"]
+        repl_only_client.notify("notifications/initialized", {})
+        instructions = init.get("instructions") or ""
+        assert_no_injection_text("repl-only instructions", instructions)
+        if len(instructions) > 800:
+            raise AssertionError(f"repl-only instructions should stay compact (got {len(instructions)} chars)")
+        tools = repl_only_client.request("tools/list", {})["result"]["tools"]
+        if {tool["name"] for tool in tools} != {"js", "js_reset"}:
+            raise AssertionError(f"repl-only exposed unexpected tools: {[tool['name'] for tool in tools]}")
+        for tool in tools:
+            assert_tool_annotations(tool)
+        res = repl_only_client.request(
+            "tools/call",
+            {
+                "name": "js",
+                "arguments": {
+                    "code": "const d = await desktop.doctor(); return { hasReadiness: Boolean(d?.readiness), hasHelp: desktop.help().includes('desktop.window') };",
+                    "timeout_ms": 5000,
+                },
+            },
+        )["result"]
+        if res.get("isError") is True:
+            raise AssertionError(f"repl-only js doctor call failed: {res!r}")
+        report = json.loads((res.get("content") or [{}])[0].get("text") or "{}")
+        if report.get("value") != {"hasReadiness": True, "hasHelp": True}:
+            raise AssertionError(f"unexpected repl-only js result: {report!r}")
+    finally:
+        repl_only_client.close()
 
     shell_home = tempfile.TemporaryDirectory(prefix="computer-use-linux-shell-home-")
     pathlib.Path(shell_home.name, ".profile").write_text(
