@@ -18,6 +18,8 @@ no mouse event, and a second nudge shows the user's pointer where it was. A poin
 input, and so is a call while KWin shows the desktop or on a minimized
 target. While the pen runs, kcminputrc holds its workspace mapping; after the
 server exits, no virtual device and none of its kcminputrc groups are left.
+Scrolls run under each of the eight output transforms (kscreen-doctor), and
+a kscreen-doctor that cannot be read gives the no-route notice.
 With KWin's SyncWithMouse tablet option on, there is no route.
 """
 import contextlib
@@ -59,8 +61,10 @@ app.run([])
 SCREENSHOT = """
 import struct, sys, zlib
 from gi.repository import Gio, GLib
-width, height = int(sys.argv[1]), int(sys.argv[2])
+size = sys.argv[1]
 def png(path):
+    # The output's size now: the fixture rewrites it when it turns the output.
+    width, height = (int(side) for side in open(size).read().split())
     def chunk(kind, data):
         return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
     raw = b''.join(b'\\0' + b'\\0' * (3 * width) for _ in range(height))
@@ -111,7 +115,9 @@ def guest(binary):
         # layout pixels as on a 100% Plasma desktop.
         mode = next(Path('/sys/class/drm').glob(Path(os.environ['CARD']).name + '-*/modes')).read_text().split()[0]
         width, height = (int(side) for side in mode.split('x'))
-        shot = subprocess.Popen(['/usr/bin/python3', '-c', SCREENSHOT, str(width), str(height)], env=env)
+        size = out / 'screen-size'
+        size.write_text(f'{width} {height}')
+        shot = subprocess.Popen(['/usr/bin/python3', '-c', SCREENSHOT, str(size)], env=env)
         cleanup.callback(stop, shot)
         owner = ['gdbus', 'call', '--session', '--dest', 'org.freedesktop.DBus', '--object-path',
                  '/org/freedesktop/DBus', '--method', 'org.freedesktop.DBus.NameHasOwner', 'org.gnome.Shell.Screenshot']
@@ -282,6 +288,7 @@ def guest(binary):
             shown.close()
         else:
             print('SKIP indicator overlay: no computer-use-linux-indicator next to the server', flush=True)
+        rotated_scrolls(failures, binary, server, wid, root, env, size, (width, height))
         server.close()
         time.sleep(1)
         check(failures, not gnome.leftover_devices(), f'no virtual device after exit: {gnome.leftover_devices()}')
@@ -297,6 +304,53 @@ def guest(binary):
               f'SyncWithMouse leaves no route: {report}')
         synced.close()
     return failures
+
+
+KSCREEN_ROTATIONS = ('none', 'left', 'inverted', 'right', 'flipped', 'flipped90', 'flipped180', 'flipped270')
+
+
+def kscreen_output(env):
+    config = json.loads(subprocess.run(['kscreen-doctor', '-j'], env=env, capture_output=True, text=True).stdout)
+    return next(output for output in config['outputs'] if output.get('enabled', True))
+
+
+def rotated_scrolls(failures, binary, server, wid, root, env, size, mode):
+    """Scrolls under every output transform through kscreen-doctor, as on
+    GNOME; KWin leaves the flip out of a touchscreen's mapping. Then a
+    kscreen-doctor that cannot be read leaves a scroll no route: the
+    notice, with nothing sent."""
+    name = kscreen_output(env)['name']
+
+    def rotate(transform):
+        subprocess.run(['kscreen-doctor', f'output.{name}.rotation.{KSCREEN_ROTATIONS[transform]}'], env=env,
+                       check=True, capture_output=True)
+        wait_for(lambda: kscreen_output(env).get('rotation') == 1 << transform,
+                 f'kscreen rotation {KSCREEN_ROTATIONS[transform]}', 10)
+        width, height = mode if transform % 2 == 0 else mode[::-1]
+        size.write_text(f'{width} {height}')
+    gnome.rotated_scrolls(failures, server, wid, root, rotate, 'kwin-touch')
+    fake = Path('/out/fake-kscreen')
+    fake.mkdir(exist_ok=True)
+    (fake / 'kscreen-doctor').write_text('#!/bin/sh\necho not json\n')
+    (fake / 'kscreen-doctor').chmod(0o755)
+    unread = Server(binary, dict(env, PATH=f'{fake}:{env["PATH"]}'))
+    try:
+        geometry = json.loads((root / 'geometry.json').read_text())
+        bounds = next(w for w in unread.call('list_windows', {})['windows'] if w['window_id'] == wid)['bounds']
+        unread.call('screenshot', dict(max_width=64))
+        sx, sy, sw, sh = geometry['scroller']
+        since = time.monotonic()
+        result = unread.call('scroll', dict(x=int(bounds['x'] + sx + sw // 3), y=int(bounds['y'] + sy + sh // 2), window_id=wid,
+                                            delivery='background', direction='down', pages=1))
+        report = result.get('background') or {}
+        check(failures, result.get('ok') is False and report.get('retry_to_continue') is True
+              and 'kscreen-doctor' in report.get('reason', ''),
+              f'an unreadable rotation leaves no route, with the notice: {result.get("message")} {report}')
+        time.sleep(.5)
+        check(failures, not [e for e in gnome.events(root, since) if e.get('source') == 'touch'],
+              'the notice sent no touch')
+    finally:
+        unread.close()
 
 
 def host(binary):

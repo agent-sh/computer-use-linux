@@ -23,6 +23,9 @@ barrel buttons, and a right click must still be a right click, also after a
 second server's pen came and went (they share one settings path). The pen
 leaves proximity right after each action, and a scroll right after a pen
 click must still pan (libinput drops touches while a paired pen is near).
+Then the monitor takes each of the eight output transforms in turn
+(DisplayConfig ApplyMonitorsConfig), and a scroll on the maximized window
+must start its touch on the point and move the finger straight up.
 When Chromium or Google Chrome is installed, the same clicks, a double
 click, a drag and a scroll go to a page in it, native Wayland and under
 Xwayland, which must see pen and touch input with the buttons named. After
@@ -118,14 +121,24 @@ def gtk_app(root):
         window.set_default_size(900, 600)
         window.present()
 
+        written = [None]
+
         def geometry():
+            # A fixture asks for the window maximized through this file.
+            if (root / 'maximize').exists() and not window.is_maximized():
+                window.maximize()
             if pad.get_width() < 100:
                 return True
             _, pad_rect = pad.compute_bounds(window)
             _, scroll_rect = scroller.compute_bounds(window)
             rect = lambda r: [r.get_x(), r.get_y(), r.get_width(), r.get_height()]
-            (root / 'geometry.json').write_text(json.dumps(dict(pad=rect(pad_rect), scroller=rect(scroll_rect))))
-            return False
+            text = json.dumps(dict(pad=rect(pad_rect), scroller=rect(scroll_rect),
+                                   window=[window.get_width(), window.get_height()]))
+            if text != written[0]:
+                written[0] = text
+                (root / 'geometry.json.new').write_text(text)
+                (root / 'geometry.json.new').replace(root / 'geometry.json')
+            return True
         GLib.timeout_add(300, geometry)
 
         last_pointer = [None]
@@ -182,6 +195,92 @@ def nudge_mouse():
             time.sleep(.3)
         finally:
             fcntl.ioctl(uinput, 0x5502)
+
+
+# wl_output transform order, as DisplayConfig and KWin number them.
+TRANSFORMS = ('normal', '90', '180', '270', 'flipped', 'flipped-90', 'flipped-180', 'flipped-270')
+
+ROTATE = """
+import sys
+from gi.repository import Gio, GLib
+transform = int(sys.argv[1])
+bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+def call(method, args):
+    return bus.call_sync('org.gnome.Mutter.DisplayConfig', '/org/gnome/Mutter/DisplayConfig',
+                         'org.gnome.Mutter.DisplayConfig', method, args, None, Gio.DBusCallFlags.NONE, 5000, None)
+serial, monitors, logical, _ = call('GetCurrentState', None).unpack()
+connector = monitors[0][0][0]
+mode = next(mode[0] for mode in monitors[0][1] if mode[6].get('is-current'))
+x, y, scale, _, primary, _, _ = logical[0]
+# Method 1: temporary, with no confirmation.
+call('ApplyMonitorsConfig', GLib.Variant('(uua(iiduba(ssa{sv}))a{sv})',
+                                         (serial, 1, [(x, y, scale, transform, primary, [(connector, mode, {})])], {})))
+current = call('GetCurrentState', None).unpack()[2][0][3]
+sys.exit(0 if current == transform else f'mutter reports transform {current}, not {transform}')
+"""
+
+
+def gnome_rotate(env):
+    def rotate(transform):
+        subprocess.run(['/usr/bin/python3', '-c', ROTATE, str(transform)], env=env, check=True)
+    return rotate
+
+
+def rotated_scrolls(failures, server, wid, root, rotate, route):
+    """A background scroll under every output transform, the last one none.
+    The target is maximized; the touch pan must start on the point and the
+    finger move straight up (a scroll down), which shows the device values
+    undo the compositor's turn on both axes. The point is off the monitor's
+    centre lines, which a wrong flip would leave in place."""
+    (root / 'maximize').touch()
+    for transform in (1, 2, 3, 4, 5, 6, 7, 0):
+        name = TRANSFORMS[transform]
+        rotate(transform)
+        portrait = transform % 2 == 1
+
+        def settled():
+            # A new screenshot also gives the server the new desktop size.
+            shot = server.call('screenshot', dict(max_width=64))
+            width, height = shot.get('coordinate_width') or 0, shot.get('coordinate_height') or 0
+            if not width or (height > width) != portrait:
+                return None
+            window = next((w for w in server.call('list_windows', {})['windows'] if w['window_id'] == wid), None)
+            bounds = window and window.get('bounds')
+            geometry = json.loads((root / 'geometry.json').read_text())
+            if not bounds or bounds['width'] > width or bounds['height'] > height \
+                    or abs(bounds['width'] - geometry['window'][0]) > 2 \
+                    or abs(bounds['height'] - geometry['window'][1]) > 2:
+                return None
+            return bounds, geometry
+        wait_for(settled, f'{name}: the turned layout and the maximized window', 30)
+        # The window settles after the monitor: read it again once still.
+        time.sleep(1)
+        bounds, geometry = wait_for(settled, f'{name}: the maximized window', 10)
+        sx, sy, sw, sh = geometry['scroller']
+        point = (int(sx + sw // 3), int(sy + sh // 2 + 37))
+        since = time.monotonic()
+        before = [e['value'] for e in events(root) if e['kind'] == 'scrolled']
+        result = server.call('scroll', dict(x=bounds['x'] + point[0], y=bounds['y'] + point[1], window_id=wid,
+                                            delivery='background', direction='down', pages=1))
+        report = result.get('background') or {}
+        check(failures, result.get('ok') and report.get('route') == route,
+              f'{name}: background scroll through {route}: {result.get("message")} {report}')
+        time.sleep(1)
+        seen = events(root, since)
+        touches = [e for e in seen if e.get('source') == 'touch' and e['kind'] in ('touch-begin', 'touch-update')]
+        second = next((index for index, e in enumerate(touches) if index and e['kind'] == 'touch-begin'),
+                      len(touches))
+        stroke = touches[:second]
+        begin, end = (stroke[0], stroke[-1]) if stroke and stroke[0]['kind'] == 'touch-begin' else (None, None)
+        scrolled = [e['value'] for e in seen if e['kind'] == 'scrolled']
+        print(f'{name}: window {bounds}, point {point}, touch from '
+              f'{begin and (begin["x"], begin["y"])} to {end and (end["x"], end["y"])}, '
+              f'list {before[-1] if before else 0} -> {scrolled[-1] if scrolled else None}', flush=True)
+        check(failures, begin and near(begin, point), f'{name}: the touch began at {point}: {begin}')
+        check(failures, begin and end and abs(end['x'] - begin['x']) <= 3 and begin['y'] - end['y'] > 100,
+              f'{name}: the finger moved straight up: {begin} -> {end}')
+        check(failures, scrolled and max(scrolled) > (before[-1] if before else 0) + 100,
+              f'{name}: the list scrolled down: {scrolled[-3:]}')
 
 
 def unload_vkms(timeout=10):
@@ -443,6 +542,13 @@ def run(binary, root, tty):
         out = wait_for(lambda: [e for e in events(root, press) if e['kind'] == 'proximity-out'], 'pen proximity out', 3)
         print(f'pen left proximity {out[0]["t"] - press:.2f} s after the press', flush=True)
         check(failures, out[0]['t'] - press < .5, f'pen left proximity {out[0]["t"] - press:.2f} s after the press')
+        # mutter leaves the touchscreen on the whole layout here, where it
+        # turns nothing: vkms is no built-in panel and has no EDID, which a
+        # device's output setting matches (meta-input-mapper.c). The turn of
+        # a touchscreen mapped to a monitor is checked against mutter's
+        # matrices in virtual_pen.rs's tests, and on KWin, which always maps
+        # it to the output.
+        rotated_scrolls(failures, server, wid, root, gnome_rotate(env), 'gnome-touch')
         chrome = chrome_binary()
         if chrome:
             logger = chrome_logger(root)

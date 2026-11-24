@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Background `scroll` works on a rotated or flipped monitor. The touch pan's device values undo the turn the compositor gives a touchscreen on that monitor, for all eight output transforms: mutter turns by the whole transform (`meta_monitor_manager_get_monitor_matrix`), KWin by the rotation without the flip (`devicePointToGlobalPosition`). Measured with each transform on KWin 6.6 and on GNOME Shell 46 (there with the touchscreen on the whole layout): the touch starts on the point and the finger moves straight up. The turn mutter gives a touchscreen mapped to a monitor is checked against its transform matrices. On KDE, an output rotation `kscreen-doctor -j` cannot give is now no route (the notice, then focused input) instead of an error on every call.
+
 ## [0.7.61] - 2026-11-24
 
 ### Added
