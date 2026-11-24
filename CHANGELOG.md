@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Background `click` and `scroll` take `relative: true`: `x` and `y` measured from the target window's screenshot crop are mapped through the window's bounds and the capture scale to capture pixels, and then go through the same checks as any background point (on the target window, not covered). A client that works in window coordinates, such as a desktop bridge sending window-relative clicks, no longer converts them itself ([#480](https://github.com/agent-sh/computer-use-linux/issues/480)). A relative background call without a window target is refused with nothing sent. Elements and `coordinate_space: "atspi"` still have no background route.
 - `run_batch` runs 1 to 100 desktop tool calls in order in one call. It cannot reach `run_shell`, `js` or itself.
 - `js` and `js_reset`: a persistent Node.js REPL with a `desktop` API for multi-step scripts, opt-in on stdio with `COMPUTER_USE_LINUX_ENABLE_REPL=1` (or `COMPUTER_USE_LINUX_REPL_ONLY=1` for only these two tools). It is never registered over HTTP. Enabling it lets the model run code as the user, like `COMPUTER_USE_LINUX_ENABLE_SHELL=1`. The worker's empty environment, string code generation block and Node permission flag are defence in depth, not a sandbox. Contributed by [@bvolpato](https://github.com/bvolpato) ([#505](https://github.com/agent-sh/computer-use-linux/pull/505)).
+- `accessibility_tree_partial` on `get_app_state` and post-action `include_tree` results: `true` whenever the result holds only the leading nodes of the tree.
+
+### Fixed
+
+- A tree too large to return inline whose spill file could not be written came back as its leading nodes with no field saying so. `accessibility_tree_partial` now marks it, and the `js` worker's `find`, `findAll`, `summary`, `waitFor` and string clicks no longer treat that prefix as the whole tree: `getAppState` pages the rest from the cached snapshot.
 
 ## [0.7.60] - 2026-11-22
 

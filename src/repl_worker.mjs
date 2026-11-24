@@ -278,12 +278,17 @@ function normalizeText(value) {
   return String(value);
 }
 
-// A state whose spill marker is still set holds only part of the tree, so a search over it could
-// report an element missing or a name unique when it is not.
+// A state holds only part of the tree when the server marked it partial (also when the spill
+// file could not be written) or its spill marker is still set. A search over it could report an
+// element missing or a name unique when it is not.
+function isPartialTree(result) {
+  return Boolean(result && (result.accessibility_tree_partial === true || result.accessibility_tree_spill));
+}
+
 function assertCompleteTree(source, what) {
-  if (source && typeof source === "object" && !Array.isArray(source) && source.accessibility_tree_spill) {
+  if (source && typeof source === "object" && !Array.isArray(source) && isPartialTree(source)) {
     throw new Error(
-      `${what} needs the whole accessibility tree, but this state holds only the part that fit inline (accessibility_tree_spill is set). Call getAppState() again with the default hydrateSpill, or page the rest with desktop.getTreePage().`
+      `${what} needs the whole accessibility tree, but this state holds only the part that fit inline (accessibility_tree_partial or accessibility_tree_spill is set). Call getAppState() again with the default hydrateSpill, or page the rest with desktop.getTreePage().`
     );
   }
 }
@@ -741,7 +746,7 @@ function buildDesktopApi() {
         if (Array.isArray(result.accessibility_tree)) {
           lastTreeNodes = result.accessibility_tree;
           lastTreeWindowId = result.window_context?.window_id ?? args?.window_id ?? null;
-          lastTreeSpilled = Boolean(result.accessibility_tree_spill);
+          lastTreeSpilled = isPartialTree(result);
           lastTreeSnapshotId = typeof result.snapshot_id === "string" ? result.snapshot_id : null;
         }
       }
@@ -905,7 +910,7 @@ function buildDesktopApi() {
         hydrateSpill &&
         result &&
         typeof result === "object" &&
-        result.accessibility_tree_spill &&
+        isPartialTree(result) &&
         typeof result.snapshot_id === "string" &&
         result.snapshot_id
       ) {
@@ -945,6 +950,7 @@ function buildDesktopApi() {
         result.accessibility_tree = merged;
         if (complete) {
           delete result.accessibility_tree_spill;
+          result.accessibility_tree_partial = false;
         }
         // Another state() may have finished while this one paged; only the latest snapshot
         // may feed string-click resolution.

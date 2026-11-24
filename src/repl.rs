@@ -815,6 +815,7 @@ fn compact_step_data(tool: &str, data: &Value) -> Value {
         "accessibility_tree_raw_count",
         "accessibility_tree_truncated",
         "accessibility_tree_spill",
+        "accessibility_tree_partial",
         "tree_scoped",
         "accessibility_error",
         "focused_element",
@@ -1918,6 +1919,85 @@ return { findErr, summaryErr };
                 "{key} did not refuse a partial tree: {result}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn js_repl_refuses_and_hydrates_a_partial_tree_without_a_spill_file() {
+        // The spill write failed: the server returns the leading nodes with
+        // accessibility_tree_partial and no accessibility_tree_spill. The
+        // worker must not take the prefix for the whole tree.
+        let (result, calls) = eval_with_mock_rpcs(
+            r#"
+const partial = await desktop.getAppState({ window_id: 1, hydrateSpill: false });
+const errs = {};
+for (const [name, fn] of [
+  ["find", () => desktop.find(partial, { exactName: "DeepSave" })],
+  ["findAll", () => desktop.findAll(partial, { role: "push button" })],
+  ["summary", () => desktop.summary(partial)],
+]) {
+  try { fn(); errs[name] = null; } catch (e) { errs[name] = String(e.message || e); }
+}
+await desktop.click("Close", { window_id: 1 });
+const whole = await desktop.getAppState({ window_id: 1 });
+const found = desktop.find(whole, { exactName: "DeepSave" });
+const waited = await desktop.waitFor({ window_id: 1, exactName: "DeepSave", timeoutMs: 500 });
+return {
+  errs,
+  hydratedPartial: whole.accessibility_tree_partial,
+  hydratedCount: whole.accessibility_tree.length,
+  foundIndex: found ? found.index : null,
+  waitedOk: waited.ok,
+};
+"#,
+            |tool, _args| match tool {
+                "get_app_state" => json!({
+                    "snapshot_id": "np-1",
+                    "window_context": { "window_id": 1 },
+                    "accessibility_tree": [{ "index": 1, "role": "push button", "name": "Close" }],
+                    "accessibility_tree_partial": true
+                }),
+                "get_tree_page" => json!({
+                    "snapshot_id": "np-1",
+                    "offset": 1,
+                    "next_offset": null,
+                    "node_count": 3,
+                    "nodes": [
+                        { "index": 2, "role": "push button", "name": "Close" },
+                        { "index": 3, "role": "push button", "name": "DeepSave" }
+                    ]
+                }),
+                _ => json!({ "ok": true }),
+            },
+        )
+        .await;
+        assert_eq!(result["ok"], true, "eval failed: {result}");
+        let value = &result["value"];
+        for key in ["find", "findAll", "summary"] {
+            assert!(
+                value["errs"][key]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("accessibility_tree_partial"),
+                "{key} did not refuse a partial tree: {result}"
+            );
+        }
+        // "Close" appears twice in the whole tree, so the prefix must not
+        // resolve it to one cached index.
+        let clicks: Vec<&Value> = calls
+            .iter()
+            .filter(|(tool, _)| tool == "click")
+            .map(|(_, args)| args)
+            .collect();
+        assert_eq!(clicks.len(), 1);
+        assert!(
+            clicks[0].get("element_index").is_none(),
+            "a click resolved against the partial prefix: {}",
+            clicks[0]
+        );
+        assert_eq!(value["hydratedPartial"], false, "{result}");
+        assert_eq!(value["hydratedCount"], 3, "{result}");
+        assert_eq!(value["foundIndex"], 3, "{result}");
+        assert_eq!(value["waitedOk"], true, "{result}");
     }
 
     #[tokio::test]
