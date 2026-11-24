@@ -644,6 +644,8 @@ pub(crate) async fn execute_batch(
         }
     }
 
+    fit_batch_results(&mut results);
+
     let mut blocks: Vec<ContentBlock> = Vec::new();
     let keep_start = captured_images.len().saturating_sub(MAX_ATTACHED_IMAGES);
     for img in captured_images.into_iter().skip(keep_start) {
@@ -693,6 +695,71 @@ fn inject_snapshot_id(args: &mut Value, snapshot_id: Option<&str>) {
             "snapshot_id".to_string(),
             Value::String(snapshot_id.to_string()),
         );
+    }
+}
+
+/// Tree fields a step result can carry: get_app_state and include_tree use
+/// `accessibility_tree`, get_tree_page uses `nodes`.
+const BATCH_TREE_KEYS: [&str; 2] = ["accessibility_tree", "nodes"];
+
+/// Replace a step's tree with its node count. Returns whether it had one.
+fn omit_step_tree(result: &mut Value) -> bool {
+    let Some(obj) = result.as_object_mut() else {
+        return false;
+    };
+    let mut omitted = false;
+    for key in BATCH_TREE_KEYS {
+        if let Some(tree) = obj.remove(key) {
+            let count = tree.as_array().map_or(0, Vec::len);
+            obj.insert(format!("{key}_omitted_nodes"), json!(count));
+            omitted = true;
+        }
+    }
+    omitted
+}
+
+/// Fit the step results to the inline budget every other tool result is held
+/// to. Each new tree replaces the cached snapshot, so only the last tree can
+/// still be acted on: earlier trees become node counts. If the summary is
+/// still too large, the last tree goes too (its snapshot_id stays, so
+/// get_tree_page can page it), then the oldest step results are dropped,
+/// keeping each step's ok and error.
+fn fit_batch_results(results: &mut [BatchStepSummary]) {
+    let fits = |results: &[BatchStepSummary]| {
+        serde_json::to_vec(results).map_or(true, |bytes| {
+            // Room for the summary's own fields around the results.
+            bytes.len() + 512 <= crate::tree_spill::INLINE_RESULT_BYTES
+        })
+    };
+    let last_tree = results.iter().rposition(|step| {
+        step.result
+            .as_ref()
+            .and_then(Value::as_object)
+            .is_some_and(|obj| BATCH_TREE_KEYS.iter().any(|key| obj.contains_key(*key)))
+    });
+    for (idx, step) in results.iter_mut().enumerate() {
+        if Some(idx) != last_tree {
+            if let Some(result) = step.result.as_mut() {
+                omit_step_tree(result);
+            }
+        }
+    }
+    if fits(results) {
+        return;
+    }
+    if let Some(idx) = last_tree {
+        if let Some(result) = results[idx].result.as_mut() {
+            omit_step_tree(result);
+        }
+    }
+    for idx in 0..results.len() {
+        if fits(results) {
+            return;
+        }
+        if let Some(result) = results[idx].result.take() {
+            let bytes = serde_json::to_vec(&result).map_or(0, |bytes| bytes.len());
+            results[idx].result = Some(json!({ "omitted_bytes": bytes }));
+        }
     }
 }
 
@@ -868,6 +935,52 @@ mod tests {
                 "{tool}: {data}"
             );
         }
+    }
+
+    #[test]
+    fn batch_results_keep_only_the_last_tree_and_fit_the_inline_budget() {
+        let tree = |n: usize| {
+            json!({
+                "snapshot_id": "s",
+                "accessibility_tree": (0..n)
+                    .map(|i| json!({ "index": i, "role": "push button", "name": format!("Button {i:05}") }))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let step = |step: usize, result: Value| BatchStepSummary {
+            step,
+            action: "get_app_state".to_string(),
+            ok: true,
+            error: None,
+            result: Some(result),
+        };
+        // Small trees: the last stays whole, earlier ones become counts.
+        let mut results = vec![
+            step(0, tree(3)),
+            step(1, tree(2)),
+            step(2, json!({ "ok": true })),
+        ];
+        fit_batch_results(&mut results);
+        let first = results[0].result.as_ref().unwrap();
+        assert!(first.get("accessibility_tree").is_none());
+        assert_eq!(first["accessibility_tree_omitted_nodes"], 3);
+        assert_eq!(
+            results[1].result.as_ref().unwrap()["accessibility_tree"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        // Many near-budget trees: the whole result fits the inline budget.
+        let mut results: Vec<_> = (0..100).map(|i| step(i, tree(500))).collect();
+        fit_batch_results(&mut results);
+        let bytes = serde_json::to_vec(&results).unwrap().len();
+        assert!(
+            bytes + 512 <= crate::tree_spill::INLINE_RESULT_BYTES,
+            "batch result is {bytes} bytes"
+        );
+        assert_eq!(results.len(), 100);
+        assert!(results.iter().all(|step| step.ok));
     }
 
     #[tokio::test]
@@ -1908,6 +2021,74 @@ return await desktop.fillForm([
         let (ok, data, _, _) = unpack_tool_result(read);
         assert!(ok, "bindings did not persist: {data}");
         assert_eq!(data["value"], json!([1, "function", 1, 3]));
+    }
+
+    #[tokio::test]
+    async fn js_repl_persisted_function_shares_top_level_bindings_with_later_calls() {
+        let server = ComputerUseLinux::default();
+        let session = ReplSession::default();
+        let run = |code: &'static str| {
+            let session = &session;
+            let server = &server;
+            async move {
+                let res = session
+                    .eval(
+                        server,
+                        JsEvalParams {
+                            code: code.to_string(),
+                            timeout_ms: Some(5_000),
+                        },
+                    )
+                    .await;
+                let (ok, data, _, _) = unpack_tool_result(res);
+                assert!(ok, "{code}: {data}");
+                data["value"].clone()
+            }
+        };
+        run("let count = 0; function inc() { count++; return count; }").await;
+        assert_eq!(run("inc(); inc(); return count;").await, 2);
+        assert_eq!(run("count = 100; return inc();").await, 101);
+        run("const { p, q: [r] } = { p: 1, q: [2] }, z = 3\nlet un").await;
+        assert_eq!(
+            run("return [p, r, z, typeof un];").await,
+            json!([1, 2, 3, "undefined"])
+        );
+    }
+
+    #[tokio::test]
+    async fn js_repl_window_targets_are_relative_and_coordinates_are_integers() {
+        let (result, calls) = eval_with_mock_rpcs(
+            r#"
+const win = await desktop.window("Demo");
+await win.clickAll([{ x: 40, y: 50 }, { x: 1, y: 2, relative: false }]);
+await win.fillForm([{ x: 10, y: 20, mode: "type", value: "hi" }]);
+await desktop.click(100 / 0.75, 7.4);
+await desktop.drag(1.6, 2.2, 3.5, 4.4);
+return true;
+"#,
+            |tool, _| match tool {
+                "list_windows" => json!({ "windows": [{ "window_id": 7, "title": "Demo" }] }),
+                _ => json!({ "ok": true }),
+            },
+        )
+        .await;
+        assert_eq!(result["ok"], true, "eval failed: {result}");
+        let args: Vec<&Value> = calls
+            .iter()
+            .filter(|(tool, _)| tool == "click" || tool == "drag")
+            .map(|(_, args)| args)
+            .collect();
+        assert_eq!(args.len(), 5);
+        assert_eq!(args[0]["relative"], true);
+        assert_eq!(args[0]["window_id"], 7);
+        assert_eq!(args[1]["relative"], false);
+        assert_eq!(args[2]["relative"], true);
+        assert_eq!(args[3]["x"], 133);
+        assert_eq!(args[3]["y"], 7);
+        assert_eq!(
+            (args[4]["start_x"].clone(), args[4]["end_x"].clone()),
+            (json!(2), json!(4))
+        );
     }
 
     #[tokio::test]

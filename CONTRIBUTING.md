@@ -142,11 +142,10 @@ file.
 
 ## Releases
 
-A release changes these ten files:
+A release changes these nine files:
 
 - `Cargo.toml` and `Cargo.lock`: the package version.
 - `package.json`: the npm version.
-- `src/server.rs`: the MCP server version.
 - `plugins/computer-use-linux/bin/computer-use-linux`: the launcher's pinned version.
 - `plugins/computer-use-linux/.claude-plugin/plugin.json` and `plugins/computer-use-linux/.codex-plugin/plugin.json`.
 - `.claude-plugin/marketplace.json`.

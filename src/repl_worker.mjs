@@ -480,6 +480,30 @@ function createElementHandle(api, node, windowId, snapshotId) {
   return handle;
 }
 
+// On a window handle, x/y in a target are window-relative like win.click(x, y).
+function windowRelativeTarget(target) {
+  if (
+    target &&
+    typeof target === "object" &&
+    (target.x !== undefined || target.y !== undefined) &&
+    target.relative === undefined &&
+    target.coordinate_space === undefined
+  ) {
+    return { ...target, relative: true };
+  }
+  return target;
+}
+
+// The server takes integer pixels; x / shot.scale is usually fractional.
+function roundCoordinates(params) {
+  for (const key of ["x", "y", "start_x", "start_y", "end_x", "end_y"]) {
+    if (typeof params[key] === "number" && Number.isFinite(params[key])) {
+      params[key] = Math.round(params[key]);
+    }
+  }
+  return params;
+}
+
 function createWindowHandle(api, win) {
   if (!win || typeof win !== "object") return null;
   const wid = win.window_id;
@@ -603,11 +627,13 @@ function createWindowHandle(api, win) {
       if (Array.isArray(targets) && targets.some((t) => typeof t === "string")) {
         await ensureWindowTreeCurrent();
       }
-      return api.clickAll(targets, { ...opts, window_id: wid });
+      const mapped = Array.isArray(targets) ? targets.map(windowRelativeTarget) : targets;
+      return api.clickAll(mapped, { ...opts, window_id: wid });
     },
 
     async fillForm(fields, opts = {}) {
-      return api.fillForm(fields, { ...opts, window_id: wid });
+      const mapped = Array.isArray(fields) ? fields.map(windowRelativeTarget) : fields;
+      return api.fillForm(mapped, { ...opts, window_id: wid });
     },
 
     async type(text, opts = {}) {
@@ -930,7 +956,7 @@ function buildDesktopApi() {
     async click(targetOrX = {}, yOrOpts, maybeOpts) {
       const raw = normalizeClickArgs(targetOrX, yOrOpts, maybeOpts);
       const attach = raw.attach !== false;
-      const params = maybeAttachSnapshotId({ ...raw });
+      const params = roundCoordinates(maybeAttachSnapshotId({ ...raw }));
       delete params.attach;
       return api.call("click", params, { attach });
     },
@@ -966,7 +992,7 @@ function buildDesktopApi() {
 
     async scroll(opts = {}) {
       const attach = opts.attach !== false;
-      const params = { ...opts };
+      const params = roundCoordinates({ ...opts });
       delete params.attach;
       return api.call("scroll", params, { attach });
     },
@@ -978,7 +1004,7 @@ function buildDesktopApi() {
           : { ...fromX };
       const attach = raw.attach !== false;
       delete raw.attach;
-      return api.call("drag", raw, { attach });
+      return api.call("drag", roundCoordinates(raw), { attach });
     },
 
     async typeText(textOrOpts, extraOpts = {}) {
@@ -1824,6 +1850,147 @@ function startsWithDeclarationOrStatement(tokens) {
   return false;
 }
 
+// Token index where a declarator's initializer starting at idx ends: a depth-0 `,` or `;`, a
+// new statement after automatic semicolon insertion, or the end of input.
+function initializerEnd(tokens, idx) {
+  let depth = 0;
+  for (let k = idx; k < tokens.length; k += 1) {
+    const t = tokens[k];
+    if (t.type === "punct") {
+      if (t.value === "(" || t.value === "{" || t.value === "[") depth += 1;
+      else if (t.value === ")" || t.value === "}" || t.value === "]") {
+        if (depth === 0) return k;
+        depth -= 1;
+      } else if (depth === 0 && (t.value === "," || t.value === ";")) {
+        return k;
+      }
+      continue;
+    }
+    if (depth !== 0 || k === idx) continue;
+    if (
+      t.type === "ident" &&
+      (STATEMENT_START_KEYWORDS.has(t.value) || t.value === "async") &&
+      isDeclarationPosition(tokens, k)
+    ) {
+      return k;
+    }
+    if (t.nlBefore && asiEndsStatementBefore(tokens, k)) return k;
+  }
+  return tokens.length;
+}
+
+// Whether a line break before tokens[k] ends the statement: the previous token can end an
+// expression and tokens[k] cannot continue it (an identifier or a number or string literal).
+function asiEndsStatementBefore(tokens, k) {
+  const prev = tokens[k - 1];
+  const t = tokens[k];
+  const prevEnds =
+    prev.type === "lit" ||
+    (prev.type === "ident" && !EXPR_BEFORE_DECL.has(prev.value) && !EXPR_KEYWORDS.has(prev.value)) ||
+    (prev.type === "punct" && [")", "]", "}", "++", "--"].includes(prev.value));
+  if (!prevEnds) return false;
+  if (t.type === "ident") return !["in", "of", "instanceof"].includes(t.value);
+  return t.type === "lit" && t.value !== "`" && t.value !== "/";
+}
+
+// Plan turning depth-0 declarations into assignments to script-level `var`s, so functions
+// defined in one call and later calls share the same binding. `let x = 1, y` becomes
+// `;x = 1, y = void 0`, `const {a} = o` becomes `;({a} = o)` and `class A {}` becomes
+// `;A = class A {};`. Returns null for a shape it does not handle.
+function planGlobalDeclarations(tokens) {
+  const edits = [];
+  const names = new Set();
+  let brace = 0;
+  let paren = 0;
+  let bracket = 0;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const tok = tokens[i];
+    if (tok.type === "punct") {
+      if (tok.value === "{") brace += 1;
+      else if (tok.value === "}") brace = Math.max(0, brace - 1);
+      else if (tok.value === "(") paren += 1;
+      else if (tok.value === ")") paren = Math.max(0, paren - 1);
+      else if (tok.value === "[") bracket += 1;
+      else if (tok.value === "]") bracket = Math.max(0, bracket - 1);
+      continue;
+    }
+    if (brace !== 0 || paren !== 0 || bracket !== 0 || tok.type !== "ident") continue;
+    const prev = tokens[i - 1];
+    if (prev?.type === "punct" && prev.value === ".") continue;
+
+    if (tok.value === "class" && tokens[i + 1]?.type === "ident" && isDeclarationPosition(tokens, i)) {
+      const name = tokens[i + 1].value;
+      const close = findClassBodyEnd(tokens, i + 2);
+      if (close === null) return null;
+      names.add(name);
+      edits.push({ start: tok.start, end: tok.start, replacement: `;${name} = ` });
+      edits.push({ start: tokens[close].end, end: tokens[close].end, replacement: ";" });
+      i = close;
+      continue;
+    }
+    if (tok.value !== "const" && tok.value !== "let" && tok.value !== "var") continue;
+
+    const declEdits = [];
+    let needsParens = false;
+    let j = i + 1;
+    let end;
+    for (;;) {
+      const pat = tokens[j];
+      if (!pat) return null;
+      const isObject = pat.type === "punct" && pat.value === "{";
+      const isArray = pat.type === "punct" && pat.value === "[";
+      if (!isObject && !isArray && pat.type !== "ident") return null;
+      if (isObject) needsParens = true;
+      const after = collectPatternBindings(tokens, j, names);
+      if (tokens[after]?.type === "punct" && tokens[after].value === "=") {
+        end = initializerEnd(tokens, after + 1);
+      } else {
+        if (pat.type !== "ident") return null;
+        declEdits.push({ start: tokens[after - 1].end, end: tokens[after - 1].end, replacement: " = void 0" });
+        end = after;
+      }
+      if (tokens[end]?.type === "punct" && tokens[end].value === ",") {
+        j = end + 1;
+        continue;
+      }
+      break;
+    }
+    edits.push({ start: tok.start, end: tok.end, replacement: needsParens ? ";(" : ";" });
+    edits.push(...declEdits);
+    if (needsParens) {
+      const last = tokens[end - 1];
+      edits.push({ start: last.end, end: last.end, replacement: ")" });
+    }
+    i = end - 1;
+  }
+  return { edits, names: [...names] };
+}
+
+function applyEdits(source, edits) {
+  const sorted = [...edits].sort((a, b) => a.start - b.start);
+  let out = "";
+  let cursor = 0;
+  for (const edit of sorted) {
+    out += source.slice(cursor, edit.start) + edit.replacement;
+    cursor = edit.end;
+  }
+  return out + source.slice(cursor);
+}
+
+function compileWithGlobalBindings(source, tokens, fnNames) {
+  const plan = planGlobalDeclarations(tokens);
+  if (!plan) return null;
+  const rewritten = applyEdits(source, plan.edits);
+  const header = plan.names.length > 0 ? `var ${plan.names.join(", ")};\n` : "";
+  const fnPersistLines = fnNames.map((name) => `globalThis[${JSON.stringify(name)}] = ${name};`).join("\n");
+  const candidate = `${header}(async () => {\n${fnPersistLines}\n${rewritten}\n;\n${fnPersistLines}\n})()`;
+  try {
+    return new vm.Script(candidate, { filename: "repl.mjs" });
+  } catch {
+    return null;
+  }
+}
+
 function compileEvalScript(code) {
   const source = String(code || "");
   const trimmed = source.trim();
@@ -1847,6 +2014,10 @@ function compileEvalScript(code) {
   const bindings = extractTopLevelBindings(tokens);
   const wrapped = `(async () => {\n${source}\n})()`;
   if (bindings.varNames.length > 0 || bindings.fnNames.length > 0) {
+    // Prefer real script-level bindings, so a persisted function and later calls share one
+    // variable; fall back to copying values to globalThis when the rewrite cannot be planned.
+    const shared = compileWithGlobalBindings(source, tokens, bindings.fnNames);
+    if (shared) return shared;
     return compileWithTopLevelPersistence(source, tokens, bindings, wrapped);
   }
 
