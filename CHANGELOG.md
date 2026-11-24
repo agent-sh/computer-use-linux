@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.61] - 2026-11-24
+
 ### Added
 
 - `tree_detail` on `get_app_state`, `get_tree_page` and post-action `include_tree`: `"minimal"` returns each node as its index, role, name, text that differs from the name, value and distinguishing states only, beside `"compact"` (the default) and `"full"`. On an eBay results page it fit 328 interactive nodes in the inline budget where compact fit 112.
@@ -1282,7 +1284,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.60...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.61...HEAD
+[0.7.61]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.60...v0.7.61
 [0.7.60]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.59...v0.7.60
 [0.7.59]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.58...v0.7.59
 [0.7.58]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.57...v0.7.58
