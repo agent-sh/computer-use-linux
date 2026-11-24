@@ -33,8 +33,16 @@ function cut(text, n) {
   return s.slice(0, code >= 0xd800 && code <= 0xdbff ? n - 1 : n);
 }
 
+// A lone surrogate half (from a script's own slice() of emoji text) would be written as a
+// \ud83d escape that serde_json refuses, which resets the worker. Replace it with U+FFFD.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+function wellFormed(value) {
+  if (typeof value !== "string") return value;
+  return typeof value.toWellFormed === "function" ? value.toWellFormed() : value.replace(LONE_SURROGATE, "\uFFFD");
+}
+
 function writeMessage(msg) {
-  process.stdout.write(JSON.stringify(msg) + "\n");
+  process.stdout.write(JSON.stringify(msg, (_, value) => wellFormed(value)) + "\n");
 }
 
 function formatLogArg(arg) {
@@ -481,6 +489,11 @@ function createElementHandle(api, node, windowId, snapshotId) {
 }
 
 // On a window handle, x/y in a target are window-relative like win.click(x, y).
+function listingError(tool, res) {
+  const hint = res?.permissions_hint ? ` (${res.permissions_hint})` : "";
+  return new Error(`${tool} failed: ${res.error}${hint}. Check desktop.doctor(); desktop.setupWindowTargeting() may be needed.`);
+}
+
 function windowRelativeTarget(target) {
   if (
     target &&
@@ -781,7 +794,11 @@ function buildDesktopApi() {
 
     async windows() {
       const res = await api.listWindows();
-      return (Array.isArray(res?.windows) ? res.windows : []).map((w) => createWindowHandle(api, w));
+      const wins = Array.isArray(res?.windows) ? res.windows : [];
+      // The server reports a failed listing inside a successful result; an empty list would
+      // read as an empty desktop instead of missing setup.
+      if (wins.length === 0 && res?.error) throw listingError("list_windows", res);
+      return wins.map((w) => createWindowHandle(api, w));
     },
 
     async focusedWindow() {
@@ -790,6 +807,7 @@ function buildDesktopApi() {
 
     async focused() {
       const res = await api.focusedWindow();
+      if (!res?.focused_window && res?.error) throw listingError("focused_window", res);
       return res?.focused_window ? createWindowHandle(api, res.focused_window) : null;
     },
 
@@ -829,11 +847,20 @@ function buildDesktopApi() {
         api.focusedWindow(),
         api.listApps(),
       ]);
-      return {
+      const state = {
         focused_window: focused?.focused_window ?? null,
         windows: wins?.windows ?? [],
         apps: apps?.apps ?? [],
       };
+      // Keep the diagnostics the listings carry, so missing setup is visible.
+      const errors = {};
+      if (wins?.error) errors.list_windows = wins.error;
+      if (focused?.error) errors.focused_window = focused.error;
+      if (apps?.accessibility_error) errors.list_apps = apps.accessibility_error;
+      if (Object.keys(errors).length > 0) state.errors = errors;
+      const hint = wins?.permissions_hint ?? focused?.permissions_hint;
+      if (hint) state.permissions_hint = hint;
+      return state;
     },
 
     async getAppState(opts = {}) {

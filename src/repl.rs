@@ -608,11 +608,32 @@ pub(crate) async fn execute_batch(
 
         let mut args = step.args.unwrap_or_else(|| json!({}));
         if auto_snapshot_id {
-            inject_snapshot_id(&mut args, latest_snapshot_id.as_deref());
+            if tool_name == "get_tree_page" {
+                // A page always reads a snapshot, and over HTTP it must name one; the batch's
+                // own snapshot cannot be named by the caller in advance.
+                if let (Some(obj), Some(snapshot_id)) =
+                    (args.as_object_mut(), latest_snapshot_id.as_deref())
+                {
+                    obj.entry("snapshot_id")
+                        .or_insert_with(|| Value::String(snapshot_id.to_string()));
+                }
+            } else {
+                inject_snapshot_id(&mut args, latest_snapshot_id.as_deref());
+            }
         }
 
         let call_result = server.dispatch_internal_tool(tool_name, args).await;
-        let (ok, data, error_text, images) = unpack_tool_result(call_result);
+        let (mut ok, data, mut error_text, images) = unpack_tool_result(call_result);
+        // A refused or empty page carries no snapshot_id and no ok=false.
+        if ok && tool_name == "get_tree_page" && data.get("snapshot_id").is_none_or(Value::is_null)
+        {
+            ok = false;
+            error_text = data
+                .get("message")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .or_else(|| Some("get_tree_page returned no snapshot".to_string()));
+        }
 
         if let Some(snap) = data
             .get("snapshot_id")
@@ -644,7 +665,7 @@ pub(crate) async fn execute_batch(
         }
     }
 
-    fit_batch_results(&mut results);
+    fit_batch_results(&mut results, latest_snapshot_id.as_deref());
 
     let mut blocks: Vec<ContentBlock> = Vec::new();
     let keep_start = captured_images.len().saturating_sub(MAX_ATTACHED_IMAGES);
@@ -719,35 +740,36 @@ fn omit_step_tree(result: &mut Value) -> bool {
 }
 
 /// Fit the step results to the inline budget every other tool result is held
-/// to. Each new tree replaces the cached snapshot, so only the last tree can
-/// still be acted on: earlier trees become node counts. If the summary is
-/// still too large, the last tree goes too (its snapshot_id stays, so
-/// get_tree_page can page it), then the oldest step results are dropped,
-/// keeping each step's ok and error.
-fn fit_batch_results(results: &mut [BatchStepSummary]) {
+/// to. A tree whose snapshot a later step replaced cannot be acted on any
+/// more, so it becomes a node count. Trees of the final snapshot (the last
+/// get_app_state and its get_tree_page pages) stay while they fit; past the
+/// budget they go oldest first (the snapshot_id stays, so get_tree_page can
+/// page them again), and then the oldest step results shrink to their byte
+/// count, keeping each step's ok and error.
+fn fit_batch_results(results: &mut [BatchStepSummary], final_snapshot: Option<&str>) {
     let fits = |results: &[BatchStepSummary]| {
         serde_json::to_vec(results).map_or(true, |bytes| {
             // Room for the summary's own fields around the results.
             bytes.len() + 512 <= crate::tree_spill::INLINE_RESULT_BYTES
         })
     };
-    let last_tree = results.iter().rposition(|step| {
-        step.result
-            .as_ref()
-            .and_then(Value::as_object)
+    let has_tree = |result: &Value| {
+        result
+            .as_object()
             .is_some_and(|obj| BATCH_TREE_KEYS.iter().any(|key| obj.contains_key(*key)))
-    });
-    for (idx, step) in results.iter_mut().enumerate() {
-        if Some(idx) != last_tree {
-            if let Some(result) = step.result.as_mut() {
+    };
+    for step in results.iter_mut() {
+        if let Some(result) = step.result.as_mut() {
+            let snapshot = result.get("snapshot_id").and_then(Value::as_str);
+            if has_tree(result) && (final_snapshot.is_none() || snapshot != final_snapshot) {
                 omit_step_tree(result);
             }
         }
     }
-    if fits(results) {
-        return;
-    }
-    if let Some(idx) = last_tree {
+    for idx in 0..results.len() {
+        if fits(results) {
+            return;
+        }
         if let Some(result) = results[idx].result.as_mut() {
             omit_step_tree(result);
         }
@@ -938,10 +960,10 @@ mod tests {
     }
 
     #[test]
-    fn batch_results_keep_only_the_last_tree_and_fit_the_inline_budget() {
-        let tree = |n: usize| {
+    fn batch_results_drop_replaced_trees_and_fit_the_inline_budget() {
+        let tree = |n: usize, snapshot: &str| {
             json!({
-                "snapshot_id": "s",
+                "snapshot_id": snapshot,
                 "accessibility_tree": (0..n)
                     .map(|i| json!({ "index": i, "role": "push button", "name": format!("Button {i:05}") }))
                     .collect::<Vec<_>>()
@@ -954,13 +976,18 @@ mod tests {
             error: None,
             result: Some(result),
         };
-        // Small trees: the last stays whole, earlier ones become counts.
+        // A tree whose snapshot was replaced becomes a count; trees of the final
+        // snapshot (a get_app_state and its page) stay whole while they fit.
         let mut results = vec![
-            step(0, tree(3)),
-            step(1, tree(2)),
-            step(2, json!({ "ok": true })),
+            step(0, tree(3, "old")),
+            step(1, tree(2, "new")),
+            step(
+                2,
+                json!({ "snapshot_id": "new", "nodes": [{ "index": 9 }] }),
+            ),
+            step(3, json!({ "ok": true })),
         ];
-        fit_batch_results(&mut results);
+        fit_batch_results(&mut results, Some("new"));
         let first = results[0].result.as_ref().unwrap();
         assert!(first.get("accessibility_tree").is_none());
         assert_eq!(first["accessibility_tree_omitted_nodes"], 3);
@@ -971,9 +998,10 @@ mod tests {
                 .len(),
             2
         );
-        // Many near-budget trees: the whole result fits the inline budget.
-        let mut results: Vec<_> = (0..100).map(|i| step(i, tree(500))).collect();
-        fit_batch_results(&mut results);
+        assert_eq!(results[2].result.as_ref().unwrap()["nodes"][0]["index"], 9);
+        // Many near-budget trees of one snapshot: the whole result fits the inline budget.
+        let mut results: Vec<_> = (0..100).map(|i| step(i, tree(500, "same"))).collect();
+        fit_batch_results(&mut results, Some("same"));
         let bytes = serde_json::to_vec(&results).unwrap().len();
         assert!(
             bytes + 512 <= crate::tree_spill::INLINE_RESULT_BYTES,
@@ -2089,6 +2117,69 @@ return true;
             (args[4]["start_x"].clone(), args[4]["end_x"].clone()),
             (json!(2), json!(4))
         );
+    }
+
+    #[tokio::test]
+    async fn js_repl_surfaces_listing_errors_and_replaces_lone_surrogates() {
+        let failed = json!({
+            "windows": [],
+            "error": "window backend unavailable",
+            "permissions_hint": "install the GNOME Shell extension"
+        });
+        let (result, _) = eval_with_mock_rpcs(
+            r#"
+let windowErr = null;
+try { await desktop.window("Firefox"); } catch (e) { windowErr = String(e.message || e); }
+const state = await desktop.getState();
+return { windowErr, errors: state.errors, hint: state.permissions_hint, cut: "a\u{1F600}".slice(0, 2) };
+"#,
+            |tool, _| match tool {
+                "list_windows" => failed.clone(),
+                "focused_window" => json!({ "focused_window": null, "error": "no focus backend" }),
+                "list_apps" => json!({ "apps": [], "accessibility_error": "AT-SPI bus missing" }),
+                _ => json!({ "ok": true }),
+            },
+        )
+        .await;
+        assert_eq!(result["ok"], true, "eval failed: {result}");
+        let value = &result["value"];
+        let window_err = value["windowErr"].as_str().unwrap_or_default();
+        assert!(window_err.contains("window backend unavailable"), "{value}");
+        assert!(
+            window_err.contains("install the GNOME Shell extension"),
+            "{value}"
+        );
+        assert_eq!(
+            value["errors"]["list_windows"],
+            "window backend unavailable"
+        );
+        assert_eq!(value["errors"]["focused_window"], "no focus backend");
+        assert_eq!(value["errors"]["list_apps"], "AT-SPI bus missing");
+        assert_eq!(value["hint"], "install the GNOME Shell extension");
+        // The lone high surrogate became U+FFFD instead of breaking the protocol line.
+        assert_eq!(value["cut"], "a\u{FFFD}");
+    }
+
+    #[tokio::test]
+    async fn run_batch_counts_a_page_without_snapshot_as_failed() {
+        let server = ComputerUseLinux::default();
+        let res = execute_batch(
+            &server,
+            RunBatchParams {
+                steps: vec![BatchStep {
+                    tool: Some("get_tree_page".to_string()),
+                    args: Some(json!({ "query": "Total" })),
+                    sleep_ms: None,
+                }],
+                delay_ms: None,
+                stop_on_error: Some(true),
+                auto_snapshot_id: Some(true),
+            },
+        )
+        .await;
+        let (ok, data, _, _) = unpack_tool_result(res);
+        assert!(!ok, "a page with no snapshot counted as success: {data}");
+        assert_eq!(data["results"][0]["ok"], false);
     }
 
     #[tokio::test]
