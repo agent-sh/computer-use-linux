@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.60";
-export const GENERATED_TOOL_CATALOG_HASH = "509ad3e43b288d00f791273b3734ea65dc26704434184d27fac7d523936fcd06";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "960958257bdf01ff82ff1ff06ac351b24ad37cdb632e26e6255accef4011d6c8";
+export const GENERATED_TOOL_CATALOG_HASH = "f897bce2fba7006d108f5b06b85f47f3683584a23cfa0992f270a06a25f52345";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "5f1f8a876f1520b98260319d3ef5b752f4d215052b48499350c04a7d3369d572";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -2262,6 +2262,85 @@ export const GENERATED_MCP_TOOLS =
       "type": "object"
     },
     "name": "resize_window"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Execute an ordered sequence of desktop actions (click, type_text, press_key, set_value, scroll, drag, activate_window, get_app_state, screenshot, or sleep_ms) strictly sequentially in a single tool call. Keeps the AT-SPI snapshot_id cache warm and propagates snapshot_id across steps by default. Stops on the first error unless stop_on_error=false, and returns compact step results plus up to the last 2 captured screenshots.",
+    "inputSchema": {
+      "$defs": {
+        "BatchStep": {
+          "properties": {
+            "args": {
+              "default": null,
+              "description": "JSON object of arguments for `tool`."
+            },
+            "sleep_ms": {
+              "default": null,
+              "description": "Pause for this many milliseconds (0 to 30000) instead of calling a tool.",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "tool": {
+              "default": null,
+              "description": "Name of a computer-use-linux tool to invoke (e.g. click, type_text, press_key, set_value, scroll, get_app_state, screenshot).\nOmit when using `sleep_ms`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "auto_snapshot_id": {
+          "default": null,
+          "description": "Automatically pass the latest `snapshot_id` returned by `get_app_state` or `include_tree` to subsequent element-targeted steps that omit `snapshot_id` (default true).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "delay_ms": {
+          "default": null,
+          "description": "Optional delay in milliseconds inserted between steps (default 0, max 5000).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "steps": {
+          "description": "Ordered list of desktop steps (1 to 100) executed strictly sequentially.",
+          "items": {
+            "$ref": "#/$defs/BatchStep"
+          },
+          "type": "array"
+        },
+        "stop_on_error": {
+          "default": null,
+          "description": "Stop immediately on the first failed step (default true).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "steps"
+      ],
+      "type": "object"
+    },
+    "name": "run_batch"
   },
   {
     "annotations": {
