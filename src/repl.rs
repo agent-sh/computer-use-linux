@@ -258,20 +258,26 @@ fn resolve_node_binary() -> PathBuf {
     PathBuf::from("node")
 }
 
-fn node_supports_permission_flag(node_bin: &Path) -> bool {
-    static CACHED: OnceLock<bool> = OnceLock::new();
+/// The flag that turns on Node's permission model: `--permission` on Node 22.13+,
+/// `--experimental-permission` on Node 20 and early 22, none before that.
+fn node_permission_flag(node_bin: &Path) -> Option<&'static str> {
+    static CACHED: OnceLock<Option<&'static str>> = OnceLock::new();
     // Only cache for the default lookup; explicit overrides are probed directly.
     let probe = || {
-        std::process::Command::new(node_bin)
-            .env_clear()
-            .arg("--permission")
-            .arg("-e")
-            .arg("")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+        ["--permission", "--experimental-permission"]
+            .into_iter()
+            .find(|flag| {
+                std::process::Command::new(node_bin)
+                    .env_clear()
+                    .arg(flag)
+                    .arg("-e")
+                    .arg("")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .is_ok_and(|s| s.success())
+            })
     };
     if env::var(NODE_BIN_ENV).is_ok() {
         probe()
@@ -285,11 +291,16 @@ fn spawn_repl_worker() -> Result<ReplWorker> {
     let mut cmd = Command::new(&node_bin);
     // Clear the ambient environment so REPL scripts never inherit host secrets or NODE_OPTIONS.
     cmd.env_clear();
-    // Enable Node's built-in Permission Model when supported (Node 22+), blocking fs/child_process/worker
-    // at the C++ runtime layer even if code reaches the host realm.
-    if node_supports_permission_flag(&node_bin) {
-        cmd.arg("--permission");
+    // Node's permission model (Node 20+) refuses fs, child_process and workers. Like the flag
+    // below, it is a seatbelt against mistakes, not a sandbox for hostile code.
+    if let Some(flag) = node_permission_flag(&node_bin) {
+        cmd.arg(flag);
     }
+    // Defence in depth, not a boundary: js is host code execution at run_shell's trust level.
+    // Every host object handed to the vm context (desktop, console, timers, RPC results) exposes
+    // the host Function constructor through `.constructor`. This flag makes that constructor throw
+    // EvalError, which closes the plain route from a script to `process`.
+    cmd.arg("--disallow-code-generation-from-strings");
     let mut child = cmd
         .arg("--input-type=module")
         .arg("-e")
@@ -331,6 +342,37 @@ async fn write_worker_line(stdin: &mut ChildStdin, payload: &Value) -> Result<()
     Ok(())
 }
 
+/// Largest protocol line the worker may send. The worker caps a result's value at 32 KiB and its
+/// logs at 128 KiB, and tool arguments are bounded by the tools themselves (type_text takes at most
+/// 131071 bytes), so a well-formed line stays far below this. A longer line means the worker is
+/// broken; it is reset instead of buffered without bound.
+const MAX_WORKER_LINE_BYTES: usize = 4 * 1024 * 1024;
+
+async fn read_worker_line(stdout: &mut BufReader<ChildStdout>, line: &mut Vec<u8>) -> Result<()> {
+    line.clear();
+    loop {
+        let available = stdout.fill_buf().await?;
+        if available.is_empty() {
+            return Err(anyhow!("REPL worker closed stdout unexpectedly"));
+        }
+        let (chunk, done) = match available.iter().position(|&b| b == b'\n') {
+            Some(pos) => (&available[..pos], Some(pos + 1)),
+            None => (available, None),
+        };
+        if line.len() + chunk.len() > MAX_WORKER_LINE_BYTES {
+            return Err(anyhow!(
+                "REPL worker sent a line over {MAX_WORKER_LINE_BYTES} bytes"
+            ));
+        }
+        line.extend_from_slice(chunk);
+        let consumed = done.unwrap_or(chunk.len());
+        stdout.consume(consumed);
+        if done.is_some() {
+            return Ok(());
+        }
+    }
+}
+
 async fn run_eval_loop(
     worker: &mut ReplWorker,
     server: &ComputerUseLinux,
@@ -352,15 +394,11 @@ async fn run_eval_loop(
     .await?;
 
     let mut captured_images: Vec<ContentBlock> = Vec::new();
-    let mut line = String::new();
+    let mut line = Vec::new();
 
     loop {
-        line.clear();
-        let read = worker.stdout.read_line(&mut line).await?;
-        if read == 0 {
-            return Err(anyhow!("REPL worker closed stdout unexpectedly"));
-        }
-        let msg: Value = serde_json::from_str(line.trim())
+        read_worker_line(&mut worker.stdout, &mut line).await?;
+        let msg: Value = serde_json::from_slice(&line)
             .with_context(|| "invalid JSON message from REPL worker")?;
         match msg.get("type").and_then(Value::as_str) {
             Some("rpc") => {
@@ -797,6 +835,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_batch_cannot_reach_js_run_shell_or_itself() {
+        let server = ComputerUseLinux::default();
+        for tool in [
+            "js",
+            "js_reset",
+            "run_shell",
+            "run_batch",
+            "complete_interaction",
+        ] {
+            let res = execute_batch(
+                &server,
+                RunBatchParams {
+                    steps: vec![BatchStep {
+                        tool: Some(tool.to_string()),
+                        args: Some(json!({ "code": "1", "command": "true", "steps": [] })),
+                        sleep_ms: None,
+                    }],
+                    delay_ms: None,
+                    stop_on_error: Some(true),
+                    auto_snapshot_id: Some(true),
+                },
+            )
+            .await;
+            let (ok, data, _, _) = unpack_tool_result(res);
+            assert!(!ok, "run_batch ran {tool}: {data}");
+            assert!(
+                data["results"][0]["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("not callable from run_batch or js"),
+                "{tool}: {data}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn run_batch_executes_sleep_steps_in_order() {
         let server = ComputerUseLinux::default();
         let res = execute_batch(
@@ -999,24 +1073,36 @@ return "done1";
     }
 
     #[tokio::test]
-    async fn js_repl_worker_clears_env_and_respects_node_permission_model() {
+    async fn js_repl_cannot_reach_host_realm_through_injected_objects() {
         let server = ComputerUseLinux::default();
         let session = ReplSession::default();
 
-        // Even via host-realm constructor chain, cleared env has no ambient PATH/HOME secrets,
-        // and on Node 22+ `--permission` denies child_process and fs with ERR_ACCESS_DENIED.
+        // Every injected host object exposes the host Function constructor through
+        // `.constructor`. The worker runs with --disallow-code-generation-from-strings, so
+        // each route must throw EvalError instead of returning the host `process`.
         let eval = session
             .eval(
                 &server,
                 JsEvalParams {
                     code: r#"
-const p = console.log.constructor("return process")();
-const envKeys = Object.keys(p.env || {});
-let fsErr = null;
-let cpErr = null;
-try { p.getBuiltinModule("node:fs").readFileSync("/etc/hostname"); } catch (e) { fsErr = e.code || String(e); }
-try { p.getBuiltinModule("node:child_process").execFileSync("true"); } catch (e) { cpErr = e.code || String(e); }
-return { envCount: envKeys.length, fsErr, cpErr, nodeMajor: Number(p.versions.node.split(".")[0]) };
+const routes = {
+  consoleLog: () => console.log.constructor("return process")(),
+  method: () => desktop.help.constructor("return process")(),
+  asyncCtor: () => desktop.doctor.constructor("return process"),
+  timer: () => setTimeout.constructor("return process")(),
+  hostClass: () => URL.constructor("return process")(),
+  objectProto: () => desktop.constructor.constructor("return process")(),
+};
+const out = {};
+for (const [name, route] of Object.entries(routes)) {
+  try {
+    const value = route();
+    out[name] = typeof value === "object" && value !== null && "env" in value ? "process" : typeof value;
+  } catch (e) {
+    out[name] = e && e.name;
+  }
+}
+return out;
 "#
                     .to_string(),
                     timeout_ms: Some(5_000),
@@ -1024,11 +1110,19 @@ return { envCount: envKeys.length, fsErr, cpErr, nodeMajor: Number(p.versions.no
             )
             .await;
         let (ok, data, _, _) = unpack_tool_result(eval);
-        assert!(ok, "worker hardening test failed: {data}");
-        assert_eq!(data["value"]["envCount"], 0);
-        if data["value"]["nodeMajor"].as_u64().unwrap_or(0) >= 22 {
-            assert_eq!(data["value"]["fsErr"], "ERR_ACCESS_DENIED");
-            assert_eq!(data["value"]["cpErr"], "ERR_ACCESS_DENIED");
+        assert!(ok, "host-realm probe failed: {data}");
+        for route in [
+            "consoleLog",
+            "method",
+            "asyncCtor",
+            "timer",
+            "hostClass",
+            "objectProto",
+        ] {
+            assert_eq!(
+                data["value"][route], "EvalError",
+                "route {route} reached the host realm: {data}"
+            );
         }
     }
 
@@ -1559,6 +1653,244 @@ return { a: await handler(), b: await globalThis.assignExpr() };
         assert_eq!(data["value"]["handler"], "undefined");
     }
 
+    /// Runs one eval on a fresh worker, answering its RPCs with `reply(tool, args)`.
+    /// Returns the eval_result message and every RPC the worker sent, in order.
+    async fn eval_with_mock_rpcs(
+        code: &str,
+        mut reply: impl FnMut(&str, &Value) -> Value,
+    ) -> (Value, Vec<(String, Value)>) {
+        let mut worker = spawn_repl_worker().expect("spawn repl worker");
+        let mut payload = serde_json::to_string(
+            &json!({ "type": "eval", "id": 1, "code": code, "timeoutMs": 5000 }),
+        )
+        .unwrap();
+        payload.push('\n');
+        worker.stdin.write_all(payload.as_bytes()).await.unwrap();
+        worker.stdin.flush().await.unwrap();
+        let mut calls = Vec::new();
+        let mut line = Vec::new();
+        loop {
+            read_worker_line(&mut worker.stdout, &mut line)
+                .await
+                .unwrap();
+            let msg: Value = serde_json::from_slice(&line).unwrap();
+            match msg["type"].as_str() {
+                Some("rpc") => {
+                    let tool = msg["tool"].as_str().unwrap().to_string();
+                    let args = msg["args"].clone();
+                    let data = reply(&tool, &args);
+                    calls.push((tool, args));
+                    let mut out = serde_json::to_string(&json!({
+                        "type": "rpc_result",
+                        "id": msg["id"],
+                        "ok": true,
+                        "data": data,
+                        "image_indices": []
+                    }))
+                    .unwrap();
+                    out.push('\n');
+                    worker.stdin.write_all(out.as_bytes()).await.unwrap();
+                    worker.stdin.flush().await.unwrap();
+                }
+                Some("eval_result") => return (msg, calls),
+                other => panic!("unexpected worker message: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn js_repl_spill_paging_ignores_replaced_snapshot_and_refuses_partial_trees() {
+        // Alpha's tree spills and has "Save" twice; Beta has no "Save". Paging Alpha after Beta
+        // replaced the server's snapshot is refused, which must not mark Alpha complete or let
+        // Alpha's indices resolve a string click aimed at Beta.
+        let mut current_snapshot = String::new();
+        let (result, calls) = eval_with_mock_rpcs(
+            r#"
+const a = await desktop.window("Alpha");
+const b = await desktop.window("Beta");
+await Promise.all([a.state(), b.state()]);
+await b.click("Save");
+const partial = await desktop.getAppState({ window_id: 1, hydrateSpill: false });
+let findErr = null;
+try { desktop.find(partial, { exactName: "Save" }); } catch (e) { findErr = String(e.message || e); }
+let summaryErr = null;
+try { desktop.summary(partial); } catch (e) { summaryErr = String(e.message || e); }
+return { findErr, summaryErr };
+"#,
+            |tool, args| match tool {
+                "list_windows" => json!({
+                    "windows": [
+                        { "window_id": 1, "title": "Alpha" },
+                        { "window_id": 2, "title": "Beta" }
+                    ]
+                }),
+                "get_app_state" if args["window_id"] == 1 => {
+                    current_snapshot = "p-1".to_string();
+                    json!({
+                        "snapshot_id": "p-1",
+                        "window_context": { "window_id": 1 },
+                        "accessibility_tree": [{ "index": 3, "role": "push button", "name": "Save" }],
+                        "accessibility_tree_spill": { "path": "spill.json" }
+                    })
+                }
+                "get_app_state" => {
+                    current_snapshot = "p-2".to_string();
+                    json!({
+                        "snapshot_id": "p-2",
+                        "window_context": { "window_id": 2 },
+                        "accessibility_tree": [{ "index": 3, "role": "push button", "name": "Delete" }]
+                    })
+                }
+                "get_tree_page" if args["snapshot_id"] == current_snapshot.as_str() => json!({
+                    "snapshot_id": current_snapshot,
+                    "nodes": [{ "index": 40, "role": "push button", "name": "Save" }],
+                    "offset": 1,
+                    "next_offset": null,
+                    "node_count": 2
+                }),
+                // The server's refusal: no snapshot_id, no nodes, no next page.
+                "get_tree_page" => json!({ "nodes": [], "offset": 1, "next_offset": null, "node_count": 0 }),
+                _ => json!({ "ok": true }),
+            },
+        )
+        .await;
+        assert_eq!(result["ok"], true, "eval failed: {result}");
+        let clicks: Vec<&Value> = calls
+            .iter()
+            .filter(|(tool, _)| tool == "click")
+            .map(|(_, args)| args)
+            .collect();
+        assert_eq!(clicks.len(), 1);
+        assert_eq!(clicks[0]["window_id"], 2);
+        assert_eq!(clicks[0]["name"], "Save");
+        assert!(
+            clicks[0].get("element_index").is_none(),
+            "Beta's click reused Alpha's cached index: {}",
+            clicks[0]
+        );
+        for key in ["findErr", "summaryErr"] {
+            assert!(
+                result["value"][key]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("accessibility_tree_spill"),
+                "{key} did not refuse a partial tree: {result}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn js_repl_fill_form_type_mode_does_not_click_by_typed_text() {
+        let (result, calls) = eval_with_mock_rpcs(
+            r#"
+return await desktop.fillForm([
+  { name: "Email", text: "bob", mode: "type" },
+  { text: "Phone", value: "555", mode: "type" }
+]);
+"#,
+            |_, _| json!({ "ok": true }),
+        )
+        .await;
+        assert_eq!(result["ok"], true, "eval failed: {result}");
+        let tools: Vec<&str> = calls.iter().map(|(tool, _)| tool.as_str()).collect();
+        assert_eq!(tools, ["click", "type_text", "click", "type_text"]);
+        assert_eq!(calls[0].1["name"], "Email");
+        assert!(
+            calls[0].1.get("text").is_none(),
+            "typed text used as selector: {}",
+            calls[0].1
+        );
+        assert_eq!(calls[1].1["text"], "bob");
+        // With an explicit value, `text` stays a selector.
+        assert_eq!(calls[2].1["text"], "Phone");
+        assert_eq!(calls[3].1["text"], "555");
+    }
+
+    #[tokio::test]
+    async fn js_repl_caps_log_output() {
+        let server = ComputerUseLinux::default();
+        let session = ReplSession::default();
+        let eval = session
+            .eval(
+                &server,
+                JsEvalParams {
+                    code:
+                        r#"for (let i = 0; i < 20; i++) console.log("x".repeat(100000)); return 1;"#
+                            .to_string(),
+                    timeout_ms: Some(5_000),
+                },
+            )
+            .await;
+        let (ok, data, _, _) = unpack_tool_result(eval);
+        assert!(ok, "log cap eval failed");
+        let logs = data["logs"].as_array().expect("logs array");
+        let total: usize = logs
+            .iter()
+            .map(|l| l.as_str().unwrap_or_default().len())
+            .sum();
+        assert!(total < 200_000, "logs not capped: {total} chars");
+        assert!(logs[0]
+            .as_str()
+            .unwrap_or_default()
+            .contains("line truncated"));
+        assert!(logs
+            .last()
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .contains("logs truncated"));
+    }
+
+    #[tokio::test]
+    async fn read_worker_line_refuses_an_oversized_line() {
+        let mut child = Command::new(resolve_node_binary())
+            .arg("-e")
+            .arg("process.stdout.write('ok\\n' + 'x'.repeat(5 * 1024 * 1024) + '\\n')")
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn node");
+        let mut reader = BufReader::new(child.stdout.take().unwrap());
+        let mut line = Vec::new();
+        read_worker_line(&mut reader, &mut line).await.unwrap();
+        assert_eq!(line, b"ok");
+        let err = read_worker_line(&mut reader, &mut line).await.unwrap_err();
+        assert!(err.to_string().contains("bytes"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn js_repl_persists_every_declarator_and_asi_declarations() {
+        let server = ComputerUseLinux::default();
+        let session = ReplSession::default();
+        let define = session
+            .eval(
+                &server,
+                JsEvalParams {
+                    code: "const fa = async () => 1, fb = 2\nlet ga = function () {}, gb = 3\nvar ha = class {}, hb = 4\nconst half = ({ in: 4 }).in / 2; const after3 = \"a/b\"; const after4 = 5\nMath.max(1)\nfunction later() { return 6 }\nconst nl = 1\nclass NL {}\nx = async function notGlobal() {}"
+                        .to_string(),
+                    timeout_ms: Some(5_000),
+                },
+            )
+            .await;
+        let (ok, data, _, _) = unpack_tool_result(define);
+        assert!(ok, "declarations failed: {data}");
+        let read = session
+            .eval(
+                &server,
+                JsEvalParams {
+                    code: "return [fb, gb, hb, half, after3, after4, later(), typeof NL, typeof notGlobal];"
+                        .to_string(),
+                    timeout_ms: Some(5_000),
+                },
+            )
+            .await;
+        let (ok, data, _, _) = unpack_tool_result(read);
+        assert!(ok, "bindings did not persist: {data}");
+        assert_eq!(
+            data["value"],
+            json!([2, 3, 4, 2, "a/b", 5, 6, "function", "undefined"])
+        );
+    }
+
     #[tokio::test]
     async fn js_repl_hydrates_spilled_trees_and_defaults_window_handle_coords_to_relative() {
         let mut worker = spawn_repl_worker().expect("spawn repl worker");
@@ -1626,7 +1958,7 @@ return { deepIndex: deepBtn?.index ?? null, ambigAcrossPages };
                                 "snapshot_id": "snap-spill-1",
                                 "offset": 1,
                                 "next_offset": null,
-                                "node_count": 2,
+                                "node_count": 3,
                                 "nodes": [
                                     { "index": 2, "role": "push button", "name": "Close" },
                                     { "index": 3, "role": "push button", "name": "DeepSave" }

@@ -3,6 +3,10 @@ import readline from "node:readline";
 
 const MAX_LOG_LINES = 200;
 const MAX_VALUE_CHARS = 32768;
+// Logs share the value's budget: one line is cut at MAX_VALUE_CHARS and all logs together stop at
+// four times that, so a logged tree cannot flood the result the way an uncapped line could.
+const MAX_LOG_LINE_CHARS = MAX_VALUE_CHARS;
+const MAX_LOG_TOTAL_CHARS = 4 * MAX_VALUE_CHARS;
 
 const pendingRpc = new Map();
 let nextRpcId = 1;
@@ -16,6 +20,7 @@ let lastSnapshotId = null;
 let lastTreeNodes = [];
 let lastTreeWindowId = null;
 let lastTreeSpilled = false;
+let lastTreeSnapshotId = null;
 const activeTimeouts = new Set();
 const activeIntervals = new Set();
 
@@ -33,18 +38,40 @@ function formatLogArg(arg) {
   }
 }
 
+let currentLogChars = 0;
+let currentLogsDropped = false;
+
+function appendLogLine(line) {
+  if (currentLogsDropped) return;
+  if (currentLogs.length >= MAX_LOG_LINES || currentLogChars >= MAX_LOG_TOTAL_CHARS) {
+    currentLogs.push("[logs truncated]");
+    currentLogsDropped = true;
+    return;
+  }
+  let text = line;
+  if (text.length > MAX_LOG_LINE_CHARS) {
+    text = `${text.slice(0, MAX_LOG_LINE_CHARS)} [line truncated from ${line.length} chars]`;
+  }
+  const room = MAX_LOG_TOTAL_CHARS - currentLogChars;
+  if (text.length > room) {
+    text = `${text.slice(0, room)} [logs truncated]`;
+    currentLogsDropped = true;
+  }
+  currentLogChars += text.length;
+  currentLogs.push(text);
+}
+
 function pushLog(level, args) {
-  if (currentLogs.length >= MAX_LOG_LINES) return;
   const prefix = level === "log" ? "" : `[${level}] `;
-  currentLogs.push(prefix + args.map(formatLogArg).join(" "));
+  appendLogLine(prefix + args.map(formatLogArg).join(" "));
 }
 
 function recordUnhandled(kind, err) {
   const line = `[${kind}] ${formatLogArg(err)}`;
   if (evalActive) {
-    if (currentLogs.length < MAX_LOG_LINES) currentLogs.push(line);
+    appendLogLine(line);
   } else if (pendingUnhandledLogs.length < 50) {
-    pendingUnhandledLogs.push(line);
+    pendingUnhandledLogs.push(line.slice(0, MAX_LOG_LINE_CHARS));
   }
 }
 
@@ -213,6 +240,16 @@ function normalizeText(value) {
   return String(value);
 }
 
+// A state whose spill marker is still set holds only part of the tree, so a search over it could
+// report an element missing or a name unique when it is not.
+function assertCompleteTree(source, what) {
+  if (source && typeof source === "object" && !Array.isArray(source) && source.accessibility_tree_spill) {
+    throw new Error(
+      `${what} needs the whole accessibility tree, but this state holds only the part that fit inline (accessibility_tree_spill is set). Call getAppState() again with the default hydrateSpill, or page the rest with desktop.getTreePage().`
+    );
+  }
+}
+
 function extractNodes(source) {
   if (Array.isArray(source)) return source;
   if (source && typeof source === "object") {
@@ -311,7 +348,12 @@ function normalizeClickArgs(targetOrX, yOrOpts, maybeOpts, baseOpts = {}) {
     // Only resolve against the cached AT-SPI tree when it is complete and belongs to the requested window.
     const cacheMatchesWindow =
       targetWindowId === undefined || (lastTreeWindowId !== null && lastTreeWindowId === targetWindowId);
-    if (!lastTreeSpilled && cacheMatchesWindow && lastTreeNodes.length > 0) {
+    // The cached nodes must come from the snapshot the click will name, or their indices point
+    // into a different tree.
+    const requestedSnapshot = opts.snapshot_id ?? shared.snapshot_id ?? lastSnapshotId;
+    const cacheMatchesSnapshot =
+      lastTreeSnapshotId !== null && requestedSnapshot === lastTreeSnapshotId;
+    if (!lastTreeSpilled && cacheMatchesWindow && cacheMatchesSnapshot && lastTreeNodes.length > 0) {
       const roleFilter = opts.role || shared.role;
       const matches = lastTreeNodes.filter(
         (n) =>
@@ -323,7 +365,7 @@ function normalizeClickArgs(targetOrX, yOrOpts, maybeOpts, baseOpts = {}) {
         const merged = { ...shared, ...opts };
         delete merged.role;
         delete merged.name;
-        return { ...merged, element_index: matches[0].index };
+        return { ...merged, element_index: matches[0].index, snapshot_id: lastTreeSnapshotId };
       }
       if (matches.length > 1) {
         const preview = matches
@@ -631,6 +673,7 @@ function buildDesktopApi() {
           lastTreeNodes = result.accessibility_tree;
           lastTreeWindowId = result.window_context?.window_id ?? args?.window_id ?? null;
           lastTreeSpilled = Boolean(result.accessibility_tree_spill);
+          lastTreeSnapshotId = typeof result.snapshot_id === "string" ? result.snapshot_id : null;
         }
       }
       return result;
@@ -663,6 +706,7 @@ function buildDesktopApi() {
     },
 
     summary(nodesOrState, opts = {}) {
+      assertCompleteTree(nodesOrState, "summary");
       const maxItems = Math.max(1, Math.min(500, Number(opts.maxItems ?? opts.max_items ?? 120)));
       const nodes = extractNodes(nodesOrState);
       const out = [];
@@ -793,6 +837,9 @@ function buildDesktopApi() {
           } catch {
             break;
           }
+          // A refused page (a later snapshot replaced this one) has no snapshot_id and no nodes.
+          // It must not count as the end of the tree.
+          if (page?.snapshot_id !== result.snapshot_id) break;
           const pageNodes = Array.isArray(page?.nodes) ? page.nodes : [];
           for (const node of pageNodes) {
             if (typeof node?.index === "number") {
@@ -802,7 +849,10 @@ function buildDesktopApi() {
             merged.push(node);
           }
           if (page?.next_offset === null || page?.next_offset === undefined || pageNodes.length === 0) {
-            complete = page?.next_offset === null || page?.next_offset === undefined;
+            const total = Number(page?.node_count);
+            complete =
+              (page?.next_offset === null || page?.next_offset === undefined) &&
+              (!Number.isFinite(total) || merged.length >= total);
             break;
           }
           offset = page.next_offset;
@@ -810,11 +860,12 @@ function buildDesktopApi() {
         result.accessibility_tree = merged;
         if (complete) {
           delete result.accessibility_tree_spill;
+        }
+        // Another state() may have finished while this one paged; only the latest snapshot
+        // may feed string-click resolution.
+        if (lastTreeSnapshotId === result.snapshot_id) {
           lastTreeNodes = merged;
-          lastTreeSpilled = false;
-        } else {
-          lastTreeNodes = merged;
-          lastTreeSpilled = true;
+          lastTreeSpilled = !complete;
         }
       }
       return result;
@@ -954,6 +1005,7 @@ function buildDesktopApi() {
     },
 
     find(nodesOrState, matcher) {
+      assertCompleteTree(nodesOrState, "find");
       const nodes = extractNodes(nodesOrState);
       const found = nodes.find((node) => matchesNode(node, matcher)) || null;
       if (!found) return null;
@@ -963,6 +1015,7 @@ function buildDesktopApi() {
     },
 
     findAll(nodesOrState, matcher) {
+      assertCompleteTree(nodesOrState, "findAll");
       const nodes = extractNodes(nodesOrState);
       const snap = nodesOrState?.snapshot_id ?? lastSnapshotId;
       const wid = nodesOrState?.window_context?.window_id ?? null;
@@ -1091,8 +1144,12 @@ function buildDesktopApi() {
         try {
           let res;
           if (mode === "type") {
+            // `value` is what to type. `text` is the typed text only when no `value` is given;
+            // then it must not also act as a click selector.
+            const typedFromText = stepArgs.value === undefined && stepArgs.text !== undefined;
             const text = String(stepArgs.value ?? stepArgs.text ?? "");
             delete stepArgs.value;
+            if (typedFromText) delete stepArgs.text;
             const clickRes = await api.click(stepArgs);
             if (clickRes?.ok === false) {
               allOk = false;
@@ -1230,6 +1287,9 @@ const EXPR_BEFORE_DECL = new Set([
   ">",
 ]);
 
+// Keywords after which `function`/`class`/`async` is an expression operand.
+const EXPR_KEYWORDS = new Set(["in", "of", "instanceof", "case", "extends", "async"]);
+
 const STATEMENT_START_KEYWORDS = new Set([
   "function",
   "class",
@@ -1246,10 +1306,14 @@ const STATEMENT_START_KEYWORDS = new Set([
   "throw",
 ]);
 
-function canStartRegex(prevToken) {
+function canStartRegex(prevToken, beforePrev) {
   if (!prevToken) return true;
   if (prevToken.type === "lit") return false;
-  if (prevToken.type === "ident") return REGEX_PRECEDING_KEYWORDS.has(prevToken.value);
+  if (prevToken.type === "ident") {
+    // `obj.in / 2` divides: a keyword after `.` is a property name.
+    if (beforePrev?.type === "punct" && beforePrev.value === ".") return false;
+    return REGEX_PRECEDING_KEYWORDS.has(prevToken.value);
+  }
   if (prevToken.type === "punct") {
     if (prevToken.value === "]") return false;
     if (prevToken.value === ")") return Boolean(prevToken.isControlClose);
@@ -1259,12 +1323,28 @@ function canStartRegex(prevToken) {
   return true;
 }
 
+// Whether `function`, `class`, `async` or a statement keyword at idx starts a statement rather than
+// sitting inside an expression. After `;`, `{` or `}` it does. After a token that can end an
+// expression (an identifier, literal, `)`, `]`, `++`, `--`) it does only on a new line, where
+// automatic semicolon insertion ends the previous statement. After an operator or an
+// expression keyword it never does.
 function isDeclarationPosition(tokens, idx) {
   if (idx === 0) return true;
   const prev = tokens[idx - 1];
-  if (prev.type === "punct" && prev.value === ".") return false;
-  if (EXPR_BEFORE_DECL.has(prev.value)) return false;
-  return true;
+  const onNewLine = Boolean(tokens[idx].nlBefore);
+  if (prev.type === "punct") {
+    if (prev.value === ";" || prev.value === "{" || prev.value === "}") return true;
+    if (prev.value === ")" || prev.value === "]" || prev.value === "++" || prev.value === "--") {
+      return onNewLine;
+    }
+    return false;
+  }
+  if (prev.type === "ident") {
+    if (EXPR_BEFORE_DECL.has(prev.value) || EXPR_KEYWORDS.has(prev.value)) return false;
+    if (tokens[idx - 2]?.type === "punct" && tokens[idx - 2].value === ".") return onNewLine;
+    return onNewLine || prev.value === "else" || prev.value === "do";
+  }
+  return onNewLine;
 }
 
 function tokenizeJs(code) {
@@ -1293,7 +1373,7 @@ function tokenizeJs(code) {
       i = Math.min(len, i + 2);
       continue;
     }
-    if (ch === "/" && canStartRegex(tokens[tokens.length - 1] || null)) {
+    if (ch === "/" && canStartRegex(tokens[tokens.length - 1] || null, tokens[tokens.length - 2] || null)) {
       let j = i + 1;
       let inClass = false;
       let closed = false;
@@ -1434,6 +1514,11 @@ function tokenizeJs(code) {
     tokens.push({ type: "punct", value: ch, start: i, end: i + 1 });
     i += 1;
   }
+  // Mark tokens that start a new line (a comment spanning lines counts), for ASI-aware checks.
+  for (let k = 1; k < tokens.length; k += 1) {
+    const gap = code.slice(tokens[k - 1].end, tokens[k].start);
+    tokens[k].nlBefore = /[\n\r\u2028\u2029]/.test(gap);
+  }
   return tokens;
 }
 
@@ -1568,8 +1653,10 @@ function extractTopLevelBindings(tokens) {
               dParen === 0 &&
               dBracket === 0 &&
               t.type === "ident" &&
-              (STATEMENT_START_KEYWORDS.has(t.value) || t.value === "async")
+              (STATEMENT_START_KEYWORDS.has(t.value) || t.value === "async") &&
+              isDeclarationPosition(tokens, i)
             ) {
+              // A new statement after ASI. `fa = async () => 1, fb = 2` keeps scanning.
               break;
             }
             i += 1;
@@ -1770,7 +1857,10 @@ async function handleEval(msg) {
   const evalId = Number(msg.id) || 1;
   currentEvalId = evalId;
   evalActive = true;
-  currentLogs = pendingUnhandledLogs.splice(0, MAX_LOG_LINES);
+  currentLogs = [];
+  currentLogChars = 0;
+  currentLogsDropped = false;
+  for (const line of pendingUnhandledLogs.splice(0)) appendLogLine(line);
   currentAttachedImages = [];
   currentCallCount = 0;
 
@@ -1801,7 +1891,7 @@ async function handleEval(msg) {
       id: evalId,
       ok: false,
       timed_out: timedOut,
-      error: err instanceof Error ? (err.stack || `${err.name}: ${err.message}`) : String(err),
+      error: String(err instanceof Error ? (err.stack || `${err.name}: ${err.message}`) : err).slice(0, MAX_VALUE_CHARS),
       logs: currentLogs,
       attached_images: currentAttachedImages,
       calls: currentCallCount,
