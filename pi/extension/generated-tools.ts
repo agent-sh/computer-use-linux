@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.60";
-export const GENERATED_TOOL_CATALOG_HASH = "1858f8172ef4e0aaf8586959650219446647f85d75d337d800443e71b177b48c";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "93538e829c770425f1ee9635506c86bf538bd807a69cb1fe5149696d3756c3f7";
+export const GENERATED_TOOL_CATALOG_HASH = "509ad3e43b288d00f791273b3734ea65dc26704434184d27fac7d523936fcd06";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "960958257bdf01ff82ff1ff06ac351b24ad37cdb632e26e6255accef4011d6c8";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -243,7 +243,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. A plain left click on an element whose first AT-SPI action is click, press, or toggle invokes that action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics. Explicit x/y default to raw screenshot capture pixels; coordinate_space=\"atspi\" with element_index or a semantic selector maps a global AT-SPI screen point through the element's KWin window and output geometry on KDE Wayland. A window target is raised and focused first (on GNOME Wayland, raising needs the Shell extension); nothing is sent when focus cannot be verified. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. A plain left click on an element whose first AT-SPI action is click, press, or toggle invokes that action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics. Explicit x/y default to raw screenshot capture pixels; coordinate_space=\"atspi\" with element_index or a semantic selector maps a global AT-SPI screen point through the element's KWin window and output geometry on KDE Wayland. A window target is raised and focused first (on GNOME Wayland, raising needs the Shell extension); nothing is sent when focus cannot be verified. With delivery=\"background\", the point goes to the target window, in screenshot capture pixels or window-relative with relative=true, through a pointer of the server's own where the desktop has one, and the user's pointer stays where it is. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "ClickCoordinateSpace": {
@@ -338,7 +338,7 @@ export const GENERATED_MCP_TOOLS =
             }
           ],
           "default": null,
-          "description": "\"background\" sends the input through the agent's own pointer, so the\nuser's pointer and keyboard focus stay where they are: on X11 without\na window manager (an XInput 2 master pointer) and on sway 1.10 or later\n(a transient seat). On GNOME and KDE Plasma Wayland a virtual pen (a touch pan for\nscroll) leaves the user's pointer alone, but a click still focuses the\nwindow, and apps without tablet support ignore it. Needs x and y in\nscreenshot capture pixels over the window the call targets, without\nrelative or an element. Elsewhere the\nfirst such call in a server session sends nothing and returns a\nnotice; repeated, and for every later such call, it goes through the\nuser's pointer as with \"focus\". Default: \"focus\"."
+          "description": "\"background\" sends the input through the agent's own pointer, so the\nuser's pointer and keyboard focus stay where they are: on X11 without\na window manager (an XInput 2 master pointer) and on sway 1.10 or later\n(a transient seat). On GNOME and KDE Plasma Wayland a virtual pen (a touch pan for\nscroll) leaves the user's pointer alone, but a click still focuses the\nwindow, and apps without tablet support ignore it. Needs a window\ntarget and x and y over that window, in screenshot capture pixels or,\nwith relative=true, from the window screenshot's crop origin; an\nelement has no background route. Elsewhere the\nfirst such call in a server session sends nothing and returns a\nnotice; repeated, and for every later such call, it goes through the\nuser's pointer as with \"focus\". Default: \"focus\"."
         },
         "element_index": {
           "default": null,
@@ -2429,7 +2429,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Scroll an element, window, or point in a direction by a number of pages (5 wheel notches per page). With a window target and no x/y/element_index, scrolls at the centre of the targeted window; with no point or target, at the current pointer. A window target is raised and focused first; nothing is sent when focus cannot be verified. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Scroll an element, window, or point in a direction by a number of pages (5 wheel notches per page). With a window target and no x/y/element_index, scrolls at the centre of the targeted window; with no point or target, at the current pointer. A window target is raised and focused first; nothing is sent when focus cannot be verified. With delivery=\"background\", the point goes to the target window, in screenshot capture pixels or window-relative with relative=true, through a pointer of the server's own where the desktop has one, and the user's pointer stays where it is. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "KeyboardDelivery": {
@@ -2495,7 +2495,7 @@ export const GENERATED_MCP_TOOLS =
             }
           ],
           "default": null,
-          "description": "\"background\" sends the input through the agent's own pointer, so the\nuser's pointer and keyboard focus stay where they are: on X11 without\na window manager (an XInput 2 master pointer) and on sway 1.10 or later\n(a transient seat). On GNOME and KDE Plasma Wayland a virtual pen (a touch pan for\nscroll) leaves the user's pointer alone, but a click still focuses the\nwindow, and apps without tablet support ignore it. Needs x and y in\nscreenshot capture pixels over the window the call targets, without\nrelative or an element. Elsewhere the\nfirst such call in a server session sends nothing and returns a\nnotice; repeated, and for every later such call, it goes through the\nuser's pointer as with \"focus\". Default: \"focus\"."
+          "description": "\"background\" sends the input through the agent's own pointer, so the\nuser's pointer and keyboard focus stay where they are: on X11 without\na window manager (an XInput 2 master pointer) and on sway 1.10 or later\n(a transient seat). On GNOME and KDE Plasma Wayland a virtual pen (a touch pan for\nscroll) leaves the user's pointer alone, but a click still focuses the\nwindow, and apps without tablet support ignore it. Needs a window\ntarget and x and y over that window, in screenshot capture pixels or,\nwith relative=true, from the window screenshot's crop origin; an\nelement has no background route. Elsewhere the\nfirst such call in a server session sends nothing and returns a\nnotice; repeated, and for every later such call, it goes through the\nuser's pointer as with \"focus\". Default: \"focus\"."
         },
         "direction": {
           "description": "up, down, left or right (case-insensitive).",

@@ -1635,7 +1635,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "click",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
-        description = "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. A plain left click on an element whose first AT-SPI action is click, press, or toggle invokes that action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics. Explicit x/y default to raw screenshot capture pixels; coordinate_space=\"atspi\" with element_index or a semantic selector maps a global AT-SPI screen point through the element's KWin window and output geometry on KDE Wayland. A window target is raised and focused first (on GNOME Wayland, raising needs the Shell extension); nothing is sent when focus cannot be verified. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+        description = "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. A plain left click on an element whose first AT-SPI action is click, press, or toggle invokes that action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics. Explicit x/y default to raw screenshot capture pixels; coordinate_space=\"atspi\" with element_index or a semantic selector maps a global AT-SPI screen point through the element's KWin window and output geometry on KDE Wayland. A window target is raised and focused first (on GNOME Wayland, raising needs the Shell extension); nothing is sent when focus cannot be verified. With delivery=\"background\", the point goes to the target window, in screenshot capture pixels or window-relative with relative=true, through a pointer of the server's own where the desktop has one, and the user's pointer stays where it is. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1685,10 +1685,9 @@ impl ComputerUseLinux {
                     self.background_pointer(
                         "click",
                         (params.x, params.y),
+                        params.relative == Some(true),
                         params.window_target(),
-                        params.relative == Some(true)
-                            || params.coordinate_space != ClickCoordinateSpace::default()
-                            || click_resolves_cached_element(&params),
+                        background_click_unsupported(&params),
                         move |x, y| crate::agent_seat::PointerInput::Click {
                             x,
                             y,
@@ -2444,7 +2443,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "scroll",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
-        description = "Scroll an element, window, or point in a direction by a number of pages (5 wheel notches per page). With a window target and no x/y/element_index, scrolls at the centre of the targeted window; with no point or target, at the current pointer. A window target is raised and focused first; nothing is sent when focus cannot be verified. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+        description = "Scroll an element, window, or point in a direction by a number of pages (5 wheel notches per page). With a window target and no x/y/element_index, scrolls at the centre of the targeted window; with no point or target, at the current pointer. A window target is raised and focused first; nothing is sent when focus cannot be verified. With delivery=\"background\", the point goes to the target window, in screenshot capture pixels or window-relative with relative=true, through a pointer of the server's own where the desktop has one, and the user's pointer stays where it is. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2505,8 +2504,9 @@ impl ComputerUseLinux {
                 .background_pointer(
                     "scroll",
                     (params.x, params.y),
+                    params.relative == Some(true),
                     params.window_target(),
-                    params.relative == Some(true) || params.element_index.is_some(),
+                    params.element_index.is_some().then_some("an element"),
                     move |x, y| crate::agent_seat::PointerInput::Scroll { x, y, dx, dy },
                     received.clone(),
                     input_guard,
@@ -3035,6 +3035,7 @@ impl ComputerUseLinux {
                         start: (params.start_x, params.start_y),
                         end: (params.end_x, params.end_y),
                     },
+                    false,
                     target.clone(),
                     received.clone(),
                     input_guard,
@@ -5706,9 +5707,10 @@ struct ClickParams {
     /// a window manager (an XInput 2 master pointer) and on sway 1.10 or later
     /// (a transient seat). On GNOME and KDE Plasma Wayland a virtual pen (a touch pan for
     /// scroll) leaves the user's pointer alone, but a click still focuses the
-    /// window, and apps without tablet support ignore it. Needs x and y in
-    /// screenshot capture pixels over the window the call targets, without
-    /// relative or an element. Elsewhere the
+    /// window, and apps without tablet support ignore it. Needs a window
+    /// target and x and y over that window, in screenshot capture pixels or,
+    /// with relative=true, from the window screenshot's crop origin; an
+    /// element has no background route. Elsewhere the
     /// first such call in a server session sends nothing and returns a
     /// notice; repeated, and for every later such call, it goes through the
     /// user's pointer as with "focus". Default: "focus".
@@ -5988,9 +5990,10 @@ struct ScrollParams {
     /// a window manager (an XInput 2 master pointer) and on sway 1.10 or later
     /// (a transient seat). On GNOME and KDE Plasma Wayland a virtual pen (a touch pan for
     /// scroll) leaves the user's pointer alone, but a click still focuses the
-    /// window, and apps without tablet support ignore it. Needs x and y in
-    /// screenshot capture pixels over the window the call targets, without
-    /// relative or an element. Elsewhere the
+    /// window, and apps without tablet support ignore it. Needs a window
+    /// target and x and y over that window, in screenshot capture pixels or,
+    /// with relative=true, from the window screenshot's crop origin; an
+    /// element has no background route. Elsewhere the
     /// first such call in a server session sends nothing and returns a
     /// notice; repeated, and for every later such call, it goes through the
     /// user's pointer as with "focus". Default: "focus".
@@ -7676,6 +7679,15 @@ impl ComputerUseLinux {
             .focused_window
             .as_ref()
             .unwrap_or(&focus.requested_window);
+        self.window_coordinate_map(window).await
+    }
+
+    /// Where a window's screenshot crop sits in capture pixels, for
+    /// window-relative coordinates.
+    async fn window_coordinate_map(
+        &self,
+        window: &WindowInfo,
+    ) -> std::result::Result<WindowCoordinateMap, String> {
         // Umbriel's bounds depend on what the capture covers: read them for
         // the capture the caller's coordinates come from. Before the first
         // capture of a session there is none yet, and the pointer's own
@@ -11043,6 +11055,77 @@ enum PenRequest {
     },
 }
 
+impl PenRequest {
+    /// The request with its window-relative point moved to capture pixels.
+    /// `capture_rect` is the target window's screenshot crop.
+    fn relative_to_capture(
+        self,
+        capture_rect: (i32, i32, u32, u32),
+    ) -> std::result::Result<Self, String> {
+        match self {
+            PenRequest::Click { at, button, count } => Ok(PenRequest::Click {
+                at: window_relative_point(at, capture_rect, "click")?,
+                button,
+                count,
+            }),
+            PenRequest::Scroll { at, dx, dy } => Ok(PenRequest::Scroll {
+                at: window_relative_point(at, capture_rect, "scroll")?,
+                dx,
+                dy,
+            }),
+            PenRequest::Drag { .. } => {
+                Err("A background drag takes no relative coordinates.".to_string())
+            }
+        }
+    }
+}
+
+/// The point of a background click or scroll: in full capture pixels, or
+/// with relative=true from the target window's screenshot crop origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackgroundPoint {
+    Capture(i32, i32),
+    WindowRelative(i32, i32),
+}
+
+impl BackgroundPoint {
+    fn coordinates(self) -> (i32, i32) {
+        match self {
+            BackgroundPoint::Capture(x, y) | BackgroundPoint::WindowRelative(x, y) => (x, y),
+        }
+    }
+}
+
+/// Checks the point a background click or scroll names, before any window
+/// is read. `unsupported` names a target form no background route takes.
+fn background_point(
+    action: &str,
+    (x, y): (Option<i32>, Option<i32>),
+    relative: bool,
+    unsupported: Option<&str>,
+    has_window_target: bool,
+) -> BackgroundResult<BackgroundPoint> {
+    if let Some(form) = unsupported {
+        return Err(BackgroundRefusal::NoRoute(format!(
+            "a background {action} takes x and y in screenshot capture pixels (or from the window screenshot's crop origin with relative=true), not {form}"
+        )));
+    }
+    let (Some(x), Some(y)) = (x, y) else {
+        return Err(BackgroundRefusal::NoRoute(format!(
+            "a background {action} needs x and y in screenshot capture pixels (or from the window screenshot's crop origin with relative=true)"
+        )));
+    };
+    if !relative {
+        return Ok(BackgroundPoint::Capture(x, y));
+    }
+    if !has_window_target {
+        return Err(BackgroundRefusal::Failed(format!(
+            "Nothing was sent: a relative background {action} needs a window target (window_id, pid, app_id, wm_class or window_title)."
+        )));
+    }
+    Ok(BackgroundPoint::WindowRelative(x, y))
+}
+
 /// The windows the virtual pen checks a point against, bottom to top.
 async fn pen_windows(
     desktop: crate::virtual_pen::Desktop,
@@ -11436,8 +11519,9 @@ impl ComputerUseLinux {
         &self,
         action: &'static str,
         point: (Option<i32>, Option<i32>),
+        relative: bool,
         target: Option<WindowTarget>,
-        unsupported_target: bool,
+        unsupported: Option<&'static str>,
         input: impl FnOnce(f64, f64) -> crate::agent_seat::PointerInput,
         received: Option<serde_json::Value>,
         input_guard: impl Send + 'static,
@@ -11450,15 +11534,16 @@ impl ComputerUseLinux {
             reason,
             fallback: FocusFallback::default(),
         };
-        if unsupported_target {
-            return unavailable(format!("a background {action} takes x and y in screenshot capture pixels, without relative, coordinate_space or an element"));
-        }
-        let (Some(x), Some(y)) = point else {
-            return unavailable(format!(
-                "a background {action} needs x and y in screenshot capture pixels"
-            ));
+        let has_window_target = target.as_ref().is_some_and(WindowTarget::has_target);
+        let point = match background_point(action, point, relative, unsupported, has_window_target)
+        {
+            Ok(point) => point,
+            Err(BackgroundRefusal::NoRoute(reason)) => return unavailable(reason),
+            Err(BackgroundRefusal::Failed(message)) => return fail(message),
         };
+        let relative = matches!(point, BackgroundPoint::WindowRelative(..));
         if let Ok(desktop) = crate::virtual_pen::availability() {
+            let (x, y) = point.coordinates();
             let request = match input(f64::from(x), f64::from(y)) {
                 seat::PointerInput::Click { button, count, .. } => PenRequest::Click {
                     at: (x, y),
@@ -11470,7 +11555,15 @@ impl ComputerUseLinux {
                 }
             };
             return self
-                .background_pen(desktop, action, request, target, received, input_guard)
+                .background_pen(
+                    desktop,
+                    action,
+                    request,
+                    relative,
+                    target,
+                    received,
+                    input_guard,
+                )
                 .await;
         }
         let kind = match seat::availability() {
@@ -11512,6 +11605,17 @@ impl ComputerUseLinux {
         if !seat_backend_matches(kind, &window) {
             return unavailable(format!("window_id {} comes from the {} window backend, which the agent seat cannot address", window.window_id, window.backend));
         }
+        let (x, y) = match point {
+            BackgroundPoint::Capture(x, y) => (x, y),
+            BackgroundPoint::WindowRelative(x, y) => match self
+                .window_coordinate_map(&window)
+                .await
+                .and_then(|map| window_relative_point((x, y), map.capture_rect, action))
+            {
+                Ok(point) => point,
+                Err(message) => return fail(format!("Nothing was sent: {message}")),
+            },
+        };
         self.indicator.action(action).await;
         match seat::send_pointer(kind, seat::SeatTarget::from(&window), input(f64::from(x), f64::from(y)), input_guard).await {
             Ok(report) => BackgroundOutcome::Done(
@@ -11538,11 +11642,13 @@ impl ComputerUseLinux {
     /// pen clicks and drags, a virtual touchscreen pans, and the user's mouse
     /// pointer stays where it is. The point must be on the target window,
     /// with no window stacked above it there.
+    #[allow(clippy::too_many_arguments)]
     async fn background_pen(
         &self,
         desktop: crate::virtual_pen::Desktop,
         action: &'static str,
         request: PenRequest,
+        relative: bool,
         target: Option<WindowTarget>,
         received: Option<serde_json::Value>,
         input_guard: impl Send + 'static,
@@ -11596,6 +11702,20 @@ impl ComputerUseLinux {
                 }
                 return fail(format!("Nothing was sent: {error:#}"));
             }
+        };
+        // A window-relative point is measured from the crop the window
+        // screenshot shows; the checks below see it in capture pixels.
+        let request = if relative {
+            match self
+                .window_coordinate_map(&window)
+                .await
+                .and_then(|map| request.relative_to_capture(map.capture_rect))
+            {
+                Ok(request) => request,
+                Err(message) => return fail(format!("Nothing was sent: {message}")),
+            }
+        } else {
+            request
         };
         let cached = self.desktop_size.lock().ok().and_then(|guard| *guard);
         let capture = match cached {
@@ -12573,6 +12693,17 @@ fn window_crop_rect(bounds: &crate::windowing::WindowBounds) -> Option<(i32, i32
     Some((x, y, bounds.width, bounds.height))
 }
 
+/// The target form of a click that no background route takes.
+fn background_click_unsupported(params: &ClickParams) -> Option<&'static str> {
+    if params.coordinate_space != ClickCoordinateSpace::default() {
+        Some("coordinate_space=\"atspi\"")
+    } else if click_resolves_cached_element(params) {
+        Some("an element")
+    } else {
+        None
+    }
+}
+
 fn validate_click_coordinate_space(params: &ClickParams) -> std::result::Result<(), String> {
     if params.coordinate_space == ClickCoordinateSpace::Capture {
         return Ok(());
@@ -12598,31 +12729,42 @@ fn apply_window_relative_click_coordinates(
     params: &mut ClickParams,
     capture_rect: (i32, i32, u32, u32),
 ) -> std::result::Result<(), String> {
-    let (relative_x, relative_y) = params
+    let point = params
         .x
         .zip(params.y)
         .ok_or_else(|| "Relative coordinate clicks require both x and y.".to_string())?;
-    let (origin_x, origin_y, width, height) = capture_rect;
-    if width == 0 || height == 0 {
-        return Err(
-            "Relative coordinate clicks require non-empty target-window bounds.".to_string(),
-        );
-    }
-    if relative_x < 0 || relative_y < 0 {
-        return Err("Relative click coordinates must be inside target-window bounds.".to_string());
-    }
-    if relative_x as u32 >= width || relative_y as u32 >= height {
-        return Err("Relative click coordinates must be inside target-window bounds.".to_string());
-    }
-    let x = origin_x
-        .checked_add(relative_x)
-        .ok_or_else(|| "Relative click x coordinate overflowed.".to_string())?;
-    let y = origin_y
-        .checked_add(relative_y)
-        .ok_or_else(|| "Relative click y coordinate overflowed.".to_string())?;
+    let (x, y) = window_relative_point(point, capture_rect, "click")?;
     params.x = Some(x);
     params.y = Some(y);
     Ok(())
+}
+
+/// A point measured from a window screenshot's crop origin, moved to full
+/// capture pixels. `capture_rect` is that crop; the point must be inside it.
+fn window_relative_point(
+    (relative_x, relative_y): (i32, i32),
+    capture_rect: (i32, i32, u32, u32),
+    action: &str,
+) -> std::result::Result<(i32, i32), String> {
+    let (origin_x, origin_y, width, height) = capture_rect;
+    if width == 0 || height == 0 {
+        return Err(format!(
+            "Relative {action} coordinates require non-empty target-window bounds."
+        ));
+    }
+    if relative_x < 0 || relative_y < 0 || relative_x as u32 >= width || relative_y as u32 >= height
+    {
+        return Err(format!(
+            "Relative {action} coordinates must be inside target-window bounds."
+        ));
+    }
+    let x = origin_x
+        .checked_add(relative_x)
+        .ok_or_else(|| format!("Relative {action} x coordinate overflowed."))?;
+    let y = origin_y
+        .checked_add(relative_y)
+        .ok_or_else(|| format!("Relative {action} y coordinate overflowed."))?;
+    Ok((x, y))
 }
 
 /// Point a window-targeted scroll at the centre of the resolved window when
@@ -12648,22 +12790,13 @@ fn apply_window_relative_scroll_coordinates(
     params: &mut ScrollParams,
     capture_rect: (i32, i32, u32, u32),
 ) -> std::result::Result<(), String> {
-    let (relative_x, relative_y) = params
+    let point = params
         .x
         .zip(params.y)
         .ok_or_else(|| "Relative scroll coordinates require both x and y.".to_string())?;
-    let (origin_x, origin_y, width, height) = capture_rect;
-    if width == 0 || height == 0 {
-        return Err(
-            "Relative scroll coordinates require non-empty target-window bounds.".to_string(),
-        );
-    }
-    if relative_x < 0 || relative_y < 0 || relative_x as u32 >= width || relative_y as u32 >= height
-    {
-        return Err("Relative scroll coordinates must be inside target-window bounds.".to_string());
-    }
-    params.x = Some(origin_x.saturating_add(relative_x));
-    params.y = Some(origin_y.saturating_add(relative_y));
+    let (x, y) = window_relative_point(point, capture_rect, "scroll")?;
+    params.x = Some(x);
+    params.y = Some(y);
     Ok(())
 }
 
@@ -17057,6 +17190,131 @@ esac
             assert!(error.contains("inside target-window bounds"));
             assert_eq!((params.x, params.y), (Some(x), Some(y)));
         }
+    }
+
+    #[test]
+    fn background_click_takes_window_relative_coordinates() {
+        // The shape a client sends for a point in a window screenshot (#480).
+        let params = ClickParams {
+            x: Some(90),
+            y: Some(137),
+            relative: Some(true),
+            window_id: Some(7),
+            delivery: Some(KeyboardDelivery::Background),
+            ..Default::default()
+        };
+        assert_eq!(background_click_unsupported(&params), None);
+        let point = background_point(
+            "click",
+            (params.x, params.y),
+            params.relative == Some(true),
+            background_click_unsupported(&params),
+            params.window_target().is_some(),
+        )
+        .unwrap();
+        assert_eq!(point, BackgroundPoint::WindowRelative(90, 137));
+        assert_eq!(
+            background_point("scroll", (Some(4), Some(5)), false, None, false).unwrap(),
+            BackgroundPoint::Capture(4, 5)
+        );
+    }
+
+    #[test]
+    fn background_relative_point_needs_a_window_target() {
+        let error = background_point("click", (Some(1), Some(2)), true, None, false).unwrap_err();
+        match error {
+            BackgroundRefusal::Failed(message) => {
+                assert!(message.starts_with("Nothing was sent"), "{message}");
+                assert!(message.contains("window target"), "{message}");
+            }
+            BackgroundRefusal::NoRoute(reason) => {
+                panic!("expected a failure, got no route: {reason}")
+            }
+        }
+    }
+
+    #[test]
+    fn background_click_still_has_no_route_for_elements_or_atspi_points() {
+        let element = ClickParams {
+            element_index: Some(3),
+            relative: Some(true),
+            ..Default::default()
+        };
+        let atspi = ClickParams {
+            x: Some(1),
+            y: Some(2),
+            coordinate_space: ClickCoordinateSpace::Atspi,
+            ..Default::default()
+        };
+        assert_eq!(background_click_unsupported(&element), Some("an element"));
+        assert_eq!(
+            background_click_unsupported(&atspi),
+            Some("coordinate_space=\"atspi\"")
+        );
+        for unsupported in ["an element", "coordinate_space=\"atspi\""] {
+            match background_point("click", (Some(1), Some(2)), false, Some(unsupported), true) {
+                Err(BackgroundRefusal::NoRoute(reason)) => assert!(reason.contains(unsupported)),
+                other => panic!("expected no route, got {other:?}"),
+            }
+        }
+        assert!(matches!(
+            background_point("scroll", (None, Some(2)), true, None, true),
+            Err(BackgroundRefusal::NoRoute(_))
+        ));
+    }
+
+    #[test]
+    fn background_relative_point_maps_like_a_focused_relative_click() {
+        let crop = (760, 406, 400, 300);
+        let mut focused = ClickParams {
+            x: Some(90),
+            y: Some(137),
+            relative: Some(true),
+            ..Default::default()
+        };
+        apply_window_relative_click_coordinates(&mut focused, crop).unwrap();
+        let click = PenRequest::Click {
+            at: (90, 137),
+            button: crate::agent_seat::PointerButton::Left,
+            count: 1,
+        }
+        .relative_to_capture(crop)
+        .unwrap();
+        let PenRequest::Click { at, .. } = click else {
+            panic!("a click stays a click");
+        };
+        assert_eq!((Some(at.0), Some(at.1)), (focused.x, focused.y));
+        let scroll = PenRequest::Scroll {
+            at: (0, 299),
+            dx: 0,
+            dy: 5,
+        }
+        .relative_to_capture(crop)
+        .unwrap();
+        assert!(matches!(
+            scroll,
+            PenRequest::Scroll {
+                at: (760, 705),
+                dx: 0,
+                dy: 5
+            }
+        ));
+    }
+
+    #[test]
+    fn background_relative_point_stays_inside_the_window_crop() {
+        for at in [(-1, 0), (0, -1), (400, 0), (0, 300)] {
+            let error = PenRequest::Scroll { at, dx: 0, dy: 1 }
+                .relative_to_capture((760, 406, 400, 300))
+                .unwrap_err();
+            assert!(error.contains("inside target-window bounds"), "{error}");
+        }
+        assert!(PenRequest::Drag {
+            start: (1, 1),
+            end: (2, 2)
+        }
+        .relative_to_capture((0, 0, 10, 10))
+        .is_err());
     }
 
     #[test]
