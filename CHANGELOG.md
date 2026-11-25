@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.63] - 2026-11-26
+
+### Fixed
+
+- The DevTools background-input test launches Chromium with `--password-store=basic`, matching the other browser fixtures and avoiding a GNOME keyring unlock prompt on desktops with a locked login keyring. Thanks to [@rubin55](https://github.com/rubin55) ([#514](https://github.com/agent-sh/computer-use-linux/issues/514)).
+
 ## [0.7.62] - 2026-11-24
 
 ### Fixed
@@ -1290,7 +1296,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.62...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.63...HEAD
+[0.7.63]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.62...v0.7.63
 [0.7.62]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.61...v0.7.62
 [0.7.61]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.60...v0.7.61
 [0.7.60]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.59...v0.7.60
