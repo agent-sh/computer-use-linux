@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.64] - 2026-11-26
+
 ### Fixed
 
 - `type_text` takes an opt-in `paste_fallback` on GNOME Wayland. It tries verified AT-SPI insertion first, then uses the Remote Desktop portal clipboard when no AT-SPI edit is possible, allowing CJK and input-method-affected text into apps without editable AT-SPI. Every offered clipboard MIME type is restored, and a newer clipboard owner is left unchanged. Thanks to [@Fingxing2025](https://github.com/Fingxing2025) ([#516](https://github.com/agent-sh/computer-use-linux/issues/516)).
@@ -1300,7 +1302,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.63...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.64...HEAD
+[0.7.64]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.63...v0.7.64
 [0.7.63]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.62...v0.7.63
 [0.7.62]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.61...v0.7.62
 [0.7.61]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.60...v0.7.61
