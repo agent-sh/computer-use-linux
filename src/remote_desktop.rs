@@ -28,6 +28,7 @@ use zbus::{
 };
 
 mod clipboard;
+pub(crate) use clipboard::is_non_fatal_clipboard_error;
 pub use clipboard::{
     start_portal_keyboard_clipboard_session, ClipboardSelection, PortalClipboardSession,
 };
@@ -87,6 +88,12 @@ pub struct PortalKeyboardSession {
     session_handle: OwnedObjectPath,
     input_lock: Arc<AsyncMutex<()>>,
     valid: Arc<AtomicBool>,
+    /// Standalone keyboard sessions always close on key-release cleanup.
+    /// Shared keyboard+clipboard sessions only close there if a key release
+    /// fails or times out, so clean release recovery keeps the clipboard owner
+    /// alive for restoration.
+    close_on_release_error: bool,
+    closed_by_release_cleanup: Arc<AtomicBool>,
 }
 
 /// The server's cross-backend input lock, held by a portal release guard so
@@ -150,6 +157,8 @@ struct KeyboardReleaseGuard {
     input_guard: Option<OwnedMutexGuard<()>>,
     operation_guard: Option<InputOperationGuard>,
     valid: Arc<AtomicBool>,
+    close_on_release_error: bool,
+    closed_by_release_cleanup: Arc<AtomicBool>,
 }
 
 struct PortalSessionCleanup {
@@ -331,6 +340,8 @@ pub async fn start_portal_keyboard_session() -> Result<PortalKeyboardSession> {
         session_handle,
         input_lock: portal_input_lock(),
         valid: Arc::new(AtomicBool::new(true)),
+        close_on_release_error: true,
+        closed_by_release_cleanup: Arc::new(AtomicBool::new(false)),
     })
 }
 
@@ -1006,6 +1017,8 @@ impl KeyboardReleaseGuard {
             input_guard: Some(input_guard),
             operation_guard: Some(operation_guard),
             valid: Arc::clone(&session.valid),
+            close_on_release_error: session.close_on_release_error,
+            closed_by_release_cleanup: Arc::clone(&session.closed_by_release_cleanup),
         }
     }
 
@@ -1063,21 +1076,34 @@ impl Drop for KeyboardReleaseGuard {
         let ei = self.ei.clone();
         let session_handle = self.session_handle.clone();
         let pressed = std::mem::take(&mut self.pressed);
+        let close_on_release_error = self.close_on_release_error;
+        let closed_by_release_cleanup = Arc::clone(&self.closed_by_release_cleanup);
         spawn_release_cleanup(input_guard, operation_guard, async move {
-            let _ = tokio::time::timeout(RELEASE_TIMEOUT, async {
-                if let Ok(proxy) = input_proxy(&connection, ei, Vec::new()).await {
-                    for key in pressed.into_iter().rev() {
-                        let _ =
-                            notify_keyboard_key(&proxy, &session_handle, key, KEY_RELEASED).await;
+            let released_all = tokio::time::timeout(RELEASE_TIMEOUT, async {
+                let Ok(proxy) = input_proxy(&connection, ei, Vec::new()).await else {
+                    return false;
+                };
+                let mut all_ok = true;
+                for key in pressed.into_iter().rev() {
+                    if notify_keyboard_key(&proxy, &session_handle, key, KEY_RELEASED)
+                        .await
+                        .is_err()
+                    {
+                        all_ok = false;
                     }
                 }
+                all_ok
             })
-            .await;
-            let _ = tokio::time::timeout(
-                RELEASE_TIMEOUT,
-                close_portal_session(&connection, &session_handle),
-            )
-            .await;
+            .await
+            .unwrap_or_default();
+            if close_on_release_error || !released_all {
+                closed_by_release_cleanup.store(true, Ordering::Release);
+                let _ = tokio::time::timeout(
+                    RELEASE_TIMEOUT,
+                    close_portal_session(&connection, &session_handle),
+                )
+                .await;
+            }
         });
     }
 }
@@ -1183,6 +1209,14 @@ impl PortalKeyboardSession {
 
     pub(crate) fn same_session(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.valid, &other.valid)
+    }
+
+    pub(crate) async fn wait_for_release_cleanup(&self) {
+        let _guard = self.input_lock.lock().await;
+    }
+
+    pub(crate) fn was_closed_by_release_cleanup(&self) -> bool {
+        self.closed_by_release_cleanup.load(Ordering::Acquire)
     }
 
     fn ensure_valid(&self) -> Result<()> {
@@ -3442,8 +3476,11 @@ mod tests {
         let dir = TempState::new();
         let pointer = RestorePermit::acquire_in(&dir.path, PortalDeviceKind::Pointer).unwrap();
         let keyboard = RestorePermit::acquire_in(&dir.path, PortalDeviceKind::Keyboard).unwrap();
+        let keyboard_clipboard =
+            RestorePermit::acquire_in(&dir.path, PortalDeviceKind::KeyboardClipboard).unwrap();
         assert_eq!(pointer.token(), None);
         assert_eq!(keyboard.token(), None);
+        assert_eq!(keyboard_clipboard.token(), None);
         let dir_mode = std::fs::metadata(&dir.path).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700);
 
@@ -3453,9 +3490,15 @@ mod tests {
         keyboard
             .commit(ParsedRestoreToken::Usable("keyboard-token".to_string()))
             .unwrap();
+        keyboard_clipboard
+            .commit(ParsedRestoreToken::Usable(
+                "keyboard-clipboard-token".to_string(),
+            ))
+            .unwrap();
 
         let pointer_path = dir.path.join("remote-desktop-pointer.token");
         let keyboard_path = dir.path.join("remote-desktop-keyboard.token");
+        let keyboard_clipboard_path = dir.path.join("remote-desktop-keyboard-clipboard.token");
         assert_eq!(
             std::fs::metadata(&pointer_path)
                 .unwrap()
@@ -3472,6 +3515,10 @@ mod tests {
             std::fs::read_to_string(&keyboard_path).unwrap(),
             "keyboard-token"
         );
+        assert_eq!(
+            std::fs::read_to_string(&keyboard_clipboard_path).unwrap(),
+            "keyboard-clipboard-token"
+        );
 
         let pointer = RestorePermit::acquire_in(&dir.path, PortalDeviceKind::Pointer).unwrap();
         assert_eq!(pointer.token(), Some("pointer-token"));
@@ -3482,6 +3529,14 @@ mod tests {
         assert_eq!(keyboard.token(), Some("keyboard-token"));
         keyboard.commit(ParsedRestoreToken::Rejected).unwrap();
         assert!(!keyboard_path.exists());
+
+        let keyboard_clipboard =
+            RestorePermit::acquire_in(&dir.path, PortalDeviceKind::KeyboardClipboard).unwrap();
+        assert_eq!(keyboard_clipboard.token(), Some("keyboard-clipboard-token"));
+        keyboard_clipboard
+            .commit(ParsedRestoreToken::Absent)
+            .unwrap();
+        assert!(!keyboard_clipboard_path.exists());
     }
 
     #[test]

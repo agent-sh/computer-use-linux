@@ -1,8 +1,9 @@
 use super::*;
 use std::collections::HashSet;
 use tokio::{
-    sync::{mpsc, watch},
-    task::JoinHandle,
+    io::{unix::AsyncFd, Interest},
+    sync::{mpsc, watch, Semaphore},
+    task::{JoinHandle, JoinSet},
 };
 
 const PORTAL_CLIPBOARD_INTERFACE: &str = "org.freedesktop.portal.Clipboard";
@@ -10,24 +11,158 @@ const CLIPBOARD_CALL_TIMEOUT: Duration = Duration::from_secs(5);
 const INITIAL_OWNER_SETTLE_TIMEOUT: Duration = Duration::from_millis(250);
 const CLEAR_OWNER_SETTLE_TIMEOUT: Duration = Duration::from_millis(250);
 const SELECTION_READ_RETRY_DELAYS_MS: &[u64] = &[10, 15, 25, 40, 60, 80, 100, 150];
+const MAX_CLIPBOARD_MIME_TYPES: usize = 64;
 const MAX_CLIPBOARD_MIME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CLIPBOARD_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CLIPBOARD_READ_DURATION: Duration = Duration::from_secs(15);
+const MAX_CONCURRENT_TRANSFERS: usize = 8;
+const TRANSFER_SEMAPHORE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Uncached sentinel MIME type set immediately before unsetting an empty
 /// clipboard so Mutter's `MetaClipboardManager` drops its saved copy of the
 /// temporary pasted text instead of restoring it on `meta_selection_unset_owner`.
 const EMPTY_CLIPBOARD_CLEAR_MIME: &str = "application/x-computer-use-linux-clear";
 const ICCCM_META_TARGETS: &[&str] = &["TARGETS", "TIMESTAMP", "MULTIPLE", "SAVE_TARGETS", "DELETE"];
 
-fn set_blocking(fd: &std::os::fd::OwnedFd) -> io::Result<()> {
+/// Clipboard snapshot refusal caused by local restore limits or a concurrent
+/// external clipboard update rather than a broken portal session.
+#[derive(Debug)]
+struct ClipboardSnapshotRefused(String);
+
+impl std::fmt::Display for ClipboardSnapshotRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ClipboardSnapshotRefused {}
+
+pub(crate) fn is_non_fatal_clipboard_error(error: &anyhow::Error) -> bool {
+    error.is::<ClipboardSnapshotRefused>()
+}
+
+fn set_nonblocking(fd: &std::os::fd::OwnedFd) -> io::Result<()> {
     let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
     if flags < 0 {
         return Err(io::Error::last_os_error());
     }
-    let result = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) };
+    if flags & libc::O_NONBLOCK != 0 {
+        return Ok(());
+    }
+    let result = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
     if result < 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+async fn read_nonblocking_fd_bounded(
+    fd: std::os::fd::OwnedFd,
+    max_bytes: usize,
+) -> Result<Vec<u8>> {
+    set_nonblocking(&fd).context("failed to set clipboard read pipe non-blocking")?;
+    // SAFETY: `fd` is an exclusively owned valid file descriptor kept alive by `AsyncFd`.
+    let async_fd = unsafe { AsyncFd::register_with_interest(fd, Interest::READABLE) }
+        .context("failed to register clipboard read pipe with tokio reactor")?;
+    let mut payload = Vec::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let mut guard = async_fd
+            .readable()
+            .await
+            .context("clipboard read pipe readiness wait failed")?;
+        match guard.try_io(|inner| {
+            let n = unsafe {
+                libc::read(
+                    inner.get_ref().as_raw_fd(),
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                )
+            };
+            if n < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(n as usize)
+            }
+        }) {
+            Ok(Ok(0)) => return Ok(payload),
+            Ok(Ok(n)) => {
+                if payload.len().saturating_add(n) > max_bytes {
+                    return Err(anyhow::Error::new(ClipboardSnapshotRefused(
+                        "Clipboard MIME payload exceeds the 16 MiB restore limit".to_string(),
+                    )));
+                }
+                payload.extend_from_slice(&buf[..n]);
+            }
+            Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Ok(Err(error)) => {
+                return Err(error).context("failed reading clipboard MIME payload");
+            }
+            Err(_would_block) => continue,
+        }
+    }
+}
+
+async fn write_nonblocking_fd(fd: std::os::fd::OwnedFd, data: &[u8]) -> io::Result<()> {
+    set_nonblocking(&fd)?;
+    // SAFETY: `fd` is an exclusively owned valid file descriptor kept alive by `AsyncFd`.
+    let async_fd = unsafe { AsyncFd::register_with_interest(fd, Interest::WRITABLE) }?;
+    let mut offset = 0usize;
+    while offset < data.len() {
+        let mut guard = async_fd.writable().await?;
+        match guard.try_io(|inner| {
+            let remaining = &data[offset..];
+            let n = unsafe {
+                libc::write(
+                    inner.get_ref().as_raw_fd(),
+                    remaining.as_ptr().cast(),
+                    remaining.len(),
+                )
+            };
+            if n < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(n as usize)
+            }
+        }) {
+            Ok(Ok(0)) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "clipboard write pipe returned zero bytes",
+                ));
+            }
+            Ok(Ok(n)) => offset += n,
+            Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Ok(Err(error)) => return Err(error),
+            Err(_would_block) => continue,
+        }
+    }
+    Ok(())
+}
+
+struct StartupTaskGuard {
+    handle: Option<JoinHandle<()>>,
+}
+
+impl StartupTaskGuard {
+    fn new(handle: JoinHandle<()>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    fn disarm(&mut self) -> JoinHandle<()> {
+        self.handle
+            .take()
+            .expect("startup task guard already disarmed")
+    }
+}
+
+impl Drop for StartupTaskGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -130,8 +265,10 @@ pub struct PortalClipboardSession {
     transfer_task: JoinHandle<()>,
     selection: watch::Sender<Arc<ClipboardSelection>>,
     latest_owner: Option<ClipboardOwner>,
+    owner_generation: u64,
     initial_owner_checked: bool,
     owner: bool,
+    closed: bool,
 }
 
 impl PortalClipboardSession {
@@ -141,28 +278,32 @@ impl PortalClipboardSession {
 
     pub fn is_valid(&self) -> bool {
         self.keyboard.is_valid()
+            && !self.was_closed_by_keyboard_cleanup()
             && !self.owner_task.is_finished()
             && !self.transfer_task.is_finished()
     }
 
+    pub(crate) async fn wait_for_keyboard_cleanup(&self) {
+        self.keyboard.wait_for_release_cleanup().await;
+    }
+
+    pub(crate) fn was_closed_by_keyboard_cleanup(&self) -> bool {
+        self.keyboard.was_closed_by_release_cleanup()
+    }
+
+    fn apply_owner_update(&mut self, owner: ClipboardOwner) {
+        self.owner_generation = self.owner_generation.wrapping_add(1);
+        self.owner = owner.session_is_owner;
+        self.latest_owner = Some(owner);
+    }
+
     fn drain_owner_updates(&mut self) {
         while let Ok(owner) = self.owner_changed.try_recv() {
-            self.owner = owner.session_is_owner;
-            self.latest_owner = Some(owner);
+            self.apply_owner_update(owner);
         }
     }
 
-    async fn wait_for_initial_owner(&mut self) {
-        self.drain_owner_updates();
-        if self.initial_owner_checked {
-            return;
-        }
-        self.initial_owner_checked = true;
-        if self.latest_owner.is_some() {
-            return;
-        }
-        // Barrier on the portal connection so signals emitted during Start have
-        // reached our socket before deciding the clipboard is empty.
+    async fn portal_ping_barrier(&self) {
         let _ = tokio::time::timeout(
             CLIPBOARD_CALL_TIMEOUT,
             self.connection.call_method(
@@ -174,25 +315,45 @@ impl PortalClipboardSession {
             ),
         )
         .await;
+        // Let the signal forwarding task drain any SelectionOwnerChanged
+        // messages that arrived ahead of the Peer.Ping reply.
+        tokio::task::yield_now().await;
+    }
+
+    pub(crate) async fn sync_owner_state(&mut self) {
         self.drain_owner_updates();
+        self.portal_ping_barrier().await;
+        self.drain_owner_updates();
+        if self.initial_owner_checked {
+            return;
+        }
+        self.initial_owner_checked = true;
         if self.latest_owner.is_some() {
             return;
         }
         if let Ok(Some(owner)) =
             tokio::time::timeout(INITIAL_OWNER_SETTLE_TIMEOUT, self.owner_changed.recv()).await
         {
-            self.owner = owner.session_is_owner;
-            self.latest_owner = Some(owner);
+            self.apply_owner_update(owner);
             self.drain_owner_updates();
         }
     }
 
-    async fn read_mime_payload(&self, mime_type: &str, allow_retry: bool) -> Result<Vec<u8>> {
+    async fn read_mime_payload(
+        &self,
+        mime_type: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<Vec<u8>> {
         let proxy = clipboard_proxy(&self.connection).await?;
         let mut attempt = 0usize;
         let fd: zbus::zvariant::OwnedFd = loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                bail!("Clipboard snapshot exceeded the 15s read budget");
+            }
+            let call_timeout = remaining.min(CLIPBOARD_CALL_TIMEOUT);
             let call = tokio::time::timeout(
-                CLIPBOARD_CALL_TIMEOUT,
+                call_timeout,
                 proxy.call("SelectionRead", &(&self.session_handle, mime_type)),
             )
             .await
@@ -200,8 +361,7 @@ impl PortalClipboardSession {
             match call {
                 Ok(fd) => break fd,
                 Err(error)
-                    if (allow_retry || is_transient_selection_read_error(&error))
-                        && attempt < SELECTION_READ_RETRY_DELAYS_MS.len()
+                    if attempt < SELECTION_READ_RETRY_DELAYS_MS.len()
                         && is_transient_selection_read_error(&error) =>
                 {
                     let delay = Duration::from_millis(SELECTION_READ_RETRY_DELAYS_MS[attempt]);
@@ -213,33 +373,26 @@ impl PortalClipboardSession {
                 }
             }
         };
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            bail!("Clipboard snapshot exceeded the 15s read budget");
+        }
+        let read_timeout = remaining.min(CLIPBOARD_CALL_TIMEOUT);
         let fd: std::os::fd::OwnedFd = fd.into();
-        set_blocking(&fd)?;
-        let file = std::fs::File::from(fd);
-        let payload = tokio::time::timeout(
-            CLIPBOARD_CALL_TIMEOUT,
-            tokio::task::spawn_blocking(move || {
-                let mut payload = Vec::new();
-                let mut limited = file.take(MAX_CLIPBOARD_MIME_BYTES as u64 + 1);
-                limited.read_to_end(&mut payload)?;
-                drop(limited);
-                io::Result::Ok(payload)
-            }),
+        tokio::time::timeout(
+            read_timeout,
+            read_nonblocking_fd_bounded(fd, MAX_CLIPBOARD_MIME_BYTES),
         )
         .await
         .context("Clipboard payload read timed out")?
-        .context("Clipboard payload reader task failed")??;
-        if payload.len() > MAX_CLIPBOARD_MIME_BYTES {
-            bail!("Clipboard MIME payload exceeds the 16 MiB restore limit");
-        }
-        Ok(payload)
     }
 
     pub async fn read_current_selection(&mut self) -> Result<ClipboardSelection> {
-        self.wait_for_initial_owner().await;
+        self.sync_owner_state().await;
         if self.owner {
             return Ok((**self.selection.borrow()).clone());
         }
+        let start_generation = self.owner_generation;
         let mime_types = self
             .latest_owner
             .as_ref()
@@ -248,16 +401,38 @@ impl PortalClipboardSession {
         if mime_types.is_empty() {
             return Ok(ClipboardSelection::default());
         }
+        if mime_types.len() > MAX_CLIPBOARD_MIME_TYPES {
+            return Err(anyhow::Error::new(ClipboardSnapshotRefused(format!(
+                "Clipboard offers {} MIME types, exceeding the {} MIME type restore limit",
+                mime_types.len(),
+                MAX_CLIPBOARD_MIME_TYPES
+            ))));
+        }
 
+        let read_deadline = tokio::time::Instant::now() + MAX_CLIPBOARD_READ_DURATION;
         let mut selection = ClipboardSelection::default();
         let mut total_bytes = 0usize;
-        for (index, mime_type) in mime_types.into_iter().enumerate() {
-            let payload = self.read_mime_payload(&mime_type, index > 0).await?;
+        for mime_type in mime_types {
+            self.drain_owner_updates();
+            if self.owner_generation != start_generation {
+                return Err(anyhow::Error::new(ClipboardSnapshotRefused(
+                    "Clipboard owner changed while snapshotting previous contents".to_string(),
+                )));
+            }
+            let payload = self.read_mime_payload(&mime_type, read_deadline).await?;
             total_bytes = total_bytes.saturating_add(payload.len());
             if total_bytes > MAX_CLIPBOARD_TOTAL_BYTES {
-                bail!("Clipboard contents exceed the 64 MiB restore limit");
+                return Err(anyhow::Error::new(ClipboardSnapshotRefused(
+                    "Clipboard contents exceed the 64 MiB restore limit".to_string(),
+                )));
             }
             selection.formats.push((mime_type, payload));
+        }
+        self.drain_owner_updates();
+        if self.owner_generation != start_generation {
+            return Err(anyhow::Error::new(ClipboardSnapshotRefused(
+                "Clipboard owner changed while snapshotting previous contents".to_string(),
+            )));
         }
         Ok(selection)
     }
@@ -288,9 +463,15 @@ impl PortalClipboardSession {
             self.latest_owner = Some(ClipboardOwner::default());
             let _ = tokio::time::timeout(CLEAR_OWNER_SETTLE_TIMEOUT, async {
                 while let Some(owner) = self.owner_changed.recv().await {
-                    self.owner = owner.session_is_owner;
-                    self.latest_owner = Some(owner.clone());
-                    if !owner.session_is_owner {
+                    let is_sentinel_echo = owner.session_is_owner
+                        && owner.mime_types.len() == 1
+                        && owner.mime_types[0] == EMPTY_CLIPBOARD_CLEAR_MIME;
+                    if is_sentinel_echo {
+                        continue;
+                    }
+                    let owned = owner.session_is_owner;
+                    self.apply_owner_update(owner);
+                    if !owned {
                         break;
                     }
                 }
@@ -329,9 +510,9 @@ impl PortalClipboardSession {
             }
             match tokio::time::timeout(remaining, self.owner_changed.recv()).await {
                 Ok(Some(owner)) => {
-                    self.owner = owner.session_is_owner;
-                    self.latest_owner = Some(owner.clone());
-                    if owner.session_is_owner {
+                    let owned = owner.session_is_owner;
+                    self.apply_owner_update(owner);
+                    if owned {
                         return Ok(());
                     }
                 }
@@ -342,6 +523,10 @@ impl PortalClipboardSession {
     }
 
     pub fn selection_still_owned(&mut self) -> bool {
+        if self.was_closed_by_keyboard_cleanup() {
+            self.owner = false;
+            return false;
+        }
         self.drain_owner_updates();
         self.owner
     }
@@ -351,10 +536,7 @@ impl PortalClipboardSession {
             let mut session = self;
             while session.selection_still_owned() {
                 match session.owner_changed.recv().await {
-                    Some(owner) => {
-                        session.owner = owner.session_is_owner;
-                        session.latest_owner = Some(owner);
-                    }
+                    Some(owner) => session.apply_owner_update(owner),
                     None => break,
                 }
             }
@@ -362,14 +544,39 @@ impl PortalClipboardSession {
         });
     }
 
-    pub async fn close(self) {
+    pub async fn close(mut self) {
+        self.closed = true;
         self.owner_task.abort();
         self.transfer_task.abort();
-        let _ = tokio::time::timeout(
-            RELEASE_TIMEOUT,
-            close_portal_session(&self.connection, &self.session_handle),
-        )
-        .await;
+        if !self.was_closed_by_keyboard_cleanup() {
+            let _ = tokio::time::timeout(
+                RELEASE_TIMEOUT,
+                close_portal_session(&self.connection, &self.session_handle),
+            )
+            .await;
+        }
+    }
+}
+
+impl Drop for PortalClipboardSession {
+    fn drop(&mut self) {
+        self.owner_task.abort();
+        self.transfer_task.abort();
+        if self.closed || self.was_closed_by_keyboard_cleanup() {
+            return;
+        }
+        self.closed = true;
+        let connection = self.connection.clone();
+        let session_handle = self.session_handle.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = tokio::time::timeout(
+                    RELEASE_TIMEOUT,
+                    close_portal_session(&connection, &session_handle),
+                )
+                .await;
+            });
+        }
     }
 }
 
@@ -404,68 +611,45 @@ async fn start_portal_keyboard_clipboard_session_on(
         .context("failed to subscribe to Clipboard SelectionTransfer")?;
 
     let (owner_sender, owner_changed) = mpsc::unbounded_channel();
-    let owner_task = tokio::spawn(forward_owner_changes(
+    let mut owner_task = StartupTaskGuard::new(tokio::spawn(forward_owner_changes(
         owner_stream,
         session_handle.clone(),
         owner_sender,
-    ));
+    )));
 
     let (selection, receiver) = watch::channel(Arc::new(ClipboardSelection::default()));
-    let transfer_task = tokio::spawn(serve_clipboard_transfers(
+    let mut transfer_task = StartupTaskGuard::new(tokio::spawn(serve_clipboard_transfers(
         connection.clone(),
         session_handle.clone(),
         transfer_stream,
         receiver,
-    ));
+    )));
 
     let request_options: HashMap<&str, Value<'_>> = HashMap::new();
-    let request_result = tokio::time::timeout(
+    tokio::time::timeout(
         CLIPBOARD_CALL_TIMEOUT,
         clipboard.call::<_, _, ()>("RequestClipboard", &(&session_handle, request_options)),
     )
     .await
-    .context("Clipboard RequestClipboard call timed out")
-    .and_then(|res| res.context("Clipboard RequestClipboard call failed"));
-    if let Err(error) = request_result {
-        owner_task.abort();
-        transfer_task.abort();
-        return Err(error);
-    }
+    .context("Clipboard RequestClipboard call timed out")?
+    .context("Clipboard RequestClipboard call failed")?;
 
-    let start_result = start_remote_desktop_session(&connection, &session_handle).await;
-    let (devices, _, restore_token, clipboard_enabled) = match start_result {
-        Ok(values) => values,
-        Err(error) => {
-            owner_task.abort();
-            transfer_task.abort();
-            return Err(error);
-        }
-    };
+    let (devices, _, restore_token, clipboard_enabled) =
+        start_remote_desktop_session(&connection, &session_handle).await?;
 
     let granted = devices & DEVICE_KEYBOARD != 0 && clipboard_enabled;
     let restore_token = restore_token_to_keep(granted, restore_token);
     commit_restore_permit(permit, restore_token).await;
 
     if devices & DEVICE_KEYBOARD == 0 {
-        owner_task.abort();
-        transfer_task.abort();
         bail!("remote desktop portal session started without keyboard access");
     }
     if !clipboard_enabled {
-        owner_task.abort();
-        transfer_task.abort();
         bail!("remote desktop portal session started without clipboard access");
     }
 
     let ei = if connect_eis {
-        match portal_eis_input(&connection, &session_handle, DeviceKind::Keyboard, false).await {
-            Ok(ei) => ei,
-            Err(error) => {
-                owner_task.abort();
-                transfer_task.abort();
-                return Err(error);
-            }
-        }
+        portal_eis_input(&connection, &session_handle, DeviceKind::Keyboard, false).await?
     } else {
         None
     };
@@ -477,18 +661,22 @@ async fn start_portal_keyboard_clipboard_session_on(
         session_handle: session_handle.clone(),
         input_lock: portal_input_lock(),
         valid: Arc::new(AtomicBool::new(true)),
+        close_on_release_error: false,
+        closed_by_release_cleanup: Arc::new(AtomicBool::new(false)),
     };
     Ok(PortalClipboardSession {
         keyboard,
         connection,
         session_handle,
         owner_changed,
-        owner_task,
-        transfer_task,
+        owner_task: owner_task.disarm(),
+        transfer_task: transfer_task.disarm(),
         selection,
         latest_owner: None,
+        owner_generation: 0,
         initial_owner_checked: false,
         owner: false,
+        closed: false,
     })
 }
 
@@ -531,7 +719,18 @@ async fn serve_clipboard_transfers(
     mut stream: SignalStream<'static>,
     selection: watch::Receiver<Arc<ClipboardSelection>>,
 ) {
-    while let Some(signal) = stream.next().await {
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_TRANSFERS));
+    let mut transfers = JoinSet::new();
+    loop {
+        let signal = tokio::select! {
+            Some(_) = transfers.join_next(), if !transfers.is_empty() => continue,
+            next = stream.next() => match next {
+                Some(signal) => signal,
+                None => break,
+            },
+        };
+        while transfers.try_join_next().is_some() {}
+
         let Ok((signal_session, mime_type, serial)) = signal
             .body()
             .deserialize::<(OwnedObjectPath, String, u32)>()
@@ -541,10 +740,25 @@ async fn serve_clipboard_transfers(
         if signal_session != session_handle {
             continue;
         }
-        let payload = selection.borrow().payload(&mime_type).map(<[u8]>::to_vec);
+        let permit = match Arc::clone(&semaphore).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                match tokio::time::timeout(
+                    TRANSFER_SEMAPHORE_TIMEOUT,
+                    Arc::clone(&semaphore).acquire_owned(),
+                )
+                .await
+                {
+                    Ok(Ok(permit)) => permit,
+                    _ => continue,
+                }
+            }
+        };
+        let current_selection = Arc::clone(&*selection.borrow());
         let connection = connection.clone();
         let session_handle = session_handle.clone();
-        tokio::spawn(async move {
+        transfers.spawn(async move {
+            let _permit = permit;
             let Ok(proxy) = clipboard_proxy(&connection).await else {
                 return;
             };
@@ -558,28 +772,20 @@ async fn serve_clipboard_transfers(
                 _ => return,
             };
             let fd: std::os::fd::OwnedFd = fd.into();
-            let blocking = set_blocking(&fd).is_ok();
-            let file = std::fs::File::from(fd);
-            let success = blocking
-                && match payload {
-                    Some(payload) => matches!(
-                        tokio::time::timeout(
-                            CLIPBOARD_CALL_TIMEOUT,
-                            tokio::task::spawn_blocking(move || {
-                                let mut file = file;
-                                let result = file.write_all(&payload);
-                                drop(file);
-                                result
-                            }),
-                        )
-                        .await,
-                        Ok(Ok(Ok(())))
-                    ),
-                    None => {
-                        drop(file);
-                        false
-                    }
-                };
+            let success = match current_selection.payload(&mime_type) {
+                Some(payload) => matches!(
+                    tokio::time::timeout(
+                        CLIPBOARD_CALL_TIMEOUT,
+                        write_nonblocking_fd(fd, payload),
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ),
+                None => {
+                    drop(fd);
+                    false
+                }
+            };
             let _ = tokio::time::timeout(
                 CLIPBOARD_CALL_TIMEOUT,
                 proxy.call::<_, _, ()>("SelectionWriteDone", &(&session_handle, serial, success)),
@@ -587,6 +793,7 @@ async fn serve_clipboard_transfers(
             .await;
         });
     }
+    transfers.abort_all();
 }
 
 #[cfg(test)]
@@ -630,6 +837,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_owner_options_supports_tuple_mime_list_and_hyphenated_keys() {
+        let mut options: HashMap<String, OwnedValue> = HashMap::new();
+        options.insert(
+            "mime-types".to_string(),
+            OwnedValue::try_from(Value::from((vec![
+                "text/html".to_string(),
+                "text/plain".to_string(),
+            ],)))
+            .unwrap(),
+        );
+        options.insert(
+            "session-is-owner".to_string(),
+            OwnedValue::try_from(Value::from(true)).unwrap(),
+        );
+        let owner = parse_owner_options(&options);
+        assert!(owner.session_is_owner);
+        assert_eq!(owner.mime_types, vec!["text/html", "text/plain"]);
+    }
+
+    #[tokio::test]
+    async fn nonblocking_read_timeout_closes_stalled_pipe_immediately() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let read_fd: std::os::fd::OwnedFd = reader.into();
+        let timed_out = tokio::time::timeout(
+            Duration::from_millis(60),
+            read_nonblocking_fd_bounded(read_fd, MAX_CLIPBOARD_MIME_BYTES),
+        )
+        .await;
+        assert!(timed_out.is_err(), "stalled pipe read should time out");
+        // Dropping the timed-out future must have closed the read end immediately.
+        let write_err = writer
+            .write(b"late bytes")
+            .expect_err("peer write must fail once timed-out read FD is closed");
+        assert!(
+            matches!(
+                write_err.kind(),
+                io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+            ),
+            "unexpected peer write error: {write_err}"
+        );
+    }
+
     #[derive(Default)]
     struct FakePortalState {
         clipboard_requested: bool,
@@ -637,6 +887,9 @@ mod tests {
         initial_formats: Vec<(String, Vec<u8>)>,
         fail_first_second_read: bool,
         fail_sentinel_clear: bool,
+        change_owner_after_first_read: bool,
+        fail_keycode_press_index: Option<usize>,
+        fail_keycode_release: bool,
         read_calls: usize,
         set_selection_calls: Vec<Vec<String>>,
         keycodes: Vec<(i32, u32)>,
@@ -776,7 +1029,7 @@ mod tests {
                 if clipboard_enabled && !initial_mimes.is_empty() {
                     let cb_emitter = SignalEmitter::new(&conn, PORTAL_DESKTOP_PATH).unwrap();
                     let mut opts: HashMap<String, Value<'_>> = HashMap::new();
-                    opts.insert("mime_types".to_string(), Value::from(initial_mimes));
+                    opts.insert("mime_types".to_string(), Value::from((initial_mimes,)));
                     opts.insert("session_is_owner".to_string(), Value::from(false));
                     let _ =
                         FakeClipboard::selection_owner_changed(&cb_emitter, session, opts).await;
@@ -799,8 +1052,25 @@ mod tests {
             _options: HashMap<String, OwnedValue>,
             keycode: i32,
             state: u32,
-        ) {
-            self.state.lock().unwrap().keycodes.push((keycode, state));
+        ) -> zbus::fdo::Result<()> {
+            let mut guard = self.state.lock().unwrap();
+            let press_index = guard
+                .keycodes
+                .iter()
+                .filter(|(_, s)| *s == KEY_PRESSED)
+                .count();
+            guard.keycodes.push((keycode, state));
+            if state == KEY_PRESSED && guard.fail_keycode_press_index == Some(press_index) {
+                return Err(zbus::fdo::Error::Failed(
+                    "injected press failure".to_string(),
+                ));
+            }
+            if state == KEY_RELEASED && guard.fail_keycode_release {
+                return Err(zbus::fdo::Error::Failed(
+                    "injected release failure".to_string(),
+                ));
+            }
+            Ok(())
         }
     }
 
@@ -858,7 +1128,7 @@ mod tests {
                 let emitter = SignalEmitter::new(&conn, PORTAL_DESKTOP_PATH).unwrap();
                 let mut opts: HashMap<String, Value<'_>> = HashMap::new();
                 if !mimes.is_empty() {
-                    opts.insert("mime_types".to_string(), Value::from(mimes));
+                    opts.insert("mime_types".to_string(), Value::from((mimes,)));
                     opts.insert("session_is_owner".to_string(), Value::from(true));
                 } else {
                     opts.insert("session_is_owner".to_string(), Value::from(false));
@@ -870,27 +1140,44 @@ mod tests {
 
         async fn selection_read(
             &self,
-            _session: OwnedObjectPath,
+            session: OwnedObjectPath,
             mime_type: String,
+            #[zbus(connection)] conn: &Connection,
         ) -> zbus::fdo::Result<zbus::zvariant::OwnedFd> {
-            let payload = {
+            let (payload, emit_owner_change) = {
                 let mut state = self.state.lock().unwrap();
                 state.read_calls += 1;
                 if state.fail_first_second_read && state.read_calls == 2 {
                     state.fail_first_second_read = false;
                     return Err(zbus::fdo::Error::Failed("Internal error".to_string()));
                 }
-                state
+                let emit_change = state.change_owner_after_first_read && state.read_calls == 1;
+                if emit_change {
+                    state.change_owner_after_first_read = false;
+                }
+                let bytes = state
                     .initial_formats
                     .iter()
                     .find(|(m, _)| m == &mime_type)
                     .map(|(_, bytes)| bytes.clone())
-                    .ok_or_else(|| zbus::fdo::Error::Failed(format!("missing {mime_type}")))?
+                    .ok_or_else(|| zbus::fdo::Error::Failed(format!("missing {mime_type}")))?;
+                (bytes, emit_change)
             };
             let (reader, mut writer) = UnixStream::pair().unwrap();
             let _ = reader.set_nonblocking(true);
-            writer.write_all(&payload).unwrap();
-            drop(writer);
+            tokio::task::spawn_blocking(move || {
+                let _ = writer.write_all(&payload);
+            });
+            if emit_owner_change {
+                let emitter = SignalEmitter::new(conn, PORTAL_DESKTOP_PATH).unwrap();
+                let mut opts: HashMap<String, Value<'_>> = HashMap::new();
+                opts.insert(
+                    "mime_types".to_string(),
+                    Value::from((vec!["text/plain".to_string()],)),
+                );
+                opts.insert("session_is_owner".to_string(), Value::from(false));
+                let _ = FakeClipboard::selection_owner_changed(&emitter, session, opts).await;
+            }
             let fd: std::os::fd::OwnedFd = reader.into();
             Ok(fd.into())
         }
@@ -1034,12 +1321,15 @@ mod tests {
 
         // External clipboard owner takes over -> selection_still_owned flips to false.
         let mut ext_opts: HashMap<String, Value<'_>> = HashMap::new();
-        ext_opts.insert("mime_types".to_string(), Value::from(vec!["text/plain"]));
+        ext_opts.insert(
+            "mime_types".to_string(),
+            Value::from((vec!["text/plain".to_string()],)),
+        );
         ext_opts.insert("session_is_owner".to_string(), Value::from(false));
         FakeClipboard::selection_owner_changed(&emitter, session.session_handle.clone(), ext_opts)
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        session.sync_owner_state().await;
         assert!(!session.selection_still_owned());
 
         session.close().await;
@@ -1110,6 +1400,167 @@ mod tests {
         // Only the temporary text SetSelection ran; unset must not run after sentinel failure.
         assert_eq!(state.lock().unwrap().set_selection_calls.len(), 1);
         session.close().await;
+    }
+
+    #[tokio::test]
+    async fn fake_portal_rejects_oversized_mime_payload_without_invalidating_session() {
+        let state = Arc::new(StdMutex::new(FakePortalState {
+            grant_clipboard: true,
+            initial_formats: vec![(
+                "application/octet-stream".to_string(),
+                vec![b'x'; MAX_CLIPBOARD_MIME_BYTES + 1],
+            )],
+            ..Default::default()
+        }));
+        let (_bus, _portal_conn, client_conn) = start_fake_portal(Arc::clone(&state)).await;
+        let mut session = start_portal_keyboard_clipboard_session_on(client_conn, None, false)
+            .await
+            .unwrap();
+
+        let error = session
+            .read_current_selection()
+            .await
+            .expect_err("oversized payload must be refused");
+        assert!(
+            is_non_fatal_clipboard_error(&error),
+            "size refusal should keep session healthy: {error:#}"
+        );
+        assert!(session.is_valid());
+        session.close().await;
+    }
+
+    #[tokio::test]
+    async fn fake_portal_detects_mid_read_owner_change() {
+        let state = Arc::new(StdMutex::new(FakePortalState {
+            grant_clipboard: true,
+            change_owner_after_first_read: true,
+            initial_formats: vec![
+                ("text/html".to_string(), b"<b>a</b>".to_vec()),
+                ("text/plain".to_string(), b"a".to_vec()),
+            ],
+            ..Default::default()
+        }));
+        let (_bus, _portal_conn, client_conn) = start_fake_portal(Arc::clone(&state)).await;
+        let mut session = start_portal_keyboard_clipboard_session_on(client_conn, None, false)
+            .await
+            .unwrap();
+
+        let error = session
+            .read_current_selection()
+            .await
+            .expect_err("mid-read owner change must abort snapshot");
+        assert!(
+            is_non_fatal_clipboard_error(&error),
+            "mid-read owner change should be non-fatal: {error:#}"
+        );
+        assert!(error.to_string().contains("owner changed"), "{error:#}");
+        assert!(session.is_valid());
+        session.close().await;
+    }
+
+    #[tokio::test]
+    async fn fake_portal_keyboard_cleanup_preserves_session_when_keys_release_cleanly() {
+        let state = Arc::new(StdMutex::new(FakePortalState {
+            grant_clipboard: true,
+            fail_keycode_press_index: Some(1),
+            initial_formats: vec![("text/html".to_string(), b"<b>keep</b>".to_vec())],
+            ..Default::default()
+        }));
+        let (_bus, _portal_conn, client_conn) = start_fake_portal(Arc::clone(&state)).await;
+        let mut session = start_portal_keyboard_clipboard_session_on(client_conn, None, false)
+            .await
+            .unwrap();
+
+        let previous = session.read_current_selection().await.unwrap();
+        session
+            .replace_selection(ClipboardSelection::text("temp"))
+            .await
+            .unwrap();
+
+        let lock = Arc::new(AsyncMutex::new(()));
+        let err = press_keycode_chord(
+            session.keyboard(),
+            &[29],
+            47,
+            InputOperationGuard::new(Arc::clone(&lock).lock_owned().await),
+        )
+        .await
+        .expect_err("second key press must fail");
+        assert!(
+            format!("{err:#}").contains("injected press failure"),
+            "{err:#}"
+        );
+
+        session.wait_for_keyboard_cleanup().await;
+        assert!(!session.is_valid());
+        assert!(!session.was_closed_by_keyboard_cleanup());
+        assert_eq!(state.lock().unwrap().closed_sessions, 0);
+        // Cleanup released the pushed keys and left the session open so restore succeeds.
+        assert!(session.selection_still_owned());
+        session.replace_selection(previous).await.unwrap();
+        assert!(session.selection_still_owned());
+        session.close().await;
+        assert_eq!(state.lock().unwrap().closed_sessions, 1);
+    }
+
+    #[tokio::test]
+    async fn fake_portal_keyboard_cleanup_closes_session_when_key_release_fails() {
+        let state = Arc::new(StdMutex::new(FakePortalState {
+            grant_clipboard: true,
+            fail_keycode_press_index: Some(1),
+            fail_keycode_release: true,
+            initial_formats: vec![("text/html".to_string(), b"<b>keep</b>".to_vec())],
+            ..Default::default()
+        }));
+        let (_bus, _portal_conn, client_conn) = start_fake_portal(Arc::clone(&state)).await;
+        let mut session = start_portal_keyboard_clipboard_session_on(client_conn, None, false)
+            .await
+            .unwrap();
+
+        session
+            .replace_selection(ClipboardSelection::text("temp"))
+            .await
+            .unwrap();
+
+        let lock = Arc::new(AsyncMutex::new(()));
+        let _ = press_keycode_chord(
+            session.keyboard(),
+            &[29],
+            47,
+            InputOperationGuard::new(Arc::clone(&lock).lock_owned().await),
+        )
+        .await
+        .expect_err("second key press must fail");
+
+        session.wait_for_keyboard_cleanup().await;
+        assert!(session.was_closed_by_keyboard_cleanup());
+        assert!(!session.selection_still_owned());
+        assert_eq!(state.lock().unwrap().closed_sessions, 1);
+        session.close().await;
+        assert_eq!(state.lock().unwrap().closed_sessions, 1);
+    }
+
+    #[tokio::test]
+    async fn fake_portal_drop_closes_session_without_explicit_close() {
+        let state = Arc::new(StdMutex::new(FakePortalState {
+            grant_clipboard: true,
+            ..Default::default()
+        }));
+        let (_bus, _portal_conn, client_conn) = start_fake_portal(Arc::clone(&state)).await;
+        let session = start_portal_keyboard_clipboard_session_on(client_conn, None, false)
+            .await
+            .unwrap();
+        drop(session);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while state.lock().unwrap().closed_sessions == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "dropping PortalClipboardSession did not close portal session"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(state.lock().unwrap().closed_sessions, 1);
     }
 
     #[tokio::test]

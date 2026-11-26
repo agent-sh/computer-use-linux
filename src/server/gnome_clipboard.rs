@@ -1,7 +1,7 @@
 use super::*;
 use crate::remote_desktop::{
-    press_keycode_chord, start_portal_keyboard_clipboard_session, ClipboardSelection,
-    PortalClipboardSession,
+    is_non_fatal_clipboard_error, press_keycode_chord, start_portal_keyboard_clipboard_session,
+    ClipboardSelection, PortalClipboardSession,
 };
 
 pub(super) fn atspi_outcome_allows_clipboard_fallback(insert: &Result<FocusedTextInsert>) -> bool {
@@ -32,6 +32,11 @@ enum ClipboardRestoreOutcome {
     Restored,
     SkippedNotOwner,
     Failed(anyhow::Error),
+}
+
+struct GnomeClipboardPasteOutcome {
+    result: std::result::Result<String, String>,
+    retire_session: bool,
 }
 
 fn format_replace_failure(
@@ -93,62 +98,70 @@ impl ComputerUseLinux {
             return action_result_with_focus("type_text", Err(message), received, focus);
         }
 
+        // Start the portal session (up to 120s on first-time user consent) and
+        // re-verify window focus before entering the cancellation-safe paste
+        // task so cancelling the tool call while a consent dialog is open
+        // never pastes cancelled text.
         let clipboard_guard = Arc::clone(&self.kde_clipboard_lock).lock_owned().await;
-        let cached_slot = Arc::clone(&self.portal_clipboard_session);
-        let server = self.clone();
-        let portal_target = portal_target.clone();
+        let mut slot_guard = Arc::clone(&self.portal_clipboard_session)
+            .lock_owned()
+            .await;
+        let need_new = match slot_guard.as_ref() {
+            Some(existing) if existing.is_valid() => false,
+            Some(_) => {
+                if let Some(mut old) = slot_guard.take() {
+                    if old.selection_still_owned() {
+                        old.keep_alive_until_replaced();
+                    } else {
+                        old.close().await;
+                    }
+                }
+                true
+            }
+            None => true,
+        };
+        if need_new {
+            let session = match start_portal_keyboard_clipboard_session().await {
+                Ok(session) => session,
+                Err(error) => {
+                    return action_result_with_focus(
+                        "type_text",
+                        Err(format!(
+                            "{refusal} GNOME clipboard paste could not start: {error:#}"
+                        )),
+                        received,
+                        focus,
+                    );
+                }
+            };
+            *slot_guard = Some(session);
+        }
+
+        // Always re-focus before pasting in case a first-time consent dialog
+        // or slow AT-SPI probe allowed focus to move.
+        let focus = match self.focus_target_for_input(portal_target).await {
+            Ok(refreshed) => refreshed,
+            Err(error) => {
+                return action_result_with_focus("type_text", Err(error), received, focus);
+            }
+        };
+        let paste_shortcut = match validate_gnome_clipboard_paste_shortcut(
+            kde_clipboard_paste_shortcut(portal_target, focus.as_ref()).await,
+        ) {
+            Ok(shortcut) => shortcut,
+            Err(message) => {
+                return action_result_with_focus("type_text", Err(message), received, focus);
+            }
+        };
+
         let text = text.to_string();
         let portal_operation_guard = input_guard.clone();
+        // Once clipboard mutation begins, run through restore even if this
+        // call is cancelled, holding input, clipboard, and session locks until
+        // restoration completes.
         let (guards, guarded_result) =
             run_cancellation_safe_guarded((input_guard, clipboard_guard), async move {
-                let mut slot = cached_slot.lock().await;
-                let mut started_fresh = false;
-                let need_new = match slot.as_ref() {
-                    Some(existing) if existing.is_valid() => false,
-                    Some(_) => {
-                        if let Some(mut old) = slot.take() {
-                            if old.selection_still_owned() {
-                                old.keep_alive_until_replaced();
-                            } else {
-                                old.close().await;
-                            }
-                        }
-                        true
-                    }
-                    None => true,
-                };
-                if need_new {
-                    let session =
-                        start_portal_keyboard_clipboard_session()
-                            .await
-                            .map_err(|error| {
-                                (
-                                    focus.clone(),
-                                    format!(
-                                    "{refusal} GNOME clipboard paste could not start: {error:#}"
-                                ),
-                                )
-                            })?;
-                    *slot = Some(session);
-                    started_fresh = true;
-                }
-
-                // Re-focus after portal startup in case a first-time consent dialog stole focus.
-                let focus = if started_fresh || focus.is_none() {
-                    match server.focus_target_for_input(&portal_target).await {
-                        Ok(refreshed) => refreshed,
-                        Err(error) => return Err((focus, error)),
-                    }
-                } else {
-                    focus
-                };
-                let paste_shortcut = match validate_gnome_clipboard_paste_shortcut(
-                    kde_clipboard_paste_shortcut(&portal_target, focus.as_ref()).await,
-                ) {
-                    Ok(shortcut) => shortcut,
-                    Err(message) => return Err((focus, message)),
-                };
-
+                let mut slot = slot_guard;
                 let session = slot
                     .as_mut()
                     .expect("portal clipboard session was just populated");
@@ -160,8 +173,7 @@ impl ComputerUseLinux {
                 )
                 .await;
 
-                let keep_cached = session.is_valid() && outcome.is_ok();
-                if !keep_cached {
+                if outcome.retire_session || !session.is_valid() {
                     if let Some(mut retired) = slot.take() {
                         // If a failed paste still restored a non-empty clipboard
                         // onto this session, keep serving transfers until another
@@ -174,10 +186,7 @@ impl ComputerUseLinux {
                     }
                 }
 
-                match outcome {
-                    Ok(message) => Ok((focus, message)),
-                    Err(error) => Err((focus, error)),
-                }
+                outcome.result
             })
             .await;
         let Some((_input_guard, _clipboard_guard)) = guards else {
@@ -185,20 +194,18 @@ impl ComputerUseLinux {
                 "type_text",
                 Err(guarded_result.unwrap_err()),
                 received,
-                None,
+                focus,
             );
         };
         match guarded_result.expect("guarded task returned its guards") {
-            Ok((focus, message)) => {
+            Ok(message) => {
                 let notes = self.input_landing_notes(focus.as_ref(), true).await;
                 with_notes(
                     successful_action_with_focus("type_text", &message, received, focus),
                     notes,
                 )
             }
-            Err((focus, message)) => {
-                action_result_with_focus("type_text", Err(message), received, focus)
-            }
+            Err(message) => action_result_with_focus("type_text", Err(message), received, focus),
         }
     }
 }
@@ -208,13 +215,16 @@ async fn run_gnome_clipboard_paste_text(
     text: &str,
     paste_shortcut: KdeClipboardPasteShortcut,
     operation_guard: InputOperationGuard,
-) -> std::result::Result<String, String> {
+) -> GnomeClipboardPasteOutcome {
     let previous = match session.read_current_selection().await {
         Ok(previous) => previous,
         Err(error) => {
-            return Err(format!(
-                "GNOME clipboard paste was not used; the current clipboard could not be preserved: {error:#}"
-            ));
+            return GnomeClipboardPasteOutcome {
+                result: Err(format!(
+                    "GNOME clipboard paste was not used; the current clipboard could not be preserved: {error:#}"
+                )),
+                retire_session: !is_non_fatal_clipboard_error(&error) || !session.is_valid(),
+            };
         }
     };
     if let Err(error) = session
@@ -222,23 +232,56 @@ async fn run_gnome_clipboard_paste_text(
         .await
     {
         let restore = restore_gnome_clipboard(session, &previous).await;
-        return Err(format_replace_failure(&error, restore));
+        return GnomeClipboardPasteOutcome {
+            result: Err(format_replace_failure(&error, restore)),
+            retire_session: true,
+        };
     }
 
     let (modifiers, keycode) = kde_clipboard_paste_chord(paste_shortcut);
     let paste_result = press_keycode_chord(session.keyboard(), modifiers, keycode, operation_guard)
         .await
         .map_err(|error| format!("{error:#}"));
+
+    if paste_result.is_err() {
+        // Wait for KeyboardReleaseGuard's release cleanup before touching the
+        // clipboard so cleanup can never race with or close a restored owner.
+        session.wait_for_keyboard_cleanup().await;
+        if session.was_closed_by_keyboard_cleanup() {
+            return GnomeClipboardPasteOutcome {
+                result: format_paste_outcome(
+                    paste_result,
+                    ClipboardRestoreOutcome::Failed(anyhow::anyhow!(
+                        "portal session closed during stuck-key release cleanup"
+                    )),
+                ),
+                retire_session: true,
+            };
+        }
+    }
+
     sleep(kde_clipboard_restore_delay(text)).await;
 
     let restore = restore_gnome_clipboard(session, &previous).await;
-    format_paste_outcome(paste_result, restore)
+    let retire_session = paste_result.is_err()
+        || matches!(restore, ClipboardRestoreOutcome::Failed(_))
+        || !session.is_valid();
+    GnomeClipboardPasteOutcome {
+        result: format_paste_outcome(paste_result, restore),
+        retire_session,
+    }
 }
 
 async fn restore_gnome_clipboard(
     session: &mut PortalClipboardSession,
     previous: &ClipboardSelection,
 ) -> ClipboardRestoreOutcome {
+    if session.was_closed_by_keyboard_cleanup() {
+        return ClipboardRestoreOutcome::Failed(anyhow::anyhow!(
+            "portal session closed during stuck-key release cleanup"
+        ));
+    }
+    session.sync_owner_state().await;
     if !session.selection_still_owned() {
         return ClipboardRestoreOutcome::SkippedNotOwner;
     }
@@ -386,6 +429,22 @@ mod tests {
             paste_err_restored.contains("previous clipboard contents were restored"),
             "{paste_err_restored}"
         );
+
+        let paste_err_failed = format_paste_outcome(
+            Err("chord failed".to_string()),
+            ClipboardRestoreOutcome::Failed(anyhow::anyhow!(
+                "portal session closed during stuck-key release cleanup"
+            )),
+        )
+        .unwrap_err();
+        assert!(
+            paste_err_failed.contains("previous clipboard contents could not be restored"),
+            "{paste_err_failed}"
+        );
+        assert!(
+            paste_err_failed.contains("stuck-key release cleanup"),
+            "{paste_err_failed}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -403,6 +462,7 @@ mod tests {
             InputOperationGuard::new(Arc::clone(&lock).lock_owned().await),
         )
         .await
+        .result
         .unwrap();
         assert!(first.contains("pasted through the GNOME portal clipboard"));
 
@@ -414,6 +474,7 @@ mod tests {
             InputOperationGuard::new(Arc::clone(&lock).lock_owned().await),
         )
         .await
+        .result
         .unwrap();
         assert!(second.contains("pasted through the GNOME portal clipboard"));
 

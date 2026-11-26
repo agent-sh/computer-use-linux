@@ -3928,7 +3928,11 @@ impl ComputerUseLinux {
         if let Some(key) = key_press_character(text) {
             return action_result(
                 "type_text",
-                Err(type_text_control_character_refusal(&refusal, key)),
+                Err(type_text_control_character_refusal_for_fallbacks(
+                    &refusal,
+                    key,
+                    paste_fallback,
+                )),
                 received,
             );
         }
@@ -6745,9 +6749,23 @@ fn key_press_character(text: &str) -> Option<char> {
     text.chars().find(|ch| ch.is_control())
 }
 
+#[cfg(test)]
 fn type_text_control_character_refusal(refusal: &str, key: char) -> String {
+    type_text_control_character_refusal_for_fallbacks(refusal, key, false)
+}
+
+fn type_text_control_character_refusal_for_fallbacks(
+    refusal: &str,
+    key: char,
+    paste_fallback: bool,
+) -> String {
+    let fallback_label = if paste_fallback {
+        "The AT-SPI and clipboard text fallbacks were not used"
+    } else {
+        "The AT-SPI text fallback was not used"
+    };
     format!(
-        "{refusal} The AT-SPI text fallback was not used: the text contains U+{:04X}, which typing sends as a key press such as Enter or Tab, and inserting it is not the same. Type the text without it, then send the key with press_key.",
+        "{refusal} {fallback_label}: the text contains U+{:04X}, which typing sends as a key press such as Enter or Tab, and inserting it is not the same. Type the text without it, then send the key with press_key.",
         key as u32
     )
 }
