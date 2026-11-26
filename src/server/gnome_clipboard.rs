@@ -16,6 +16,68 @@ pub(super) fn atspi_outcome_allows_clipboard_fallback(insert: &Result<FocusedTex
     )
 }
 
+fn validate_gnome_clipboard_paste_shortcut(
+    shortcut: KdeClipboardPasteShortcut,
+) -> std::result::Result<KdeClipboardPasteShortcut, String> {
+    match shortcut {
+        KdeClipboardPasteShortcut::ShiftInsert => Err(
+            "GNOME portal clipboard paste does not support xterm/rxvt-family terminals: Shift+Insert reads PRIMARY selection, while org.freedesktop.portal.Clipboard only sets CLIPBOARD. No text was pasted."
+                .to_string(),
+        ),
+        supported => Ok(supported),
+    }
+}
+
+enum ClipboardRestoreOutcome {
+    Restored,
+    SkippedNotOwner,
+    Failed(anyhow::Error),
+}
+
+fn format_replace_failure(
+    replace_error: &anyhow::Error,
+    restore: ClipboardRestoreOutcome,
+) -> String {
+    match restore {
+        ClipboardRestoreOutcome::Restored => format!(
+            "GNOME clipboard replacement failed ambiguously and the previous contents were restored; text was not replayed: {replace_error:#}"
+        ),
+        ClipboardRestoreOutcome::SkippedNotOwner => format!(
+            "GNOME clipboard replacement failed ambiguously and clipboard ownership was not confirmed, so previous contents were not restored; text was not replayed: {replace_error:#}"
+        ),
+        ClipboardRestoreOutcome::Failed(restore_error) => format!(
+            "GNOME clipboard replacement failed ambiguously; restoring the previous contents also failed, and text was not replayed: {replace_error:#}; restore failed: {restore_error:#}"
+        ),
+    }
+}
+
+fn format_paste_outcome(
+    paste_result: std::result::Result<(), String>,
+    restore: ClipboardRestoreOutcome,
+) -> std::result::Result<String, String> {
+    match (paste_result, restore) {
+        (Ok(()), ClipboardRestoreOutcome::Restored) => {
+            Ok("Action pasted through the GNOME portal clipboard.".to_string())
+        }
+        (Ok(()), ClipboardRestoreOutcome::SkippedNotOwner) => Ok(
+            "Action pasted through the GNOME portal clipboard. A newer clipboard owner was left unchanged."
+                .to_string(),
+        ),
+        (Ok(()), ClipboardRestoreOutcome::Failed(error)) => Ok(format!(
+            "Action pasted through the GNOME portal clipboard. Warning: previous clipboard contents could not be restored: {error:#}"
+        )),
+        (Err(error), ClipboardRestoreOutcome::Restored) => Err(format!(
+            "{error}; previous clipboard contents were restored; text was not replayed"
+        )),
+        (Err(error), ClipboardRestoreOutcome::SkippedNotOwner) => Err(format!(
+            "{error}; a newer clipboard owner was left unchanged; text was not replayed"
+        )),
+        (Err(error), ClipboardRestoreOutcome::Failed(restore_error)) => Err(format!(
+            "{error}; previous clipboard contents could not be restored: {restore_error:#}; text was not replayed"
+        )),
+    }
+}
+
 impl ComputerUseLinux {
     pub(super) async fn type_text_through_gnome_clipboard(
         &self,
@@ -26,6 +88,11 @@ impl ComputerUseLinux {
         input_guard: InputOperationGuard,
         refusal: String,
     ) -> ActionOutput {
+        let initial_shortcut = kde_clipboard_paste_shortcut(portal_target, focus.as_ref()).await;
+        if let Err(message) = validate_gnome_clipboard_paste_shortcut(initial_shortcut) {
+            return action_result_with_focus("type_text", Err(message), received, focus);
+        }
+
         let clipboard_guard = Arc::clone(&self.kde_clipboard_lock).lock_owned().await;
         let cached_slot = Arc::clone(&self.portal_clipboard_session);
         let server = self.clone();
@@ -39,8 +106,12 @@ impl ComputerUseLinux {
                 let need_new = match slot.as_ref() {
                     Some(existing) if existing.is_valid() => false,
                     Some(_) => {
-                        if let Some(old) = slot.take() {
-                            old.close().await;
+                        if let Some(mut old) = slot.take() {
+                            if old.selection_still_owned() {
+                                old.keep_alive_until_replaced();
+                            } else {
+                                old.close().await;
+                            }
                         }
                         true
                     }
@@ -71,8 +142,12 @@ impl ComputerUseLinux {
                 } else {
                     focus
                 };
-                let paste_shortcut =
-                    kde_clipboard_paste_shortcut(&portal_target, focus.as_ref()).await;
+                let paste_shortcut = match validate_gnome_clipboard_paste_shortcut(
+                    kde_clipboard_paste_shortcut(&portal_target, focus.as_ref()).await,
+                ) {
+                    Ok(shortcut) => shortcut,
+                    Err(message) => return Err((focus, message)),
+                };
 
                 let session = slot
                     .as_mut()
@@ -85,10 +160,17 @@ impl ComputerUseLinux {
                 )
                 .await;
 
-                let keep_session = session.is_valid() && outcome.is_ok();
-                if !keep_session {
-                    if let Some(broken) = slot.take() {
-                        broken.close().await;
+                let keep_cached = session.is_valid() && outcome.is_ok();
+                if !keep_cached {
+                    if let Some(mut retired) = slot.take() {
+                        // If a failed paste still restored a non-empty clipboard
+                        // onto this session, keep serving transfers until another
+                        // owner takes over instead of dropping the restored data.
+                        if retired.selection_still_owned() {
+                            retired.keep_alive_until_replaced();
+                        } else {
+                            retired.close().await;
+                        }
                     }
                 }
 
@@ -139,15 +221,8 @@ async fn run_gnome_clipboard_paste_text(
         .replace_selection(ClipboardSelection::text(text))
         .await
     {
-        let restore_error = restore_gnome_clipboard(session, &previous).await;
-        return Err(match restore_error {
-            Some(restore_error) => format!(
-                "GNOME clipboard replacement failed ambiguously; restoring the previous contents also failed, and text was not replayed: {error:#}; restore failed: {restore_error:#}"
-            ),
-            None => format!(
-                "GNOME clipboard replacement failed ambiguously and the previous contents were restored; text was not replayed: {error:#}"
-            ),
-        });
+        let restore = restore_gnome_clipboard(session, &previous).await;
+        return Err(format_replace_failure(&error, restore));
     }
 
     let (modifiers, keycode) = kde_clipboard_paste_chord(paste_shortcut);
@@ -156,42 +231,21 @@ async fn run_gnome_clipboard_paste_text(
         .map_err(|error| format!("{error:#}"));
     sleep(kde_clipboard_restore_delay(text)).await;
 
-    let still_owned = session.selection_still_owned();
-    let restore_error = if still_owned {
-        restore_gnome_clipboard(session, &previous).await
-    } else {
-        None
-    };
-
-    let ownership_note = if still_owned {
-        String::new()
-    } else {
-        " A newer clipboard owner was left unchanged.".to_string()
-    };
-    match (paste_result, restore_error) {
-        (Ok(()), None) => Ok(format!(
-            "Action pasted through the GNOME portal clipboard.{ownership_note}"
-        )),
-        (Ok(()), Some(error)) => Ok(format!(
-            "Action pasted through the GNOME portal clipboard. Warning: previous clipboard contents could not be restored: {error:#}"
-        )),
-        (Err(error), None) => Err(format!(
-            "{error}; previous clipboard contents were restored; text was not replayed{ownership_note}"
-        )),
-        (Err(error), Some(restore_error)) => Err(format!(
-            "{error}; previous clipboard contents could not be restored: {restore_error:#}; text was not replayed"
-        )),
-    }
+    let restore = restore_gnome_clipboard(session, &previous).await;
+    format_paste_outcome(paste_result, restore)
 }
 
 async fn restore_gnome_clipboard(
     session: &mut PortalClipboardSession,
     previous: &ClipboardSelection,
-) -> Option<anyhow::Error> {
+) -> ClipboardRestoreOutcome {
     if !session.selection_still_owned() {
-        return None;
+        return ClipboardRestoreOutcome::SkippedNotOwner;
     }
-    session.replace_selection(previous.clone()).await.err()
+    match session.replace_selection(previous.clone()).await {
+        Ok(()) => ClipboardRestoreOutcome::Restored,
+        Err(error) => ClipboardRestoreOutcome::Failed(error),
+    }
 }
 
 #[cfg(test)]
@@ -246,6 +300,92 @@ mod tests {
                 caret_after_text: true,
             }
         )));
+    }
+
+    #[test]
+    fn gnome_clipboard_rejects_xterm_family_shift_insert() {
+        for wm_class in [
+            "xterm",
+            "UXTerm",
+            "rxvt",
+            "urxvt",
+            "rxvt-unicode",
+            "koi8rxterm",
+        ] {
+            let window = WindowInfo {
+                window_id: 1,
+                title: Some("user@host".to_string()),
+                app_id: None,
+                wm_class: Some(wm_class.to_string()),
+                pid: Some(100),
+                bounds: None,
+                workspace: None,
+                focused: true,
+                hidden: false,
+                client_type: None,
+                backend: "gnome".to_string(),
+                terminal: None,
+            };
+            let terminal = kde_clipboard_terminal_shortcut(&WindowTarget::default(), Some(&window));
+            let shortcut = kde_clipboard_shortcut_for_focus(terminal, None);
+            let error = validate_gnome_clipboard_paste_shortcut(shortcut)
+                .expect_err("xterm-family terminals must not use Shift+Insert on GNOME portal");
+            assert!(error.contains("PRIMARY"), "{wm_class}: {error}");
+        }
+        assert_eq!(
+            validate_gnome_clipboard_paste_shortcut(KdeClipboardPasteShortcut::Standard),
+            Ok(KdeClipboardPasteShortcut::Standard)
+        );
+        assert_eq!(
+            validate_gnome_clipboard_paste_shortcut(KdeClipboardPasteShortcut::CtrlShiftV),
+            Ok(KdeClipboardPasteShortcut::CtrlShiftV)
+        );
+    }
+
+    #[test]
+    fn restore_messages_distinguish_restored_skipped_and_failed() {
+        let replace_err = anyhow::anyhow!("SetSelection timed out");
+        let restored = format_replace_failure(&replace_err, ClipboardRestoreOutcome::Restored);
+        assert!(
+            restored.contains("previous contents were restored"),
+            "{restored}"
+        );
+        let skipped =
+            format_replace_failure(&replace_err, ClipboardRestoreOutcome::SkippedNotOwner);
+        assert!(
+            skipped.contains("previous contents were not restored"),
+            "{skipped}"
+        );
+        assert!(!skipped.contains("contents were restored"), "{skipped}");
+        let failed = format_replace_failure(
+            &replace_err,
+            ClipboardRestoreOutcome::Failed(anyhow::anyhow!("bus closed")),
+        );
+        assert!(failed.contains("restore failed: bus closed"), "{failed}");
+
+        let paste_err_skipped = format_paste_outcome(
+            Err("chord failed".to_string()),
+            ClipboardRestoreOutcome::SkippedNotOwner,
+        )
+        .unwrap_err();
+        assert!(
+            paste_err_skipped.contains("newer clipboard owner was left unchanged"),
+            "{paste_err_skipped}"
+        );
+        assert!(
+            !paste_err_skipped.contains("contents were restored"),
+            "{paste_err_skipped}"
+        );
+
+        let paste_err_restored = format_paste_outcome(
+            Err("chord failed".to_string()),
+            ClipboardRestoreOutcome::Restored,
+        )
+        .unwrap_err();
+        assert!(
+            paste_err_restored.contains("previous clipboard contents were restored"),
+            "{paste_err_restored}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

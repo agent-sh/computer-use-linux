@@ -271,9 +271,9 @@ impl PortalClipboardSession {
             // unset the selection completely.
             self.selection
                 .send_replace(Arc::new(ClipboardSelection::default()));
-            let _ = self
-                .set_selection_and_await_owner(vec![EMPTY_CLIPBOARD_CLEAR_MIME.to_string()])
-                .await;
+            self.set_selection_and_await_owner(vec![EMPTY_CLIPBOARD_CLEAR_MIME.to_string()])
+                .await
+                .context("Clipboard sentinel clear before unset failed")?;
             self.drain_owner_updates();
             let proxy = clipboard_proxy(&self.connection).await?;
             let empty_options: HashMap<&str, Value<'_>> = HashMap::new();
@@ -344,6 +344,22 @@ impl PortalClipboardSession {
     pub fn selection_still_owned(&mut self) -> bool {
         self.drain_owner_updates();
         self.owner
+    }
+
+    pub fn keep_alive_until_replaced(self) {
+        tokio::spawn(async move {
+            let mut session = self;
+            while session.selection_still_owned() {
+                match session.owner_changed.recv().await {
+                    Some(owner) => {
+                        session.owner = owner.session_is_owner;
+                        session.latest_owner = Some(owner);
+                    }
+                    None => break,
+                }
+            }
+            session.close().await;
+        });
     }
 
     pub async fn close(self) {
@@ -620,6 +636,7 @@ mod tests {
         grant_clipboard: bool,
         initial_formats: Vec<(String, Vec<u8>)>,
         fail_first_second_read: bool,
+        fail_sentinel_clear: bool,
         read_calls: usize,
         set_selection_calls: Vec<Vec<String>>,
         keycodes: Vec<(i32, u32)>,
@@ -821,6 +838,14 @@ mod tests {
             if options.contains_key("mime_types") && mimes.is_empty() {
                 return Err(zbus::fdo::Error::Failed(
                     "No mime types in mime types list".to_string(),
+                ));
+            }
+            if mimes.len() == 1
+                && mimes[0] == EMPTY_CLIPBOARD_CLEAR_MIME
+                && self.state.lock().unwrap().fail_sentinel_clear
+            {
+                return Err(zbus::fdo::Error::Failed(
+                    "sentinel clear rejected".to_string(),
                 ));
             }
             self.state
@@ -1051,6 +1076,39 @@ mod tests {
         assert_eq!(calls[1], vec![EMPTY_CLIPBOARD_CLEAR_MIME.to_string()]);
         assert!(calls[2].is_empty());
 
+        session.close().await;
+    }
+
+    #[tokio::test]
+    async fn fake_portal_empty_restore_propagates_sentinel_failure_without_unsetting() {
+        let state = Arc::new(StdMutex::new(FakePortalState {
+            grant_clipboard: true,
+            fail_sentinel_clear: true,
+            initial_formats: Vec::new(),
+            ..Default::default()
+        }));
+        let (_bus, _portal_conn, client_conn) = start_fake_portal(Arc::clone(&state)).await;
+        let mut session = start_portal_keyboard_clipboard_session_on(client_conn, None, false)
+            .await
+            .unwrap();
+
+        let previous = session.read_current_selection().await.unwrap();
+        assert!(previous.is_empty());
+        session
+            .replace_selection(ClipboardSelection::text("你好"))
+            .await
+            .unwrap();
+
+        let err = session
+            .replace_selection(previous)
+            .await
+            .expect_err("sentinel failure must surface instead of silently unsetting");
+        assert!(
+            err.to_string().contains("sentinel clear"),
+            "unexpected error: {err:#}"
+        );
+        // Only the temporary text SetSelection ran; unset must not run after sentinel failure.
+        assert_eq!(state.lock().unwrap().set_selection_calls.len(), 1);
         session.close().await;
     }
 
