@@ -60,6 +60,27 @@ const POINTER_BUTTON_PRESSED: u32 = 1;
 const AXIS_VERTICAL: u32 = 0;
 const AXIS_HORIZONTAL: u32 = 1;
 
+/// The portal request a refusal came from. Only `CreateSession` precedes every
+/// consent dialog, so only its code 2 means that no backend serves the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PortalStep {
+    CreateSession,
+    SelectDevices,
+    SelectSources,
+    Start,
+}
+
+impl PortalStep {
+    fn name(self) -> &'static str {
+        match self {
+            Self::CreateSession => "RemoteDesktop CreateSession",
+            Self::SelectDevices => "RemoteDesktop SelectDevices",
+            Self::SelectSources => "ScreenCast SelectSources",
+            Self::Start => "RemoteDesktop Start",
+        }
+    }
+}
+
 /// Why a portal request returned without success. The `Response` signal's
 /// code is 1 when the user cancelled the portal dialog and 2 for every other
 /// refusal, such as a portal that exports RemoteDesktop without a backend
@@ -68,21 +89,32 @@ const AXIS_HORIZONTAL: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PortalRefusal {
     Cancelled,
-    Failed,
+    Failed { step: PortalStep },
 }
 
 impl PortalRefusal {
-    fn from_response_code(response_code: u32) -> Self {
+    fn from_response_code(step: PortalStep, response_code: u32) -> Self {
         match response_code {
             1 => Self::Cancelled,
-            _ => Self::Failed,
+            _ => Self::Failed { step },
         }
+    }
+
+    /// Whether the request failed before any consent dialog could have run,
+    /// where code 2 means that no backend serves the request.
+    pub(crate) fn failed_before_dialog(self) -> bool {
+        matches!(
+            self,
+            Self::Failed {
+                step: PortalStep::CreateSession
+            }
+        )
     }
 
     fn describe(self) -> &'static str {
         match self {
             Self::Cancelled => "was cancelled in the portal dialog",
-            Self::Failed => "failed: the portal serves no such request",
+            Self::Failed { .. } => "ended without success",
         }
     }
 }
@@ -97,9 +129,9 @@ impl std::error::Error for PortalRefusal {}
 
 /// The error for a portal `Response` code other than 0. The chain reads as
 /// `<step> (response code <code>): <PortalRefusal as Display>`.
-fn portal_refusal(step: &str, response_code: u32) -> anyhow::Error {
-    anyhow::Error::new(PortalRefusal::from_response_code(response_code))
-        .context(format!("{step} (response code {response_code})"))
+fn portal_refusal(step: PortalStep, response_code: u32) -> anyhow::Error {
+    anyhow::Error::new(PortalRefusal::from_response_code(step, response_code))
+        .context(format!("{} (response code {response_code})", step.name()))
 }
 
 const BTN_LEFT: i32 = 0x110;
@@ -2029,7 +2061,7 @@ async fn create_remote_desktop_session(connection: &Connection) -> Result<OwnedO
     let (response_code, results) =
         await_portal_response(connection, handle, &request_path, &mut response_stream).await?;
     if response_code != 0 {
-        return Err(portal_refusal("RemoteDesktop CreateSession", response_code));
+        return Err(portal_refusal(PortalStep::CreateSession, response_code));
     }
 
     let session_handle: String = results
@@ -2101,7 +2133,7 @@ async fn select_devices(
     let (response_code, _) =
         await_portal_response(connection, handle, &request_path, &mut response_stream).await?;
     if response_code != 0 {
-        return Err(portal_refusal("RemoteDesktop SelectDevices", response_code));
+        return Err(portal_refusal(PortalStep::SelectDevices, response_code));
     }
     Ok(())
 }
@@ -2136,7 +2168,7 @@ async fn select_monitor_sources(connection: &Connection, session: &OwnedObjectPa
     let (response_code, _) =
         await_portal_response(connection, handle, &request_path, &mut response_stream).await?;
     if response_code != 0 {
-        return Err(portal_refusal("ScreenCast SelectSources", response_code));
+        return Err(portal_refusal(PortalStep::SelectSources, response_code));
     }
     Ok(())
 }
@@ -2163,7 +2195,7 @@ async fn start_remote_desktop_session(
     let (response_code, results) =
         await_portal_response(connection, handle, &request_path, &mut response_stream).await?;
     if response_code != 0 {
-        return Err(portal_refusal("RemoteDesktop Start", response_code));
+        return Err(portal_refusal(PortalStep::Start, response_code));
     }
 
     let devices = results
@@ -3528,19 +3560,26 @@ mod tests {
             (
                 1,
                 PortalRefusal::Cancelled,
-                "cancelled in the portal dialog",
+                "was cancelled in the portal dialog",
             ),
-            (2, PortalRefusal::Failed, "serves no such request"),
+            (
+                2,
+                PortalRefusal::Failed {
+                    step: PortalStep::CreateSession,
+                },
+                "ended without success",
+            ),
         ] {
             response.store(code, Ordering::SeqCst);
             let error = create_remote_desktop_session(&connection)
                 .await
                 .expect_err("a response other than 0 refuses the session");
             assert_eq!(error.downcast_ref::<PortalRefusal>(), Some(&refusal));
+            assert_eq!(refusal.failed_before_dialog(), code == 2);
             let message = format!("{error:#}");
             assert!(message.contains(reason), "{message}");
             assert!(
-                message.contains(&format!("response code {code}")),
+                message.contains(&format!("CreateSession (response code {code})")),
                 "{message}"
             );
         }
