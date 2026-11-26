@@ -92,7 +92,7 @@ pub struct PortalKeyboardSession {
     /// Shared keyboard+clipboard sessions only close there if a key release
     /// fails or times out, so clean release recovery keeps the clipboard owner
     /// alive for restoration.
-    close_on_release_error: bool,
+    always_close_on_cleanup: bool,
     closed_by_release_cleanup: Arc<AtomicBool>,
 }
 
@@ -157,7 +157,7 @@ struct KeyboardReleaseGuard {
     input_guard: Option<OwnedMutexGuard<()>>,
     operation_guard: Option<InputOperationGuard>,
     valid: Arc<AtomicBool>,
-    close_on_release_error: bool,
+    always_close_on_cleanup: bool,
     closed_by_release_cleanup: Arc<AtomicBool>,
 }
 
@@ -340,7 +340,7 @@ pub async fn start_portal_keyboard_session() -> Result<PortalKeyboardSession> {
         session_handle,
         input_lock: portal_input_lock(),
         valid: Arc::new(AtomicBool::new(true)),
-        close_on_release_error: true,
+        always_close_on_cleanup: true,
         closed_by_release_cleanup: Arc::new(AtomicBool::new(false)),
     })
 }
@@ -1017,7 +1017,7 @@ impl KeyboardReleaseGuard {
             input_guard: Some(input_guard),
             operation_guard: Some(operation_guard),
             valid: Arc::clone(&session.valid),
-            close_on_release_error: session.close_on_release_error,
+            always_close_on_cleanup: session.always_close_on_cleanup,
             closed_by_release_cleanup: Arc::clone(&session.closed_by_release_cleanup),
         }
     }
@@ -1076,7 +1076,7 @@ impl Drop for KeyboardReleaseGuard {
         let ei = self.ei.clone();
         let session_handle = self.session_handle.clone();
         let pressed = std::mem::take(&mut self.pressed);
-        let close_on_release_error = self.close_on_release_error;
+        let always_close_on_cleanup = self.always_close_on_cleanup;
         let closed_by_release_cleanup = Arc::clone(&self.closed_by_release_cleanup);
         spawn_release_cleanup(input_guard, operation_guard, async move {
             let released_all = tokio::time::timeout(RELEASE_TIMEOUT, async {
@@ -1096,7 +1096,7 @@ impl Drop for KeyboardReleaseGuard {
             })
             .await
             .unwrap_or_default();
-            if close_on_release_error || !released_all {
+            if always_close_on_cleanup || !released_all {
                 closed_by_release_cleanup.store(true, Ordering::Release);
                 let _ = tokio::time::timeout(
                     RELEASE_TIMEOUT,

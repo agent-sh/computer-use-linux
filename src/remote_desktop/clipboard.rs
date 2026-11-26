@@ -64,7 +64,7 @@ async fn read_nonblocking_fd_bounded(
     let async_fd = unsafe { AsyncFd::register_with_interest(fd, Interest::READABLE) }
         .context("failed to register clipboard read pipe with tokio reactor")?;
     let mut payload = Vec::new();
-    let mut buf = [0u8; 64 * 1024];
+    let mut buf = vec![0u8; 64 * 1024];
     loop {
         let mut guard = async_fd
             .readable()
@@ -531,13 +531,23 @@ impl PortalClipboardSession {
         self.owner
     }
 
+    pub(crate) fn can_keep_alive_as_owner(&mut self) -> bool {
+        self.selection_still_owned()
+            && !self.selection.borrow().is_empty()
+            && !self.transfer_task.is_finished()
+            && !self.owner_task.is_finished()
+    }
+
     pub fn keep_alive_until_replaced(self) {
         tokio::spawn(async move {
             let mut session = self;
-            while session.selection_still_owned() {
-                match session.owner_changed.recv().await {
-                    Some(owner) => session.apply_owner_update(owner),
-                    None => break,
+            while session.can_keep_alive_as_owner() {
+                tokio::select! {
+                    owner = session.owner_changed.recv() => match owner {
+                        Some(owner) => session.apply_owner_update(owner),
+                        None => break,
+                    },
+                    _ = &mut session.transfer_task => break,
                 }
             }
             session.close().await;
@@ -545,7 +555,6 @@ impl PortalClipboardSession {
     }
 
     pub async fn close(mut self) {
-        self.closed = true;
         self.owner_task.abort();
         self.transfer_task.abort();
         if !self.was_closed_by_keyboard_cleanup() {
@@ -555,6 +564,7 @@ impl PortalClipboardSession {
             )
             .await;
         }
+        self.closed = true;
     }
 }
 
@@ -661,7 +671,7 @@ async fn start_portal_keyboard_clipboard_session_on(
         session_handle: session_handle.clone(),
         input_lock: portal_input_lock(),
         valid: Arc::new(AtomicBool::new(true)),
-        close_on_release_error: false,
+        always_close_on_cleanup: false,
         closed_by_release_cleanup: Arc::new(AtomicBool::new(false)),
     };
     Ok(PortalClipboardSession {
@@ -1399,6 +1409,10 @@ mod tests {
         );
         // Only the temporary text SetSelection ran; unset must not run after sentinel failure.
         assert_eq!(state.lock().unwrap().set_selection_calls.len(), 1);
+        assert!(
+            !session.can_keep_alive_as_owner(),
+            "failed empty restore cleared local selection and must not stay alive as retired owner"
+        );
         session.close().await;
     }
 

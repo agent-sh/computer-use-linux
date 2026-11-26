@@ -110,7 +110,7 @@ impl ComputerUseLinux {
             Some(existing) if existing.is_valid() => false,
             Some(_) => {
                 if let Some(mut old) = slot_guard.take() {
-                    if old.selection_still_owned() {
+                    if old.can_keep_alive_as_owner() {
                         old.keep_alive_until_replaced();
                     } else {
                         old.close().await;
@@ -178,7 +178,7 @@ impl ComputerUseLinux {
                         // If a failed paste still restored a non-empty clipboard
                         // onto this session, keep serving transfers until another
                         // owner takes over instead of dropping the restored data.
-                        if retired.selection_still_owned() {
+                        if retired.can_keep_alive_as_owner() {
                             retired.keep_alive_until_replaced();
                         } else {
                             retired.close().await;
