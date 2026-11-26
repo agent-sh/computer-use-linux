@@ -27,6 +27,11 @@ use zbus::{
     Connection, Proxy,
 };
 
+mod clipboard;
+pub use clipboard::{
+    start_portal_keyboard_clipboard_session, ClipboardSelection, PortalClipboardSession,
+};
+
 const PORTAL_DESKTOP_SERVICE: &str = "org.freedesktop.portal.Desktop";
 const PORTAL_DESKTOP_PATH: &str = "/org/freedesktop/portal/desktop";
 const PORTAL_REMOTE_DESKTOP_INTERFACE: &str = "org.freedesktop.portal.RemoteDesktop";
@@ -203,7 +208,7 @@ async fn start_portal_pointer_session_inner(try_gnome_eis: bool) -> Result<Porta
     let mut cleanup = PortalSessionCleanup::new(connection.clone(), session_handle.clone());
     select_pointer_devices(&connection, &session_handle, permit.as_ref()).await?;
     select_monitor_sources(&connection, &session_handle).await?;
-    let (devices, streams, restore_token) =
+    let (devices, streams, restore_token, _) =
         start_remote_desktop_session(&connection, &session_handle).await?;
     // A grant with no pointer or no monitors must not be restored. The next
     // process would skip the dialog and fail the same way.
@@ -309,7 +314,7 @@ pub async fn start_portal_keyboard_session() -> Result<PortalKeyboardSession> {
     let session_handle = create_remote_desktop_session(&connection).await?;
     let mut cleanup = PortalSessionCleanup::new(connection.clone(), session_handle.clone());
     select_keyboard_devices(&connection, &session_handle, permit.as_ref()).await?;
-    let (devices, _, restore_token) =
+    let (devices, _, restore_token, _) =
         start_remote_desktop_session(&connection, &session_handle).await?;
     let restore_token = restore_token_to_keep(devices & DEVICE_KEYBOARD != 0, restore_token);
     commit_restore_permit(permit, restore_token).await;
@@ -1403,6 +1408,7 @@ const RESTORE_LOCK_POLL: Duration = Duration::from_millis(20);
 enum PortalDeviceKind {
     Pointer,
     Keyboard,
+    KeyboardClipboard,
 }
 
 impl PortalDeviceKind {
@@ -1410,6 +1416,7 @@ impl PortalDeviceKind {
         match self {
             Self::Pointer => "remote-desktop-pointer.token",
             Self::Keyboard => "remote-desktop-keyboard.token",
+            Self::KeyboardClipboard => "remote-desktop-keyboard-clipboard.token",
         }
     }
 
@@ -1417,6 +1424,7 @@ impl PortalDeviceKind {
         match self {
             Self::Pointer => "remote-desktop-pointer.lock",
             Self::Keyboard => "remote-desktop-keyboard.lock",
+            Self::KeyboardClipboard => "remote-desktop-keyboard-clipboard.lock",
         }
     }
 }
@@ -2060,7 +2068,7 @@ async fn select_monitor_sources(connection: &Connection, session: &OwnedObjectPa
 async fn start_remote_desktop_session(
     connection: &Connection,
     session: &OwnedObjectPath,
-) -> Result<(u32, Vec<PortalStream>, ParsedRestoreToken)> {
+) -> Result<(u32, Vec<PortalStream>, ParsedRestoreToken, bool)> {
     let remote_proxy = remote_desktop_proxy(connection).await?;
     let (request_path, mut response_stream) = portal_request_stream(connection, "rd_start").await?;
     let mut options: HashMap<&str, Value<'_>> = HashMap::new();
@@ -2091,7 +2099,16 @@ async fn start_remote_desktop_session(
         .map(parse_streams)
         .transpose()?
         .unwrap_or_default();
-    Ok((devices, streams, parse_restore_token(&results)))
+    let clipboard_enabled = results
+        .get("clipboard_enabled")
+        .and_then(|value| bool::try_from(value).ok())
+        .unwrap_or_default();
+    Ok((
+        devices,
+        streams,
+        parse_restore_token(&results),
+        clipboard_enabled,
+    ))
 }
 
 struct InputProxy<'a> {

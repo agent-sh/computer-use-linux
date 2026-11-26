@@ -8,8 +8,8 @@ export interface GeneratedMcpToolDefinition {
 }
 
 export const GENERATED_SERVER_VERSION = "0.7.63";
-export const GENERATED_TOOL_CATALOG_HASH = "da68d197f7caee16b666e95f9c52c36888d2e4c1ac20e973403391861fad49c9";
-export const GENERATED_SHELL_TOOL_CATALOG_HASH = "00147c003ff9a03b1d49ac8803878f535986866390ac8a0bc0b83a386b1632da";
+export const GENERATED_TOOL_CATALOG_HASH = "a60e701d002169a40d5fd305abb1204306eaf0933896c3b4a9df768f213cd424";
+export const GENERATED_SHELL_TOOL_CATALOG_HASH = "37b51bf4f238c49de35df2c07db6a582043cf87bd2ad509cef32c02309a63ca0";
 export const GENERATED_MCP_TOOLS =
 [
   {
@@ -3070,7 +3070,7 @@ export const GENERATED_MCP_TOOLS =
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Keyboard success confirms dispatch, not field-content verification; re-observe the target before retrying. On GNOME, when a configured keyboard layout group cannot type a character of the text, the text goes into the focused editable field of the verified target window through AT-SPI EditableText instead: inserted at the caret, replacing a selection, and reported as ok only when the field reads it back with the rest unchanged. Password fields, text with a newline, tab or other control character, and focus outside an editable field of that active window keep the refusal. Pass delivery=\"background\" (the default when an element or browser_tab is named) to leave the user's keyboard focus alone: input goes to a named element through AT-SPI, to a browser tab over a DevTools port the user opened (COMPUTER_USE_LINUX_DEVTOOLS), or to a terminal's program through tmux; when no route serves the target (the reason says which setting or desktop would open one), the first such call in a server session sends nothing and returns a notice (background.retry_to_continue=true); repeating it, and every later such call, goes through normal focused input and reports background.used=false. The result's background field names the route used. Into a named element the text goes in at its caret (or end) and must read back; a password field is filled unverified. X11 xdotool can silently substitute symbols under non-US or changing XKB layouts; inspect the text before pressing Enter or submitting it. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators. On Hyprland, confirmed password fields are rejected, and ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+    "description": "Type literal text using keyboard input, optionally after focusing a target window or terminal selector. Keyboard success confirms dispatch, not field-content verification; re-observe the target before retrying. On GNOME, when a configured keyboard layout group cannot type a character of the text, the text goes into the focused editable field of the verified target window through AT-SPI EditableText instead: inserted at the caret, replacing a selection, and reported as ok only when the field reads it back with the rest unchanged. Password fields, text with a newline, tab or other control character, and focus outside an editable field of that active window keep the refusal. Pass paste_fallback=true on GNOME Wayland to try AT-SPI first and use portal clipboard paste when no AT-SPI edit is possible; every offered clipboard MIME type is restored, a newer owner is left unchanged, and paste success confirms dispatch only. Pass delivery=\"background\" (the default when an element or browser_tab is named) to leave the user's keyboard focus alone: input goes to a named element through AT-SPI, to a browser tab over a DevTools port the user opened (COMPUTER_USE_LINUX_DEVTOOLS), or to a terminal's program through tmux; when no route serves the target (the reason says which setting or desktop would open one), the first such call in a server session sends nothing and returns a notice (background.retry_to_continue=true); repeating it, and every later such call, goes through normal focused input and reports background.used=false. The result's background field names the route used. Into a named element the text goes in at its caret (or end) and must read back; a password field is filled unverified. X11 xdotool can silently substitute symbols under non-US or changing XKB layouts; inspect the text before pressing Enter or submitting it. The wtype backend rejects NUL and text over 131071 UTF-8 bytes before focus or indicators. On Hyprland, confirmed password fields are rejected, and ambiguous fields and terminals use private stdin for at most 100 Unicode characters per call. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
     "inputSchema": {
       "$defs": {
         "KeyboardDelivery": {
@@ -3220,6 +3220,11 @@ export const GENERATED_MCP_TOOLS =
             "string",
             "null"
           ]
+        },
+        "paste_fallback": {
+          "default": false,
+          "description": "On GNOME Wayland, use portal clipboard paste when verified AT-SPI\ncannot insert the text. The previous clipboard is restored afterwards.",
+          "type": "boolean"
         },
         "pid": {
           "default": null,

@@ -175,6 +175,8 @@ content makes the feedback informational. Such trees get a conditional
 Electron/Chromium hint computed before compaction; this is not positive Electron
 detection.
 
+On GNOME Wayland, pass `paste_fallback: true` for text that portal keysyms cannot deliver, including CJK or text transformed by an active input method. GNOME tries verified AT-SPI first and uses portal clipboard paste only when no AT-SPI edit is possible. It restores every offered clipboard MIME type and leaves a newer clipboard owner unchanged. Paste confirms dispatch, not field contents, and never follows an uncertain AT-SPI edit. The default is `false`.
+
 Chromium can mark a `document web` focused alongside its contenteditable editor.
 The focus probe keeps searching that document and reports the editor; a document
 that holds focus itself still gets a warning, which no longer claims the text

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `type_text` takes an opt-in `paste_fallback` on GNOME Wayland. It tries verified AT-SPI insertion first, then uses the Remote Desktop portal clipboard when no AT-SPI edit is possible, allowing CJK and input-method-affected text into apps without editable AT-SPI. Every offered clipboard MIME type is restored, and a newer clipboard owner is left unchanged. Thanks to [@Fingxing2025](https://github.com/Fingxing2025) ([#516](https://github.com/agent-sh/computer-use-linux/issues/516)).
+
 ## [0.7.63] - 2026-11-26
 
 ### Fixed

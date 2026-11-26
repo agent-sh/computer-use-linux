@@ -52,6 +52,7 @@ CODEX_DEFAULTS = {
 NOT_ENVIRONMENT = {
     "ALT": "modifier name",
     "CTRL": "modifier name",
+    "DELETE": "ICCCM clipboard meta-target name",
     "F10": "key name",
     "F11": "key name",
     "F12": "key name",
@@ -61,15 +62,20 @@ NOT_ENVIRONMENT = {
     "KITTY_LISTEN_ON": "read from the environment of a process on the target tty, not the server's",
     "KITTY_WINDOW_ID": "read from the environment of a process on the target tty, not the server's",
     "KWIN_WAYLAND_EMULATE_TABLET": "read from KWin's environment, not the server's",
+    "MULTIPLE": "ICCCM clipboard meta-target name",
     "PICTURES": "xdg-user-dir argument",
+    "SAVE_TARGETS": "ICCCM clipboard meta-target name",
     "SCREEN": "GNU screen's server process name",
     "XK_": "X keysym name prefix",
     "SHIFT": "modifier name",
     "STY": "read from the environment of a process on the target tty, not the server's",
     "SUPER": "modifier name",
+    "TARGETS": "ICCCM clipboard meta-target name",
+    "TIMESTAMP": "ICCCM clipboard meta-target name",
     "TIOCSTI": "ioctl name in a message",
     "TMUX": "read from the environment of a process on the target tty, not the server's",
     "TMUX_TMPDIR": "read from the environment of a tmux client on the target tty, not the server's",
+    "UTF8_STRING": "X11/Xwayland UTF-8 clipboard target name",
     "WEZTERM_UNIX_SOCKET": "read from the environment of a process on the target tty and passed to wezterm cli",
 }
 
