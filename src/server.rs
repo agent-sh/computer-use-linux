@@ -16,7 +16,7 @@ use crate::remote_desktop::{
     click as portal_click, drag as portal_drag, keysyms_for_text, press_key_chord,
     press_keycode_chord, scroll as portal_scroll, start_portal_keyboard_session,
     start_portal_pointer_session, type_text_with_keysyms, InputOperationGuard, PointerButton,
-    PortalKey, PortalKeyboardSession, PortalPointerSession, ScrollDirection,
+    PortalKey, PortalKeyboardSession, PortalPointerSession, PortalRefusal, ScrollDirection,
 };
 use crate::screenshot::{
     capture_screenshot_raw, prepare_screenshot_payload, RawScreenshotCapture, ScreenshotCapture,
@@ -3478,7 +3478,7 @@ impl ComputerUseLinux {
     #[tool(
         name = "press_key",
         output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
-        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, kp_enter (keypad Enter), escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). With PIXELFLUX_CU and PIXELFLUX_CU_TOKEN set, chords go to pixelflux. An unreachable pixelflux falls through to the routes below; a pixelflux error does not. On X11, chords go through xdotool (XTEST), or ydotool when xdotool is missing or cannot start. On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. When ydotool is absent and the session has no RemoteDesktop portal (for example wlroots compositors), chords go through wtype instead. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. On KDE Plasma every key in a portal chord is a physical keycode. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass delivery=\"background\" (the default when an element or browser_tab is named) to leave the user's keyboard focus alone: input goes to a named element through AT-SPI, to a browser tab over a DevTools port the user opened (COMPUTER_USE_LINUX_DEVTOOLS), or to a terminal's program through tmux; when no route serves the target (the reason says which setting or desktop would open one), the first such call in a server session sends nothing and returns a notice (background.retry_to_continue=true); repeating it, and every later such call, goes through normal focused input and reports background.used=false. The result's background field names the route used. On an element, only keys that mean an action map (Enter or space on a button or menu item, space on a check box, radio button or toggle, Enter on a link or a single-line field with an activate action); others have no route there. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, kp_enter (keypad Enter), escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). With PIXELFLUX_CU and PIXELFLUX_CU_TOKEN set, chords go to pixelflux. An unreachable pixelflux falls through to the routes below; a pixelflux error does not. On X11, chords go through xdotool (XTEST), or ydotool when xdotool is missing or cannot start. On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. When ydotool is absent and the session has no RemoteDesktop portal (for example wlroots compositors) or the portal fails to serve the request, chords go through wtype instead; a request the user cancels in the portal dialog is never replayed. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. On KDE Plasma every key in a portal chord is a physical keycode. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app. Pass delivery=\"background\" (the default when an element or browser_tab is named) to leave the user's keyboard focus alone: input goes to a named element through AT-SPI, to a browser tab over a DevTools port the user opened (COMPUTER_USE_LINUX_DEVTOOLS), or to a terminal's program through tmux; when no route serves the target (the reason says which setting or desktop would open one), the first such call in a server session sends nothing and returns a notice (background.retry_to_continue=true); repeating it, and every later such call, goes through normal focused input and reports background.used=false. The result's background field names the route used. On an element, only keys that mean an action map (Enter or space on a button or menu item, space on a check box, radio button or toggle, Enter on a link or a single-line field with an activate action); others have no route there. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -3571,6 +3571,57 @@ impl ComputerUseLinux {
         .await
     }
 
+    /// The wtype half of `press_key`. The route chosen up front and the
+    /// replay of a chord whose portal session could not start both end here;
+    /// `portal_failure` names that failure in a successful result.
+    async fn press_key_through_wtype(
+        &self,
+        key: &str,
+        input_guard: InputOperationGuard,
+        received: Option<serde_json::Value>,
+        focus: Option<WindowFocusResult>,
+        portal_failure: Option<String>,
+    ) -> Json<ActionOutput> {
+        let Some(args) = wtype_key_args(key) else {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "press_key".to_string(),
+                message: "Unsupported key. Use names like Enter, Escape, Tab, ArrowLeft, Super, Ctrl+L, or a single US keyboard letter/digit.".to_string(),
+                received,
+            });
+        };
+        let (input_guard, result) =
+            run_cancellation_safe_input(input_guard, async move { run_wtype_key(&args).await })
+                .await;
+        let _input_guard = input_guard;
+        let output = match result {
+            Ok(()) => {
+                let mut output = successful_action_with_focus(
+                    "press_key",
+                    "Action sent through wtype (Wayland virtual-keyboard protocol).",
+                    received,
+                    focus.clone(),
+                );
+                if let Some(failure) = portal_failure {
+                    output.message = format!(
+                        "{} The remote desktop portal did not send it: {failure}.",
+                        output.message
+                    );
+                }
+                output
+            }
+            Err(error) => {
+                action_result_with_focus("press_key", Err(error), received, focus.clone())
+            }
+        };
+        if output.ok && focus.is_some() {
+            let notes = self.input_landing_notes(focus.as_ref(), false).await;
+            return Json(with_notes(output, notes));
+        }
+        Json(output)
+    }
+
     async fn dispatch_press_key(&self, params: PressKeyParams) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
         let input_guard =
@@ -3636,35 +3687,9 @@ impl ComputerUseLinux {
 
         let route = self.chord_route().await;
         if route == ChordRoute::Wtype {
-            let Some(args) = wtype_key_args(&params.key) else {
-                return Json(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "press_key".to_string(),
-                    message: "Unsupported key. Use names like Enter, Escape, Tab, ArrowLeft, Super, Ctrl+L, or a single US keyboard letter/digit.".to_string(),
-                    received,
-                });
-            };
-            let (input_guard, result) =
-                run_cancellation_safe_input(input_guard, async move { run_wtype_key(&args).await })
-                    .await;
-            let _input_guard = input_guard;
-            let output = match result {
-                Ok(()) => successful_action_with_focus(
-                    "press_key",
-                    "Action sent through wtype (Wayland virtual-keyboard protocol).",
-                    received,
-                    focus.clone(),
-                ),
-                Err(error) => {
-                    action_result_with_focus("press_key", Err(error), received, focus.clone())
-                }
-            };
-            if output.ok && focus.is_some() {
-                let notes = self.input_landing_notes(focus.as_ref(), false).await;
-                return Json(with_notes(output, notes));
-            }
-            return Json(output);
+            return self
+                .press_key_through_wtype(&params.key, input_guard, received, focus, None)
+                .await;
         }
         if route == ChordRoute::Portal {
             let portal_target = match self
@@ -3728,7 +3753,30 @@ impl ComputerUseLinux {
                     }
                 }
                 Ok(None) => {}
-                Err(error) => return Json(portal_start_error("press_key", error, received)),
+                Err(error) => {
+                    // A portal that exports RemoteDesktop but serves none of
+                    // its requests (response code 2, as on niri) reads as
+                    // absent; a cancellation is the user's answer.
+                    let refusal = error.downcast_ref::<PortalRefusal>().copied();
+                    let pinned = env_flag_enabled("COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD");
+                    if wtype_replays_failed_portal_chord(
+                        refusal,
+                        pinned,
+                        self.should_prefer_wtype_keyboard(),
+                    ) {
+                        let failure = format!("{error:#}");
+                        return self
+                            .press_key_through_wtype(
+                                &params.key,
+                                input_guard,
+                                received,
+                                focus,
+                                Some(failure),
+                            )
+                            .await;
+                    }
+                    return Json(portal_start_error("press_key", error, received));
+                }
             }
         }
         let Some(key_events) = key_sequence(&params.key) else {
@@ -14733,7 +14781,9 @@ enum ChordRoute {
 
 /// wtype replaces the portal only when the session has no RemoteDesktop
 /// portal at all, and the portal is neither forced nor already holding the
-/// user's consent. Wherever the portal exists it stays preferred.
+/// user's consent. Wherever the portal exists it stays preferred; a portal
+/// that then fails to serve the request may still replay the chord through
+/// wtype, see `wtype_replays_failed_portal_chord`.
 fn chord_route_from(
     prefer_portal: bool,
     portal_pinned: bool,
@@ -14747,6 +14797,18 @@ fn chord_route_from(
     } else {
         ChordRoute::Portal
     }
+}
+
+/// Whether a chord whose portal session could not start goes through wtype
+/// instead. Only a portal that failed to serve the request qualifies: a
+/// cancellation is the user's answer, and a portal that is forced keeps its
+/// own error, as one does when wtype cannot replace it.
+fn wtype_replays_failed_portal_chord(
+    refusal: Option<PortalRefusal>,
+    portal_pinned: bool,
+    wtype: bool,
+) -> bool {
+    refusal == Some(PortalRefusal::Failed) && !portal_pinned && wtype
 }
 
 /// wtype arguments for a chord: hold each modifier with `-M`, tap the key by
@@ -17369,6 +17431,36 @@ esac
             chord_route_from(false, false, true, true),
             ChordRoute::Command
         );
+    }
+
+    #[test]
+    fn wtype_replays_only_a_failed_unpinned_portal_chord() {
+        // (refusal, portal_pinned, wtype)
+        assert!(wtype_replays_failed_portal_chord(
+            Some(PortalRefusal::Failed),
+            false,
+            true
+        ));
+        // The user's cancellation is final.
+        assert!(!wtype_replays_failed_portal_chord(
+            Some(PortalRefusal::Cancelled),
+            false,
+            true
+        ));
+        // An error without a portal response code, such as a timeout.
+        assert!(!wtype_replays_failed_portal_chord(None, false, true));
+        // A forced portal keeps its own error.
+        assert!(!wtype_replays_failed_portal_chord(
+            Some(PortalRefusal::Failed),
+            true,
+            true
+        ));
+        // Without wtype nothing can replay the chord.
+        assert!(!wtype_replays_failed_portal_chord(
+            Some(PortalRefusal::Failed),
+            false,
+            false
+        ));
     }
 
     #[test]

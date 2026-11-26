@@ -60,6 +60,48 @@ const POINTER_BUTTON_PRESSED: u32 = 1;
 const AXIS_VERTICAL: u32 = 0;
 const AXIS_HORIZONTAL: u32 = 1;
 
+/// Why a portal request returned without success. The `Response` signal's
+/// code is 1 when the user cancelled the portal dialog and 2 for every other
+/// refusal, such as a portal that exports RemoteDesktop without a backend
+/// that serves it. Callers downcast the error to keep a user's cancellation
+/// final while a portal that cannot serve the request may fall back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PortalRefusal {
+    Cancelled,
+    Failed,
+}
+
+impl PortalRefusal {
+    fn from_response_code(response_code: u32) -> Self {
+        match response_code {
+            1 => Self::Cancelled,
+            _ => Self::Failed,
+        }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Cancelled => "was cancelled in the portal dialog",
+            Self::Failed => "failed: the portal serves no such request",
+        }
+    }
+}
+
+impl std::fmt::Display for PortalRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.describe())
+    }
+}
+
+impl std::error::Error for PortalRefusal {}
+
+/// The error for a portal `Response` code other than 0. The chain reads as
+/// `<step> (response code <code>): <PortalRefusal as Display>`.
+fn portal_refusal(step: &str, response_code: u32) -> anyhow::Error {
+    anyhow::Error::new(PortalRefusal::from_response_code(response_code))
+        .context(format!("{step} (response code {response_code})"))
+}
+
 const BTN_LEFT: i32 = 0x110;
 const BTN_RIGHT: i32 = 0x111;
 const BTN_MIDDLE: i32 = 0x112;
@@ -1987,7 +2029,7 @@ async fn create_remote_desktop_session(connection: &Connection) -> Result<OwnedO
     let (response_code, results) =
         await_portal_response(connection, handle, &request_path, &mut response_stream).await?;
     if response_code != 0 {
-        bail!("RemoteDesktop CreateSession denied or cancelled with response code {response_code}");
+        return Err(portal_refusal("RemoteDesktop CreateSession", response_code));
     }
 
     let session_handle: String = results
@@ -2059,7 +2101,7 @@ async fn select_devices(
     let (response_code, _) =
         await_portal_response(connection, handle, &request_path, &mut response_stream).await?;
     if response_code != 0 {
-        bail!("RemoteDesktop SelectDevices denied or cancelled with response code {response_code}");
+        return Err(portal_refusal("RemoteDesktop SelectDevices", response_code));
     }
     Ok(())
 }
@@ -2094,7 +2136,7 @@ async fn select_monitor_sources(connection: &Connection, session: &OwnedObjectPa
     let (response_code, _) =
         await_portal_response(connection, handle, &request_path, &mut response_stream).await?;
     if response_code != 0 {
-        bail!("ScreenCast SelectSources denied or cancelled with response code {response_code}");
+        return Err(portal_refusal("ScreenCast SelectSources", response_code));
     }
     Ok(())
 }
@@ -2121,7 +2163,7 @@ async fn start_remote_desktop_session(
     let (response_code, results) =
         await_portal_response(connection, handle, &request_path, &mut response_stream).await?;
     if response_code != 0 {
-        bail!("RemoteDesktop Start denied or cancelled with response code {response_code}");
+        return Err(portal_refusal("RemoteDesktop Start", response_code));
     }
 
     let devices = results
@@ -3389,6 +3431,119 @@ mod tests {
         assert!(!probe().await, "a bus socket that refuses connections");
 
         assert!(!lacks_interface("not xml", PORTAL_REMOTE_DESKTOP_INTERFACE));
+    }
+
+    #[tokio::test]
+    async fn portal_response_codes_separate_a_cancellation_from_a_portal_that_fails() {
+        struct FakeRemoteDesktop(Arc<std::sync::atomic::AtomicU32>);
+        #[zbus::interface(name = "org.freedesktop.portal.RemoteDesktop")]
+        impl FakeRemoteDesktop {
+            async fn create_session(
+                &self,
+                options: HashMap<String, OwnedValue>,
+                #[zbus(connection)] conn: &Connection,
+                #[zbus(header)] header: zbus::message::Header<'_>,
+            ) -> zbus::fdo::Result<OwnedObjectPath> {
+                let sender = header.sender().expect("a portal request has a sender");
+                let handle_token = String::try_from(
+                    options["handle_token"]
+                        .try_clone()
+                        .expect("handle_token present"),
+                )
+                .expect("handle_token is a string");
+                let path = request_path(sender.as_str(), &handle_token);
+                let emitter = zbus::object_server::SignalEmitter::new(conn, path.as_str())
+                    .expect("valid request path")
+                    .to_owned();
+                let response = self.0.load(Ordering::SeqCst);
+                // The spec has the Response follow the method reply.
+                tokio::spawn(async move {
+                    emitter
+                        .emit(
+                            PORTAL_REQUEST_INTERFACE,
+                            "Response",
+                            &(response, HashMap::<String, Value<'_>>::new()),
+                        )
+                        .await
+                        .expect("emit Response");
+                });
+                Ok(OwnedObjectPath::try_from(path).expect("valid request path"))
+            }
+        }
+
+        let dir = TempState::with_bus();
+        let address = format!("unix:path={}", dir.path.join("bus").display());
+        // No service directories, so nothing but the fake portal can be activated.
+        let config = dir.path.join("bus.conf");
+        std::fs::write(
+            &config,
+            format!(
+                "<busconfig><type>session</type><listen>{address}</listen>\
+                 <policy context=\"default\"><allow send_destination=\"*\"/>\
+                 <allow receive_sender=\"*\"/><allow own=\"*\"/></policy></busconfig>"
+            ),
+        )
+        .unwrap();
+        let mut bus = std::process::Command::new("dbus-daemon")
+            .arg(format!("--config-file={}", config.display()))
+            .args(["--nofork", "--nopidfile", "--print-address=1"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("start private dbus-daemon");
+        let mut printed = String::new();
+        io::BufRead::read_line(
+            &mut io::BufReader::new(bus.stdout.take().unwrap()),
+            &mut printed,
+        )
+        .unwrap();
+        struct Bus(std::process::Child);
+        impl Drop for Bus {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let _bus = Bus(bus);
+
+        let response = Arc::new(std::sync::atomic::AtomicU32::new(1));
+        let _portal = zbus::connection::Builder::address(address.as_str())
+            .unwrap()
+            .name(PORTAL_DESKTOP_SERVICE)
+            .unwrap()
+            .serve_at(
+                PORTAL_DESKTOP_PATH,
+                FakeRemoteDesktop(Arc::clone(&response)),
+            )
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let connection = zbus::connection::Builder::address(address.as_str())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        for (code, refusal, reason) in [
+            (
+                1,
+                PortalRefusal::Cancelled,
+                "cancelled in the portal dialog",
+            ),
+            (2, PortalRefusal::Failed, "serves no such request"),
+        ] {
+            response.store(code, Ordering::SeqCst);
+            let error = create_remote_desktop_session(&connection)
+                .await
+                .expect_err("a response other than 0 refuses the session");
+            assert_eq!(error.downcast_ref::<PortalRefusal>(), Some(&refusal));
+            let message = format!("{error:#}");
+            assert!(message.contains(reason), "{message}");
+            assert!(
+                message.contains(&format!("response code {code}")),
+                "{message}"
+            );
+        }
     }
 
     #[test]
