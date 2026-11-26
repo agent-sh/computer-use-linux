@@ -16,7 +16,6 @@ use std::{
     process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use zbus::{
     message::{Message, Type as MessageType},
@@ -514,94 +513,28 @@ async fn capture_with_grim() -> Result<RawScreenshotCapture> {
 /// no file on disk, no clipboard, no consent dialog.
 async fn capture_with_grim_at(program: &Path) -> Result<RawScreenshotCapture> {
     let mut command = Command::new(program);
-    command
-        .arg("-")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = crate::command_runner::spawn_retrying_busy(&mut command)
-        .await
-        .context("failed to spawn grim")?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .context("grim stdout was not captured")?;
-    let mut stderr = child
-        .stderr
-        .take()
-        .context("grim stderr was not captured")?;
+    command.arg("-");
     // The frame is the whole screenshot, so stdout gets the screenshot source
-    // limit the file-based routes use, not the command runner's cap. stderr
-    // carries a short error. Both are read while grim runs, so a full pipe
-    // cannot stall it.
-    let read = async {
-        let stdout = read_pipe_up_to(
-            &mut stdout,
-            MAX_SCREENSHOT_SOURCE_BYTES as usize,
-            "grim output",
-        )
-        .await
-        .context("failed to read grim output")?;
-        let stderr = read_pipe_up_to(&mut stderr, 64 * 1024, "grim stderr")
-            .await
-            .context("failed to read grim stderr")?;
-        Ok::<_, anyhow::Error>((stdout, stderr))
-    };
-    let (status, (stdout, stderr)) = match tokio::time::timeout(GRIM_TIMEOUT, async {
-        tokio::try_join!(
-            async { child.wait().await.map_err(anyhow::Error::from) },
-            read
-        )
-    })
-    .await
-    {
-        Ok(Ok(result)) => result,
-        Ok(Err(error)) => {
-            let _ = child.kill().await;
-            return Err(error);
-        }
-        Err(_) => {
-            let _ = child.kill().await;
-            bail!("grim timed out");
-        }
-    };
-    if !status.success() {
-        let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
-        bail!("grim exited with {status}: {stderr}");
+    // limit the file-based routes use, not the command runner's cap.
+    let output = crate::command_runner::output_with_limit(
+        command,
+        "grim screenshot",
+        GRIM_TIMEOUT,
+        MAX_SCREENSHOT_SOURCE_BYTES as usize,
+    )
+    .await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!("grim exited with {}: {stderr}", output.status);
     }
-    let (width, height) = png_dimensions(&stdout).context("grim did not write a PNG")?;
+    let (width, height) = png_dimensions(&output.stdout).context("grim did not write a PNG")?;
     Ok(RawScreenshotCapture {
         mime_type: "image/png".to_string(),
-        bytes: stdout,
+        bytes: output.stdout,
         source: "grim".to_string(),
         width,
         height,
     })
-}
-
-/// Reads a pipe to its end, failing once more than `max` bytes arrived.
-async fn read_pipe_up_to(
-    pipe: &mut (impl AsyncRead + Unpin),
-    max: usize,
-    what: &str,
-) -> std::io::Result<Vec<u8>> {
-    let mut output = Vec::new();
-    // Heap-allocated so the async state machine stays small: every caller of
-    // the screenshot chain embeds this future.
-    let mut buffer = vec![0_u8; 64 * 1024];
-    loop {
-        let length = pipe.read(&mut buffer).await?;
-        if length == 0 {
-            break;
-        }
-        if output.len().saturating_add(length) > max {
-            return Err(std::io::Error::other(format!(
-                "{what} exceeded {max} bytes"
-            )));
-        }
-        output.extend_from_slice(&buffer[..length]);
-    }
-    Ok(output)
 }
 
 /// `GetImage` on the root window of a native X11 session. Pixels are device
@@ -1530,6 +1463,35 @@ mod tests {
         std::fs::remove_file(&frame).unwrap();
         assert_eq!((capture.width, capture.height), (3, 2));
         assert_eq!(capture.bytes.len(), padded.len());
+    }
+
+    #[tokio::test]
+    async fn grim_capture_drains_a_flooding_stderr() {
+        use image::ImageEncoder;
+        // Inherited WAYLAND_DEBUG=1 tracing can fill stderr before the frame
+        // ends; a reader that waits for stdout first would deadlock.
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&[0u8; 24], 3, 2, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let frame = test_path("grim-frame.png");
+        let script = test_path("grim-stderr");
+        std::fs::write(&frame, &png).unwrap();
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nyes 'wayland debug trace line padding padding padding' | head -c 200000 >&2\ncat '{}'\n",
+                frame.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let capture = capture_with_grim_at(&script).await.unwrap();
+        std::fs::remove_file(&script).unwrap();
+        std::fs::remove_file(&frame).unwrap();
+        assert_eq!((capture.width, capture.height), (3, 2));
+        assert_eq!(capture.bytes, png);
     }
 
     fn crc32(bytes: &[u8]) -> u32 {
