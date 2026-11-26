@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Screenshots come from `grim` ahead of the DBus routes on a Wayland session whose compositor implements wlr-screencopy (Sway, Hyprland, niri, river, labwc) when grim is installed: no consent dialog, nothing written to disk, and exact at fractional scales. `COMPUTER_USE_LINUX_SCREENSHOT_BACKEND=grim` forces it; `doctor` reports `grim` as a screenshot route there. Thanks to [@codelllc09](https://github.com/codelllc09) ([#523](https://github.com/agent-sh/computer-use-linux/pull/523)).
+
 ### Fixed
 
 - `press_key` chords reach wtype on a session whose portal exports RemoteDesktop but answers `CreateSession` with response code 2 before any consent dialog (no backend serves it, as with `xdg-desktop-portal-gnome` or `-gtk` on niri), when ydotool is absent and the portal is not forced. Response code 1, a cancellation in the portal dialog, and failures at later steps stay final. Thanks to [@codelllc09](https://github.com/codelllc09) ([#522](https://github.com/agent-sh/computer-use-linux/pull/522)).
