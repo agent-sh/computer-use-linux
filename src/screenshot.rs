@@ -16,6 +16,7 @@ use std::{
     process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use zbus::{
     message::{Message, Type as MessageType},
@@ -518,21 +519,89 @@ async fn capture_with_grim_at(program: &Path) -> Result<RawScreenshotCapture> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output =
-        crate::command_runner::output_with_timeout(command, "grim screenshot", GRIM_TIMEOUT)
-            .await?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        bail!("grim exited with {}: {stderr}", output.status);
+    let mut child = crate::command_runner::spawn_retrying_busy(&mut command)
+        .await
+        .context("failed to spawn grim")?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("grim stdout was not captured")?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .context("grim stderr was not captured")?;
+    // The frame is the whole screenshot, so stdout gets the screenshot source
+    // limit the file-based routes use, not the command runner's cap. stderr
+    // carries a short error. Both are read while grim runs, so a full pipe
+    // cannot stall it.
+    let read = async {
+        let stdout = read_pipe_up_to(
+            &mut stdout,
+            MAX_SCREENSHOT_SOURCE_BYTES as usize,
+            "grim output",
+        )
+        .await
+        .context("failed to read grim output")?;
+        let stderr = read_pipe_up_to(&mut stderr, 64 * 1024, "grim stderr")
+            .await
+            .context("failed to read grim stderr")?;
+        Ok::<_, anyhow::Error>((stdout, stderr))
+    };
+    let (status, (stdout, stderr)) = match tokio::time::timeout(GRIM_TIMEOUT, async {
+        tokio::try_join!(
+            async { child.wait().await.map_err(anyhow::Error::from) },
+            read
+        )
+    })
+    .await
+    {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            let _ = child.kill().await;
+            return Err(error);
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            bail!("grim timed out");
+        }
+    };
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
+        bail!("grim exited with {status}: {stderr}");
     }
-    let (width, height) = png_dimensions(&output.stdout).context("grim did not write a PNG")?;
+    let (width, height) = png_dimensions(&stdout).context("grim did not write a PNG")?;
     Ok(RawScreenshotCapture {
         mime_type: "image/png".to_string(),
-        bytes: output.stdout,
+        bytes: stdout,
         source: "grim".to_string(),
         width,
         height,
     })
+}
+
+/// Reads a pipe to its end, failing once more than `max` bytes arrived.
+async fn read_pipe_up_to(
+    pipe: &mut (impl AsyncRead + Unpin),
+    max: usize,
+    what: &str,
+) -> std::io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    // Heap-allocated so the async state machine stays small: every caller of
+    // the screenshot chain embeds this future.
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let length = pipe.read(&mut buffer).await?;
+        if length == 0 {
+            break;
+        }
+        if output.len().saturating_add(length) > max {
+            return Err(std::io::Error::other(format!(
+                "{what} exceeded {max} bytes"
+            )));
+        }
+        output.extend_from_slice(&buffer[..length]);
+    }
+    Ok(output)
 }
 
 /// `GetImage` on the root window of a native X11 session. Pixels are device
@@ -1424,6 +1493,58 @@ mod tests {
         assert_eq!(capture.mime_type, "image/png");
         assert_eq!((capture.width, capture.height), (3, 2));
         assert_eq!(png_dimensions(&capture.bytes).unwrap(), (3, 2));
+    }
+
+    #[tokio::test]
+    async fn grim_capture_accepts_a_frame_over_the_command_output_cap() {
+        use image::ImageEncoder;
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&[0u8; 24], 3, 2, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        // A text chunk after IHDR pads the frame past the command runner's
+        // 8 MiB cap; the screenshot source limit is 64 MiB.
+        const PADDED_BYTES: usize = 8 * 1024 * 1024 + 1024;
+        let ihdr_end = 8 + 12 + u32::from_be_bytes(png[8..12].try_into().unwrap()) as usize;
+        let mut data = b"Comment\0".to_vec();
+        data.resize(PADDED_BYTES - 12 - ihdr_end, b'x');
+        let mut chunk = Vec::with_capacity(data.len() + 12);
+        chunk.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let mut typed = b"tEXt".to_vec();
+        typed.extend_from_slice(&data);
+        chunk.extend_from_slice(&typed);
+        chunk.extend_from_slice(&crc32(&typed).to_be_bytes());
+        let mut padded = png[..ihdr_end].to_vec();
+        padded.extend_from_slice(&chunk);
+        padded.extend_from_slice(&png[ihdr_end..]);
+        assert!(padded.len() > PADDED_BYTES - 1024);
+
+        let frame = test_path("grim-frame.png");
+        let script = test_path("grim-large");
+        std::fs::write(&frame, &padded).unwrap();
+        std::fs::write(&script, format!("#!/bin/sh\ncat '{}'\n", frame.display())).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let capture = capture_with_grim_at(&script).await.unwrap();
+        std::fs::remove_file(&script).unwrap();
+        std::fs::remove_file(&frame).unwrap();
+        assert_eq!((capture.width, capture.height), (3, 2));
+        assert_eq!(capture.bytes.len(), padded.len());
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0_u32;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xedb8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
     }
 
     #[tokio::test]
