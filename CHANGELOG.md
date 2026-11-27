@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `press_key` chords reach wtype on a session whose portal exports RemoteDesktop but answers `CreateSession` with response code 2 before any consent dialog (no backend serves it, as with `xdg-desktop-portal-gnome` or `-gtk` on niri), when ydotool is absent and the portal is not forced. Response code 1, a cancellation in the portal dialog, and failures at later steps stay final.
+- `press_key` chords reach wtype on a session whose portal exports RemoteDesktop but answers `CreateSession` with response code 2 before any consent dialog (no backend serves it, as with `xdg-desktop-portal-gnome` or `-gtk` on niri), when ydotool is absent and the portal is not forced. Response code 1, a cancellation in the portal dialog, and failures at later steps stay final. Thanks to [@codelllc09](https://github.com/codelllc09) ([#522](https://github.com/agent-sh/computer-use-linux/pull/522)).
 
 ## [0.7.64] - 2026-11-26
 
