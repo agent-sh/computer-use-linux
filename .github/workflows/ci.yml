@@ -134,6 +134,16 @@ jobs:
       - run: npm install -g agnix
       - run: agnix .
 
+  # The marketplace serves main, and every plugin start downloads the release
+  # its launcher pins, so main must not name a version that is not published.
+  pinned-release:
+    name: pinned release published
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/check_release_published.sh
+
   npm-wrapper:
     name: npm wrapper
     runs-on: ubuntu-latest

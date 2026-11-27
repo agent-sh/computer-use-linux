@@ -364,8 +364,17 @@ This repo is a plugin marketplace for both Claude Code and Codex. The plugin
 registers the MCP server and ships the `computer-use-linux` skill. On first
 start it downloads the release binaries pinned to the plugin version, checks
 each against its published `.sha256`, and caches them under
-`~/.cache/computer-use-linux/plugin/`. It needs `curl` or `wget`, and nothing
-else is installed.
+`~/.cache/computer-use-linux/plugin/`. The download runs in a detached
+process, main binary first: the server starts once its own binary is verified,
+and the COSMIC helper and the indicator follow in the background. A start that
+times out on a slow link leaves the download running, and an interrupted
+download resumes where it stopped at the next start. After a plugin update, a
+start whose new version cannot be downloaded, or is not ready within
+`COMPUTER_USE_LINUX_PLUGIN_UPDATE_WAIT` seconds (default 5), runs the newest
+cached version, and a later start picks up the new one. Until a version is
+complete, its download log is
+`~/.cache/computer-use-linux/plugin/.partial-v<version>/fetch.log`. It needs
+`curl` or `wget`, and nothing else is installed.
 
 Claude Code:
 
@@ -632,6 +641,7 @@ files.
 | --- | --- |
 | `COMPUTER_USE_LINUX_BIN` | Run this binary instead of the bundled one. The CLI wrapper and the plugin launcher use the path as given and fail if it does not exist. The Pi extension uses it only when it is an absolute path to an executable. |
 | `COMPUTER_USE_LINUX_TIMEOUT_MS` | Pi native tools only: per-call timeout in milliseconds (default `60000`). Raise it for `run_shell` calls with `timeout_seconds` above 60. |
+| `COMPUTER_USE_LINUX_PLUGIN_UPDATE_WAIT` | Seconds the Claude Code and Codex plugin launcher waits for a newly pinned version to download before it starts the newest cached version instead (default 5). With no cached version it waits for the download. |
 | `COMPUTER_USE_LINUX_DOWNLOAD_BASE` | Override the GitHub release base URL the installer downloads from (mirrors, air-gapped hosts). |
 | `COMPUTER_USE_LINUX_SKIP_DOWNLOAD=1` | Skip the binary download entirely, at install and at first launch. |
 | `COMPUTER_USE_LINUX_LOCAL_BINARY` / `…_LOCAL_COSMIC_HELPER` / `…_LOCAL_INDICATOR` | Install from a local build instead of downloading (used by CI and local testing). |

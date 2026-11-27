@@ -9,11 +9,15 @@ import platform
 import shutil
 import subprocess
 import sys
+import fcntl
 import tempfile
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = json.loads((ROOT / "package.json").read_text())["version"]
+LAUNCHER = ROOT / "plugins/computer-use-linux/bin/computer-use-linux"
+PLUGIN_VERSION = next(line[len("version="):] for line in LAUNCHER.read_text().splitlines() if line.startswith("version="))
 ARCH = {"x86_64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}[platform.machine()]
 TARGET = f"{ARCH}-unknown-linux-gnu"
 NAMES = ["computer-use-linux", "computer-use-linux-cosmic", "computer-use-linux-indicator"]
@@ -120,14 +124,14 @@ def check(kind, scenario):
             put(tools, downloader, (f"#!{sys.executable}\n" + DOWNLOADER).encode())
             if downloader == "wget":
                 # A closed PATH exercises wget fallback even on curl hosts.
-                for name in "sh uname mkdir mktemp grep head tr sha256sum cut chmod mv rm touch find".split():
+                for name in "sh uname mkdir grep head tr sha256sum cut chmod mv rm touch find cat sleep sort".split():
                     (tools / name).symlink_to(shutil.which(name))
                 env["PATH"] = str(tools)
             else:
                 env["PATH"] = str(tools) + os.pathsep + env["PATH"]
             env["COMPUTER_USE_LINUX_DOWNLOAD_BASE"] = release.as_uri() if kind == "plugin-file" else "https://fixture.invalid/release"
-            destination = base / "cache/computer-use-linux/plugin" / f"v{VERSION}"
-            command = ["sh", str(ROOT / "plugins/computer-use-linux/bin/computer-use-linux"), "--help"]
+            destination = base / "cache/computer-use-linux/plugin" / f"v{PLUGIN_VERSION}"
+            command = ["sh", str(LAUNCHER), "--help"]
             if scenario == "cached-old-release":
                 for name in NAMES[:2]:
                     put(destination, name)
@@ -156,13 +160,15 @@ def check(kind, scenario):
             if scenario == "old-release":
                 put(destination, NAMES[2], b"stale indicator")
 
-        success = scenario in ("present", "old-release", "cached-old-release")
+        # The plugin starts once its main binary is verified; a failed helper
+        # or indicator only stays out of its cache.
+        success = scenario != "missing-0" if kind.startswith("plugin") else scenario in ("present", "old-release", "cached-old-release")
         if scenario == "read-only":
             # A global prefix owned by root: nothing is downloaded.
             destination.mkdir(parents=True, exist_ok=True)
         node_arch = "x64" if ARCH == "x86_64" else "arm64"
         installed = NAMES if kind.startswith("plugin") else [f"computer-use-linux-linux-{node_arch}", *NAMES[1:]]
-        if not success:
+        if scenario not in ("present", "old-release", "cached-old-release"):
             # Existing files must survive a failed installation unchanged.
             put(destination, "existing-sentinel", b"preserve me")
             if kind == "npm":
@@ -177,6 +183,9 @@ def check(kind, scenario):
             destination.chmod(0o755)
         detail = f"{kind}/{scenario}: {result.stdout}\n{result.stderr}"
         assert (result.returncode == 0) == success, detail
+        if kind.startswith("plugin"):
+            check_plugin(scenario, base, release, destination, command, env, before, detail)
+            return
         if kind == "npm-wrapper":
             # The installer's progress must not reach stdout, the MCP channel.
             assert result.stdout == "", detail
@@ -205,15 +214,60 @@ def check(kind, scenario):
                 again = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
                 assert again.returncode == 0 and again.stdout == "", f"second launch failed: {again.stderr}"
                 assert (base / "requests").read_text() == requests, "an installed binary was downloaded again"
-            if kind.startswith("plugin") and scenario != "present":
-                assert (destination / ".no-indicator").exists(), detail
-                requests = (base / "requests").read_text() if (base / "requests").exists() else ""
-                if scenario == "cached-old-release":
-                    assert not any(f"{name}-{TARGET}" in requests for name in NAMES[:2]), f"cached binaries were downloaded again: {requests}"
-                shutil.rmtree(release)
-                again = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
-                assert again.returncode == 0, f"cached launch failed: {again.stderr}"
-                assert ((base / "requests").read_text() if (base / "requests").exists() else "") == requests
+
+
+def wait_for_fetcher(base):
+    """The launcher downloads in a detached process; wait for it to end."""
+    cache = base / "cache/computer-use-linux/plugin"
+    deadline = time.monotonic() + 15
+    while any(lock_held(lock) for lock in cache.glob(".partial-v*.flock")):
+        assert time.monotonic() < deadline, "the plugin's background download did not finish"
+        time.sleep(0.05)
+
+
+def lock_held(lock):
+    """A fetcher holds its flock, or, without flock(1), names its pid in the file."""
+    try:
+        with open(lock, "rb") as file:
+            try:
+                fcntl.flock(file, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            pid = file.read().strip()
+    except FileNotFoundError:
+        return False
+    return pid.isdigit() and Path(f"/proc/{int(pid)}/cmdline").exists() and b"__plugin_fetch" in Path(f"/proc/{int(pid)}/cmdline").read_bytes()
+
+
+def check_plugin(scenario, base, release, destination, command, env, before, detail):
+    wait_for_fetcher(base)
+    files = snapshot(destination)
+    if scenario == "missing-0":
+        assert files == before, f"failed installation mutated files: {detail}"
+        return
+    assert files.get(NAMES[0]) == BINARY, detail
+    if scenario not in ("present", "old-release", "cached-old-release"):
+        # Existing files survive, and nothing unverified lands.
+        assert files.get("existing-sentinel") == b"preserve me", detail
+        # A failed asset does not hold back the other one.
+        assert (NAMES[1] in files) == (scenario != "missing-1"), detail
+        assert (NAMES[2] in files) == (scenario == "missing-1"), detail
+        assert ".no-indicator" not in files, detail
+        return
+    assert files.get(NAMES[1]) == BINARY, detail
+    assert (NAMES[2] in files) == (scenario == "present"), detail
+    if scenario == "present":
+        assert files[NAMES[2]] == BINARY, detail
+        return
+    assert (destination / ".no-indicator").exists(), detail
+    requests = (base / "requests").read_text() if (base / "requests").exists() else ""
+    if scenario == "cached-old-release":
+        assert not any(f"{name}-{TARGET}" in requests for name in NAMES[:2]), f"cached binaries were downloaded again: {requests}"
+    shutil.rmtree(release)
+    again = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
+    assert again.returncode == 0, f"cached launch failed: {again.stderr}"
+    wait_for_fetcher(base)
+    assert ((base / "requests").read_text() if (base / "requests").exists() else "") == requests
 
 
 def main():

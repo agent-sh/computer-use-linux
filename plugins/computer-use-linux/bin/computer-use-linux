@@ -1,8 +1,12 @@
 #!/bin/sh
-# Plugin launcher for Claude Code and Codex. Downloads the pinned release
-# binaries on first use, verifies their published sha256, caches them per
-# version, then execs the server. stdout is left to the MCP stream; every
-# message goes to stderr.
+# Plugin launcher for Claude Code and Codex. Runs the release binaries pinned
+# to the plugin version, cached per version once their published sha256 checks
+# out. A detached fetcher downloads what is missing, main binary first, and
+# resumes a partial download where the last one stopped, so the server starts
+# as soon as its own binary is in place and the helpers follow in the
+# background. While the pinned version cannot be fetched, or is still
+# downloading, the newest cached version runs instead. stdout is left to the
+# MCP stream; every message goes to stderr.
 set -eu
 
 version=0.7.64
@@ -35,34 +39,60 @@ esac
 cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/computer-use-linux/plugin"
 cache_dir="$cache_root/v$version"
 binary="$cache_dir/computer-use-linux"
-helper="$cache_dir/computer-use-linux-cosmic"
-indicator="$cache_dir/computer-use-linux-indicator"
+# Partial downloads and the fetch log live here until the version is complete.
+partial="$cache_root/.partial-v$version"
+lock="$partial.flock"
+log="$partial/fetch.log"
+# The indicator before the COSMIC helper: every desktop can show it.
+names="computer-use-linux computer-use-linux-indicator computer-use-linux-cosmic"
 
-fetch() {
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --retry 2 -o "$2" "$1"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q -O "$2" "$1"
-  else
-    say "curl or wget is required to download the server binary"
-    return 1
-  fi
-}
-
-# Only a missing release asset is optional; network and checksum errors fail.
-fetch_optional() {
+# get URL FILE: download, continuing FILE when it holds a partial copy.
+# Returns 10 for a missing asset and 11 when the server refuses to resume.
+get() {
   case "$1" in
     file://*) [ -e "${1#file://}" ] || return 10 ;;
   esac
   if command -v curl >/dev/null 2>&1; then
-    code=$(curl -fsSL --retry 2 -o "$2" -w '%{http_code}' "$1") && return 0
-    [ "$code" = "404" ] && return 10
+    rc=0
+    # A link that stalls for two minutes fails; the next start resumes it.
+    code=$(curl -fsSL --retry 2 --connect-timeout 30 --speed-limit 1 --speed-time 120 \
+      -C - -o "$2" -w '%{http_code}' "$1") || rc=$?
+    [ "$rc" -ne 0 ] || return 0
+    case "$code" in
+      404) return 10 ;;
+      416) return 11 ;;
+    esac
+    case "$rc" in
+      33 | 36) return 11 ;;
+    esac
+    return 1
   elif command -v wget >/dev/null 2>&1; then
-    out=$(wget -S -O "$2" "$1" 2>&1) && return 0
+    out=$(wget -S -c -T 120 -O "$2" "$1" 2>&1) && return 0
     echo "$out" >&2
     echo "$out" | grep -q ' 404 ' && return 10
-  else
-    say "curl or wget is required to download the server binary"
+    echo "$out" | grep -q ' 416 ' && return 11
+    return 1
+  fi
+  say "curl or wget is required to download the server binary"
+  return 1
+}
+
+# exists URL: 0 when the asset exists, 10 when it does not.
+exists() {
+  case "$1" in
+    file://*)
+      if [ -e "${1#file://}" ]; then
+        return 0
+      fi
+      return 10
+      ;;
+  esac
+  if command -v curl >/dev/null 2>&1; then
+    code=$(curl -fsIL --retry 2 --connect-timeout 30 -o /dev/null -w '%{http_code}' "$1") && return 0
+    [ "$code" != 404 ] || return 10
+  elif command -v wget >/dev/null 2>&1; then
+    out=$(wget -S --spider -T 120 -O /dev/null "$1" 2>&1) && return 0
+    ! echo "$out" | grep -q ' 404 ' || return 10
   fi
   return 1
 }
@@ -75,71 +105,260 @@ sha256() {
   fi
 }
 
-install_release() {
-  base="${COMPUTER_USE_LINUX_DOWNLOAD_BASE:-https://github.com/agent-sh/computer-use-linux/releases/download/v$version}"
-  mkdir -p "$cache_root"
-  tmp=$(mktemp -d "$cache_root/.download.XXXXXX")
-  trap 'rm -rf "$tmp"' EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-
-  for name in computer-use-linux computer-use-linux-cosmic computer-use-linux-indicator; do
-    # A cache made by an older launcher can already contain the main binaries.
-    [ ! -x "$cache_dir/$name" ] || continue
-    asset="$name-$target"
-    say "downloading $asset v$version"
-    if [ "$name" = computer-use-linux-indicator ]; then
-      status=0
-      fetch_optional "$base/$asset" "$tmp/$name" || status=$?
-      if [ "$status" -eq 10 ]; then
-        rm -f "$tmp/$name"
-        say "release v$version has no indicator; running without the overlay"
-        : >"$tmp/.no-indicator"
-        continue
+# fetch_asset NAME: download, verify and install one binary of this version.
+fetch_asset() {
+  name=$1
+  asset="$name-$target"
+  part="$partial/$name.part"
+  say "downloading $asset v$version"
+  rm -f "$partial/$name.sha256"
+  status=0
+  get "$base/$asset.sha256" "$partial/$name.sha256" || status=$?
+  if [ "$status" -eq 10 ] && [ "$name" = computer-use-linux-indicator ]; then
+    # Only a release without the indicator itself may skip it.
+    status=0
+    exists "$base/$asset" || status=$?
+    if [ "$status" -eq 10 ]; then
+      say "release v$version has no indicator; running without the overlay"
+      mkdir -p "$cache_dir"
+      : >"$cache_dir/.no-indicator"
+      return 0
+    fi
+    status=10
+  fi
+  if [ "$status" -ne 0 ]; then
+    say "could not download $asset.sha256 from $base"
+    return 1
+  fi
+  expected=$(grep -o -E '[0-9a-fA-F]{64}' "$partial/$name.sha256" | head -n 1 | tr 'A-F' 'a-f')
+  attempt=1
+  while [ ! -f "$part" ] || [ "$(sha256 "$part")" != "$expected" ]; do
+    resumed=false
+    [ ! -s "$part" ] || resumed=true
+    status=0
+    get "$base/$asset" "$part" || status=$?
+    if [ "$status" -eq 0 ] || [ "$status" -eq 11 ]; then
+      actual=$(sha256 "$part" 2>/dev/null || true)
+      [ "$status" -ne 0 ] || [ "$actual" != "$expected" ] || break
+      # A refused resume, or a resumed file that does not verify (the asset
+      # changed, or the partial was damaged), starts over once.
+      rm -f "$part"
+      if [ "$status" -eq 0 ] && { [ "$resumed" = false ] || [ "$attempt" -ge 2 ]; }; then
+        say "sha256 mismatch for $asset: expected ${expected:-<none>}, got $actual"
+        return 1
       fi
-      [ "$status" -eq 0 ] || return "$status"
-    else
-      fetch "$base/$asset" "$tmp/$name"
+      if [ "$attempt" -ge 2 ]; then
+        say "the server refused to resume $asset"
+        return 1
+      fi
+      attempt=2
+      continue
     fi
-    fetch "$base/$asset.sha256" "$tmp/$name.sha256"
-    expected=$(grep -o -E '[0-9a-fA-F]{64}' "$tmp/$name.sha256" | head -n 1 | tr 'A-F' 'a-f')
-    actual=$(sha256 "$tmp/$name")
-    if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
-      say "sha256 mismatch for $asset: expected ${expected:-<none>}, got $actual"
-      exit 1
-    fi
-    chmod 0755 "$tmp/$name"
+    # Network errors keep the partial file for the next start to resume.
+    say "could not download $asset from $base"
+    return 1
   done
-
-  # Concurrent first starts each stage their own copy; rename keeps the swap
-  # atomic, and the helpers land before the main binary that gates reuse.
-  mkdir -p "$cache_dir"
-  for name in computer-use-linux-cosmic computer-use-linux-indicator computer-use-linux; do
-    if [ -f "$tmp/$name" ]; then
-      mv -f "$tmp/$name" "$cache_dir/$name"
-    fi
-  done
-  if [ -f "$tmp/.no-indicator" ]; then
-    mv -f "$tmp/.no-indicator" "$cache_dir/.no-indicator"
-  elif [ -x "$indicator" ]; then
+  chmod 0755 "$part" && mkdir -p "$cache_dir" && mv -f "$part" "$cache_dir/$name" || return 1
+  if [ "$name" = computer-use-linux-indicator ]; then
     rm -f "$cache_dir/.no-indicator"
   fi
-  rm -rf "$tmp"
-  trap - EXIT INT TERM
 }
 
-if [ ! -x "$binary" ] || [ ! -x "$helper" ] || { [ ! -x "$indicator" ] && [ ! -f "$cache_dir/.no-indicator" ]; }; then
-  install_release
+# One fetcher per version. With flock(1) the kernel holds the lock: the
+# launcher takes it on fd 9 and the fetcher inherits it, so it ends with the
+# fetcher and its download. Without flock, a file created exclusively holds
+# the fetcher's pid.
+have_flock() {
+  command -v flock >/dev/null 2>&1
+}
+
+release_lock() {
+  if [ "$(cat "$lock" 2>/dev/null)" = "$$" ]; then
+    rm -f "$lock"
+  fi
+}
+
+# The detached fetcher. The launcher that spawned it took the lock for it.
+fetch_release() {
+  if have_flock; then
+    # Keep the inherited lock, or take it when this shell did not pass fd 9.
+    flock -n 9 2>/dev/null || { exec 9>>"$lock" && flock -n 9; } || exit 0
+  else
+    echo "$$" >"$lock"
+    trap release_lock EXIT
+  fi
+  echo "$$" >"$partial/fetch.pid"
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap '' HUP
+  base="${COMPUTER_USE_LINUX_DOWNLOAD_BASE:-https://github.com/agent-sh/computer-use-linux/releases/download/v$version}"
+  for name in $names; do
+    [ ! -x "$cache_dir/$name" ] || continue
+    if [ "$name" = computer-use-linux-indicator ] && [ -f "$cache_dir/.no-indicator" ]; then
+      continue
+    fi
+    if ! fetch_asset "$name"; then
+      # Without its main binary the version is of no use; a failed helper
+      # does not hold back the other one.
+      [ "$name" != computer-use-linux ] || exit 1
+      failed=1
+    fi
+  done
+  [ -z "${failed:-}" ] || exit 1
+  say "v$version is complete"
+  rm -rf "$partial"
+}
+
+if [ "${1:-}" = __plugin_fetch ]; then
+  fetch_release
+  exit 0
+fi
+
+is_complete() {
+  [ -x "$1/computer-use-linux" ] && [ -x "$1/computer-use-linux-cosmic" ] &&
+    { [ -x "$1/computer-use-linux-indicator" ] || [ -f "$1/.no-indicator" ]; }
+}
+
+fetcher_alive() {
+  [ -e "$lock" ] || return 1
+  if have_flock; then
+    # A shared probe: it only fails while a fetcher holds the lock.
+    if flock -s -n "$lock" true; then
+      return 1
+    fi
+    return 0
+  fi
+  pid=$(cat "$lock" 2>/dev/null || true)
+  if [ -z "$pid" ]; then
+    # Just spawned. A lock that never got a pid is stale after a minute.
+    [ -z "$(find "$lock" -mmin +1 2>/dev/null)" ]
+    return
+  fi
+  if [ -r "/proc/$pid/cmdline" ]; then
+    tr '\0' ' ' <"/proc/$pid/cmdline" | grep -q __plugin_fetch
+  else
+    kill -0 "$pid" 2>/dev/null
+  fi
+}
+
+# Start a fetcher in its own session, so it outlives this launcher, a client
+# that gives up on the handshake, and the server.
+start_fetch() {
+  mkdir -p "$cache_root"
+  if have_flock; then
+    exec 9>>"$lock"
+    # Another launcher's probe can hold the lock for an instant; try again
+    # when no fetcher holds it.
+    if ! flock -n 9 && { fetcher_alive || ! flock -n 9; }; then
+      exec 9>&-
+      return 0
+    fi
+  elif ! (set -C && : >"$lock") 2>/dev/null; then
+    # Take over a stale lock under a second exclusive file, so two launchers
+    # cannot each remove the other's new lock. One left by a killed launcher
+    # expires after a minute.
+    if [ -n "$(find "$lock.takeover" -mmin +1 2>/dev/null)" ]; then
+      rm -f "$lock.takeover"
+    fi
+    (set -C && : >"$lock.takeover") 2>/dev/null || return 0
+    if fetcher_alive; then
+      rm -f "$lock.takeover"
+      return 0
+    fi
+    rm -f "$lock"
+    taken=0
+    (set -C && : >"$lock") 2>/dev/null || taken=1
+    rm -f "$lock.takeover"
+    [ "$taken" -eq 0 ] || return 0
+  fi
+  mkdir -p "$partial"
+  if command -v setsid >/dev/null 2>&1; then
+    (setsid /bin/sh "$0" __plugin_fetch </dev/null >"$log" 2>&1 &)
+  else
+    (/bin/sh "$0" __plugin_fetch </dev/null >"$log" 2>&1 &)
+  fi
+  # The server must not hold the lock.
+  exec 9>&-
+}
+
+# wait_for_binary [SECONDS]: wait while the fetcher works on the main binary.
+wait_for_binary() {
+  waited=0
+  while [ ! -x "$binary" ] && fetcher_alive; do
+    if [ -n "$1" ] && [ "$waited" -ge "$1" ]; then
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
+older_than_pinned() {
+  [ "$(printf '%s\n%s\n' "$1" "$version" | sort -t. -k1,1n -k2,2n -k3,3n | head -n 1)" = "$1" ]
+}
+
+# The newest cached version, preferring one older than the pinned version: a
+# newer cache can be a release the plugin rolled back from.
+newest_cached() {
+  versions=$(for dir in "$cache_root"/v*; do echo "${dir##*/v}"; done |
+    grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -t. -k1,1nr -k2,2nr -k3,3nr || true)
+  for pass in older any; do
+    for v in $versions; do
+      [ "$v" != "$version" ] && [ -x "$cache_root/v$v/computer-use-linux" ] || continue
+      [ "$pass" = any ] || older_than_pinned "$v" || continue
+      echo "$cache_root/v$v"
+      return 0
+    done
+  done
+  return 1
+}
+
+if ! is_complete "$cache_dir"; then
+  start_fetch
+fi
+
+run_dir=$cache_dir
+if [ ! -x "$binary" ]; then
+  fallback=$(newest_cached || true)
+  if [ -z "$fallback" ]; then
+    say "downloading v$version; if this start times out, the next one resumes it (log: $log)"
+    wait_for_binary ""
+    if [ ! -x "$binary" ]; then
+      say "could not download v$version:"
+      cat "$log" >&2 2>/dev/null || true
+      exit 1
+    fi
+  else
+    update_wait=${COMPUTER_USE_LINUX_PLUGIN_UPDATE_WAIT:-5}
+    case "$update_wait" in
+      '' | *[!0-9]*) update_wait=5 ;;
+    esac
+    wait_for_binary "$update_wait"
+    if [ ! -x "$binary" ]; then
+      run_dir=$fallback
+      if fetcher_alive; then
+        say "v$version is still downloading; starting the cached ${fallback##*/} meanwhile (log: $log)"
+      else
+        say "could not download v$version; starting the cached ${fallback##*/} (log: $log)"
+        cat "$log" >&2 2>/dev/null || true
+      fi
+    fi
+  fi
 fi
 
 # Claude Code and Codex update plugins independently, so another version may
-# still be in use. Mark this one live and drop versions unused for 30 days,
-# plus staging dirs left by a killed download.
-touch "$cache_dir"
+# still be in use. Mark the running one live and drop versions unused for 30
+# days, plus partial downloads abandoned as long and staging dirs left by
+# launchers before 0.7.65.
+touch "$run_dir"
 find "$cache_root" -mindepth 1 -maxdepth 1 \
-  \( \( -name 'v*' ! -path "$cache_dir" -mtime +30 \) -o \( -name '.download.*' -mmin +60 \) \) \
+  \( \( -name 'v*' ! -path "$cache_dir" ! -path "$run_dir" -mtime +30 \) \
+  -o \( -name '.partial-v*' ! -path "$partial" ! -path "$lock" -mtime +30 \) \
+  -o \( -name '.download.*' -mmin +60 \) \) \
   -exec rm -rf {} + 2>/dev/null || true
 
+helper="$run_dir/computer-use-linux-cosmic"
+indicator="$run_dir/computer-use-linux-indicator"
 if [ -z "${COMPUTER_USE_LINUX_COSMIC_HELPER:-}" ]; then
   COMPUTER_USE_LINUX_COSMIC_HELPER="$helper"
   export COMPUTER_USE_LINUX_COSMIC_HELPER
@@ -149,4 +368,4 @@ if [ -z "${COMPUTER_USE_LINUX_INDICATOR_BIN:-}" ] && [ -x "$indicator" ]; then
   export COMPUTER_USE_LINUX_INDICATOR_BIN
 fi
 
-exec "$binary" "$@"
+exec "$run_dir/computer-use-linux" "$@"
