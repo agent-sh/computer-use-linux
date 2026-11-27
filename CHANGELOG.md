@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.65] - 2026-11-27
+
 ### Added
 
 - Screenshots come from `grim` ahead of the DBus routes on a Wayland session whose compositor implements wlr-screencopy (Sway, Hyprland, niri, river, labwc) when grim is installed: no consent dialog, nothing written to disk, and exact at fractional scales. `COMPUTER_USE_LINUX_SCREENSHOT_BACKEND=grim` forces it; `doctor` reports `grim` as a screenshot route there. Thanks to [@codelllc09](https://github.com/codelllc09) ([#523](https://github.com/agent-sh/computer-use-linux/pull/523)).
@@ -1312,7 +1314,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.64...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.65...HEAD
+[0.7.65]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.64...v0.7.65
 [0.7.64]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.63...v0.7.64
 [0.7.63]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.62...v0.7.63
 [0.7.62]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.61...v0.7.62
