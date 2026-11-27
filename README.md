@@ -786,12 +786,13 @@ Built on top of:
 
 ## Publishing
 
-Publishing is tag-driven from GitHub Actions. The repository needs these Actions secrets:
+Publishing is tag-driven from GitHub Actions. crates.io needs an Actions secret:
 
 ```bash
 gh secret set CARGO_REGISTRY_TOKEN -R agent-sh/computer-use-linux
-gh secret set NPM_TOKEN -R agent-sh/computer-use-linux
 ```
+
+npm uses trusted publishing, so it needs no token: the package trusts this repository's `ci.yml` (`npm trust github @agent-sh/computer-use-linux --repo agent-sh/computer-use-linux --file ci.yml --allow-publish`).
 
 Then bump the version in the release files listed in [CONTRIBUTING.md](CONTRIBUTING.md#releases), and push a `vX.Y.Z` tag. CI runs the full Rust and MCP safety gates, builds release assets for both architectures, publishes `computer-use-linux` to crates.io, and publishes the npm wrapper after the GitHub release binaries are available.
 

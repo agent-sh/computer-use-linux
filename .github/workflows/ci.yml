@@ -446,8 +446,11 @@ jobs:
     needs: [release-binary]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    env:
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    # npm trusted publishing: the registry accepts this workflow's OIDC
+    # identity, so no long-lived token can expire. It also adds provenance.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -456,7 +459,8 @@ jobs:
           registry-url: https://registry.npmjs.org
       - name: Publish to npm
         run: |
-          test -n "$NODE_AUTH_TOKEN"
+          # OIDC publishing needs npm 11.5.1 or newer.
+          npm install -g npm@^11.5.1
           name="$(node -p "require('./package.json').name")"
           version="$(node -p "require('./package.json').version")"
           test "v$version" = "$GITHUB_REF_NAME"
