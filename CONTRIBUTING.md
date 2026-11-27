@@ -143,7 +143,7 @@ file.
 
 ## Releases
 
-A release takes two commits, because the marketplace serves `main` and every plugin start downloads the version the launcher pins: `main` must never point the plugin at a version without published binaries.
+A release is one commit and a tag push. The marketplace serves `main` and every plugin start downloads the version the launcher pins, so `main` must never point the plugin at a version without published binaries; the tag's run moves the plugin itself once they are up.
 
 1. The release commit, `release: vX.Y.Z`, changes five files:
    - `Cargo.toml` and `Cargo.lock`: the package version.
@@ -152,7 +152,7 @@ A release takes two commits, because the marketplace serves `main` and every plu
    - `CHANGELOG.md`: the `[Unreleased]` entries become the version's section, with its compare link.
 
    Land it, then push the `vX.Y.Z` tag on it. Do not cancel the tag's run; if it fails or is cancelled, rerun it until the release is published.
-2. Once the release is published, `scripts/bump_plugin_version.sh X.Y.Z` points the plugin at it: the launcher's `version=`, `plugins/computer-use-linux/.claude-plugin/plugin.json`, `plugins/computer-use-linux/.codex-plugin/plugin.json` and `.claude-plugin/marketplace.json`. It refuses while any release asset the launcher downloads, or its `.sha256`, is missing. Commit the result as `plugin: point at vX.Y.Z` and land it.
+2. The tag's run points the plugin at the release: once the release assets are uploaded, its `point the plugin at the release` job runs `scripts/bump_plugin_version.sh X.Y.Z` on `main` and pushes the result as `plugin: point at vX.Y.Z`. The script moves the launcher's `version=`, `plugins/computer-use-linux/.claude-plugin/plugin.json`, `plugins/computer-use-linux/.codex-plugin/plugin.json` and `.claude-plugin/marketplace.json`, and refuses while any release asset the launcher downloads, or its `.sha256`, is missing. Run it by hand only if that job failed.
 
 `scripts/check_plugins.sh` fails when the plugin manifests and the launcher disagree or name a version newer than `Cargo.toml`; the `pinned release published` CI check (`scripts/check_release_published.sh`) fails on pull requests and on `main` while the plugin names an unpublished release. CI fails when `package.json` differs from `Cargo.toml`, the MCP safety check fails when the server version does, and the Pi catalog `--check` fails until the catalog is regenerated.
 

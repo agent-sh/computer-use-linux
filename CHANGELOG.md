@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The tag's release run now points the plugin at the new version itself, once the release assets are uploaded, so pushing the tag is the whole release.
+
 ## [0.7.65] - 2026-11-27
 
 ### Added

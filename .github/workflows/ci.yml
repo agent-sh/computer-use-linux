@@ -378,6 +378,46 @@ jobs:
           notes="$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" -f tag_name="${GITHUB_REF_NAME}" --jq .body)"
           gh release edit "${GITHUB_REF_NAME}" -R "${GITHUB_REPOSITORY}" --notes "${notes}"
 
+  # The marketplace serves main, so the plugin may point at a version only once
+  # its assets are published. This job moves it there right after the upload,
+  # so a tag push is the whole release.
+  plugin-pin:
+    name: point the plugin at the release
+    needs: [release-binary]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # The workflow token pushes; a push with it starts no workflow, so the
+      # bump script's own published-release check is the gate here.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Bump the plugin version on main
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          git config user.name "Avi Fenesh"
+          git config user.email "aviarchi1994@gmail.com"
+          for attempt in 1 2 3; do
+            git fetch -q origin main
+            git reset -q --hard origin/main
+            git merge-base --is-ancestor "$GITHUB_SHA" HEAD || { echo "::error::${GITHUB_REF_NAME} is not on main"; exit 1; }
+            current="$(sed -n 's/^version=//p' plugins/computer-use-linux/bin/computer-use-linux)"
+            if [ "$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -n 1)" = "$current" ]; then
+              echo "plugin already points at v$current; nothing to do"
+              exit 0
+            fi
+            scripts/bump_plugin_version.sh "$version"
+            git commit -q -am "plugin: point at v$version"
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "main moved; retrying ($attempt/3)"
+          done
+          exit 1
+
   publish-crate:
     name: publish crate
     needs: [release-binary]
