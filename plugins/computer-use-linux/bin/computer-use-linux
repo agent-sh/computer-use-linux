@@ -9,7 +9,7 @@
 # MCP stream; every message goes to stderr.
 set -eu
 
-version=0.7.65
+version=0.7.66
 
 say() {
   echo "computer-use-linux plugin: $*" >&2
