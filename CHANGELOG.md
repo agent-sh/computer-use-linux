@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.66] - 2026-11-27
+
 ### Changed
 
 - The tag's release run now points the plugin at the new version itself, once the release assets are uploaded, so pushing the tag is the whole release.
@@ -1319,7 +1321,8 @@ Wayland first; X11 best effort through AT-SPI and ydotool. Validated against GNO
   status, extension status, ydotool socket readiness, and portal coverage in
   a single JSON document.
 
-[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.65...HEAD
+[Unreleased]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.66...HEAD
+[0.7.66]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.65...v0.7.66
 [0.7.65]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.64...v0.7.65
 [0.7.64]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.63...v0.7.64
 [0.7.63]: https://github.com/agent-sh/computer-use-linux/compare/v0.7.62...v0.7.63
